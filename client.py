@@ -6,8 +6,8 @@ import requests, webbrowser
 # ===================== AYAR ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
 __version__ = "1.0.0"
-GITHUB_OWNER = "yesnext"
-GITHUB_REPO = "cloud-honeypot-client"
+GITHUB_OWNER = "cevdetaksac"
+GITHUB_REPO = "yesnext-cloud-honeypot-client"
 API_URL = "https://honeypot.yesnext.com.tr/api"
 HONEYPOT_IP = "194.5.236.181"
 HONEYPOT_TUNNEL_PORT = 4443

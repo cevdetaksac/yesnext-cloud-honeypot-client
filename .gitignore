@@ -7,7 +7,7 @@ venv/
 # Build outputs
 build/
 dist/
-*.spec
+!client.spec
 
 # IDE
 .vscode/
@@ -23,4 +23,3 @@ commands.log
 
 # Local certs/keys (do NOT commit)
 certs/
-

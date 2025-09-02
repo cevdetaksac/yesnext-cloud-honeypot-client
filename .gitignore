@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+
+# App runtime
+client.log
+status.json
+token.txt
+consent.json
+settings.json
+commands.log
+
+# Local certs/keys (do NOT commit)
+certs/
+

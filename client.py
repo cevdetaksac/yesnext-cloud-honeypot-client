@@ -5,7 +5,7 @@ import requests, webbrowser
 
 # ===================== AYAR ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO = "yesnext-cloud-honeypot-client"
 API_URL = "https://honeypot.yesnext.com.tr/api"

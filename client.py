@@ -166,6 +166,13 @@ I18N = {
         "info": "Bilgi",
         "warn": "Uyarı",
         "error": "Hata",
+        "startup_title": "Bilgilendirme",
+        "startup_notice": (
+            "Bu uygulama tünel açmak ve saldırı verisi toplamak için ağ bağlantısı kurar.\n\n"
+            "- Windows güvenlik duvarı/Defender bağlantı izni isteyebilir; lütfen izin verin.\n"
+            "- Yönetici (Administrator) yetkisi gereklidir; yetki yoksa uygulama yeniden yönetici olarak açılır.\n\n"
+            "Devam etmek için Tamam'a basın."
+        ),
     },
     "en": {
         "app_title": "Cloud Honeypot Security (Tunnel)",
@@ -226,6 +233,13 @@ I18N = {
         "info": "Info",
         "warn": "Warning",
         "error": "Error",
+        "startup_title": "Notice",
+        "startup_notice": (
+            "This app opens a tunnel and collects attack data, requiring network access.\n\n"
+            "- Windows Firewall/Defender may prompt; please allow the connection.\n"
+            "- Administrator privileges are required; if missing, the app relaunches elevated.\n\n"
+            "Press OK to continue."
+        ),
     },
 }
 
@@ -510,6 +524,36 @@ class CloudHoneypotClient:
         self.ip_entry = None
         self.show_cb = None
 
+    # ---------- First-run notice ---------- #
+    def _read_status_raw(self):
+        try:
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    return d if isinstance(d, dict) else {}
+        except Exception as e:
+            log(f"read status raw error: {e}")
+        return {}
+
+    def _write_status_raw(self, data: dict):
+        try:
+            with open(STATUS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data or {}, f, ensure_ascii=False)
+        except Exception as e:
+            log(f"write status raw error: {e}")
+
+    def first_run_notice(self):
+        try:
+            st = self._read_status_raw()
+            if st.get("first_notice_shown"):
+                return
+            # Show a simple info for firewall and elevation
+            messagebox.showinfo(self.t("startup_title"), self.t("startup_notice"))
+            st["first_notice_shown"] = True
+            self._write_status_raw(st)
+        except Exception as e:
+            log(f"first_run_notice error: {e}")
+
     # ---------- I18N ---------- #
     def t(self, key: str) -> str:
         return I18N.get(self.lang, I18N["tr"]).get(key, key)
@@ -544,11 +588,15 @@ class CloudHoneypotClient:
         try:
             if os.name != "nt":
                 return
+            # Elevate early so user just runs and goes
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                exe = sys.executable
-                params = " ".join([f'"{os.path.abspath(sys.argv[0])}"'] + sys.argv[1:])
-                if exe.lower().endswith(("python.exe", "pythonw.exe")):
-                    params = f'"{os.path.abspath(sys.argv[0])}" ' + " ".join(sys.argv[1:])
+                if getattr(sys, 'frozen', False):
+                    exe = sys.executable
+                    params = " ".join(sys.argv[1:])
+                else:
+                    exe = sys.executable
+                    script = os.path.abspath(sys.argv[0])
+                    params = f'"{script}" ' + " ".join(sys.argv[1:])
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
                 sys.exit(0)
         except Exception as e:
@@ -828,8 +876,10 @@ class CloudHoneypotClient:
     # ---------- Kalıcılık ---------- #
     def write_status(self, active_rows, running=True):
         self.state["selected_rows"] = [(str(a[0]), str(a[1]), str(a[2])) for a in active_rows]
-        with open(STATUS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"active_ports": self.state["selected_rows"], "running": running}, f)
+        data = self._read_status_raw()
+        data["active_ports"] = self.state["selected_rows"]
+        data["running"] = running
+        self._write_status_raw(data)
 
     def read_status(self):
         if not os.path.exists(STATUS_FILE):
@@ -1204,6 +1254,21 @@ del "%~f0" & exit /b 0
 
     # ---------- GUI ---------- #
     def build_gui(self, minimized=False):
+        # One-time notice for simplicity and firewall prompts
+        try:
+            # Ensure root exists before messagebox
+            if not self.root:
+                self.root = tk.Tk()
+                self.root.withdraw()
+                self.root.title(self.t("app_title"))
+            self.first_run_notice()
+            # Continue building actual UI below (root will be reconfigured)
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"build_gui pre-notice error: {e}")
         self.start_single_instance_server()
 
         token = self.load_token()
@@ -1214,7 +1279,13 @@ del "%~f0" & exit /b 0
 
         dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token}"
 
-        self.root = tk.Tk()
+        if not self.root:
+            self.root = tk.Tk()
+        else:
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
         self.root.title(self.t("app_title"))
         self.root.geometry("820x620")
         self.root.configure(bg="#f5f5f5")
@@ -1465,6 +1536,8 @@ if __name__ == "__main__":
     args, _ = parser.parse_known_args()
 
     app = CloudHoneypotClient()
+    # Elevate early to keep UX simple: download & run
+    app.ensure_admin()
 
     if args.daemon:
         app.run_daemon()

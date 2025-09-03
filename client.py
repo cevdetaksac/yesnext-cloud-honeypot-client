@@ -929,7 +929,8 @@ class CloudHoneypotClient:
             '/SC','ONSTART','/RU','SYSTEM',
             '/TR', self.task_command_daemon(), '/F'
         ])
-        run_cmd(['schtasks','/Run','/TN', TASK_NAME_BOOT])
+        # Not running immediately to avoid spawning extra background instances
+        # Task will run on next boot as intended
 
     def install_autostart_user_logon(self):
         user = os.environ.get("USERNAME") or ""

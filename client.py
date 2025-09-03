@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.3.6"
+__version__ = "1.3.7"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -444,16 +444,20 @@ class ServiceController:
         code = ServiceController._sc_query_code(svc_name)
         if code == 1:
             return True
-        try:
-            run_cmd(['sc', 'stop', svc_name], timeout=10)
-        except Exception:
-            pass
-        if ServiceController._wait_state_code(svc_name, 1, timeout):
-            return True
+        # Try sc stop with short retries to avoid 1051 hiccups
+        for _ in range(3):
+            try:
+                res = run_cmd(['sc', 'stop', svc_name], timeout=10)
+            except Exception:
+                res = None
+            if ServiceController._wait_state_code(svc_name, 1, 10):
+                return True
+            time.sleep(2)
         # Fallback PowerShell (bazı durumlarda gerekli)
         try:
-            run_cmd(['powershell', '-NoProfile', '-Command', f'Stop-Service -Name "{svc_name}" -Force -ErrorAction SilentlyContinue'], timeout=15)
-            return ServiceController._wait_state_code(svc_name, 1, 30)
+            run_cmd(['powershell', '-NoProfile', '-Command', f'Stop-Service -Name "{svc_name}" -Force -ErrorAction SilentlyContinue'], timeout=20)
+            if ServiceController._wait_state_code(svc_name, 1, 15):
+                return True
         except Exception:
             pass
         log(f"Service {svc_name} did not stop in time")
@@ -472,11 +476,25 @@ class ServiceController:
             return True
         # Fallback PowerShell
         try:
-            run_cmd(['powershell', '-NoProfile', '-Command', f'Start-Service -Name "{svc_name}" -ErrorAction SilentlyContinue'], timeout=15)
-            return ServiceController._wait_state_code(svc_name, 4, 30)
+            run_cmd(['powershell', '-NoProfile', '-Command', f'Start-Service -Name "{svc_name}" -ErrorAction SilentlyContinue'], timeout=20)
+            return ServiceController._wait_state_code(svc_name, 4, 20)
         except Exception:
             pass
         log(f"Service {svc_name} did not start in time")
+        return False
+
+    @staticmethod
+    def restart(svc_name: str) -> bool:
+        """Best-effort Restart-Service wrapper with wait, avoids UI freezes."""
+        try:
+            run_cmd(['powershell', '-NoProfile', '-Command', f'Restart-Service -Name "{svc_name}" -Force -ErrorAction SilentlyContinue'], timeout=25)
+            if ServiceController._wait_state_code(svc_name, 4, 20):
+                return True
+        except Exception:
+            pass
+        # Fallback: stop+start
+        if ServiceController.stop(svc_name, timeout=20):
+            return ServiceController.start(svc_name, timeout=20)
         return False
 
     @staticmethod
@@ -489,11 +507,7 @@ class ServiceController:
             'netsh','advfirewall','firewall','add','rule', f'name=RDP {new_port}',
             'dir=in','action=allow','protocol=TCP', f'localport={new_port}'
         ])
-        ok_stop = ServiceController.stop('TermService', timeout=60)
-        ok_start = False
-        if ok_stop:
-            ok_start = ServiceController.start('TermService', timeout=60)
-        return ok_stop and ok_start
+        return ServiceController.restart('TermService')
 
 # ===================== TUNNEL THREAD ===================== #
 class TunnelServerThread(threading.Thread):

@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -388,8 +388,9 @@ class ServiceController:
         Dil bağımsız çalışır.
         """
         try:
-            out = subprocess.check_output(['sc', 'query', svc_name], shell=False, stderr=subprocess.STDOUT)
-            txt = out.decode('utf-8', 'ignore')
+            creationflags = 0x08000000 if os.name == 'nt' else 0
+            completed = subprocess.run(['sc', 'query', svc_name], shell=False, capture_output=True, text=True, creationflags=creationflags)
+            txt = (completed.stdout or "")
             for line in txt.splitlines():
                 if 'STATE' in line.upper():
                     # ör: "        STATE              : 4  RUNNING"

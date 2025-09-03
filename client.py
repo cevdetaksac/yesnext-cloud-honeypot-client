@@ -76,13 +76,13 @@ def log(msg):  # kısa alias
     try: LOGGER.info(str(msg))
     except: pass
 
-def run_cmd(cmd):
-    """Güvenli komut çalıştırma (shell=False), stdout/stderr loglar."""
+def run_cmd(cmd, timeout: int = 20):
+    """Güvenli komut çalıştırma (shell=False), stdout/stderr loglar; zaman aşımı ile kilitlenmeyi önler."""
     CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
     try:
         if isinstance(cmd, (list, tuple)):
             cmd_list = list(cmd)
-            cmd_display = " ".join(cmd_list)
+            cmd_display = " ".join(str(x) for x in cmd_list)
         else:
             # string ise system shell'ine değil; cmd/sh ile çağır
             cmd_list = ["cmd", "/c", str(cmd)] if os.name == "nt" else ["/bin/sh", "-lc", str(cmd)]
@@ -93,7 +93,12 @@ def run_cmd(cmd):
             return None
 
         completed = subprocess.run(
-            cmd_list, shell=False, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW
+            cmd_list,
+            shell=False,
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
+            timeout=timeout if timeout and timeout > 0 else None,
         )
         if completed.stdout:
             LOGGER.info(completed.stdout.strip())
@@ -102,6 +107,14 @@ def run_cmd(cmd):
         if completed.returncode != 0:
             LOGGER.error(f"Command exited with code {completed.returncode}")
         return completed
+    except subprocess.TimeoutExpired as te:
+        LOGGER.error(f"Command timeout after {timeout}s: {cmd_display}")
+        try:
+            # Best-effort kill tree on Windows is non-trivial; rely on process timeout handling.
+            pass
+        except Exception:
+            pass
+        return None
     except Exception as e:
         LOGGER.exception(f"run_cmd error: {e}")
         return None
@@ -417,7 +430,7 @@ class ServiceController:
         return -1
 
     @staticmethod
-    def _wait_state_code(svc_name: str, desired_code: int, timeout: int = 60) -> bool:
+    def _wait_state_code(svc_name: str, desired_code: int, timeout: int = 30) -> bool:
         t0 = time.time()
         while time.time() - t0 < timeout:
             code = ServiceController._sc_query_code(svc_name)
@@ -427,19 +440,19 @@ class ServiceController:
         return False
 
     @staticmethod
-    def stop(svc_name: str, timeout: int = 60) -> bool:
+    def stop(svc_name: str, timeout: int = 30) -> bool:
         code = ServiceController._sc_query_code(svc_name)
         if code == 1:
             return True
         try:
-            run_cmd(['sc', 'stop', svc_name])
+            run_cmd(['sc', 'stop', svc_name], timeout=10)
         except Exception:
             pass
         if ServiceController._wait_state_code(svc_name, 1, timeout):
             return True
         # Fallback PowerShell (bazı durumlarda gerekli)
         try:
-            run_cmd(['powershell', '-NoProfile', '-Command', f'Stop-Service -Name "{svc_name}" -Force -ErrorAction SilentlyContinue'])
+            run_cmd(['powershell', '-NoProfile', '-Command', f'Stop-Service -Name "{svc_name}" -Force -ErrorAction SilentlyContinue'], timeout=15)
             return ServiceController._wait_state_code(svc_name, 1, 30)
         except Exception:
             pass
@@ -447,19 +460,19 @@ class ServiceController:
         return False
 
     @staticmethod
-    def start(svc_name: str, timeout: int = 60) -> bool:
+    def start(svc_name: str, timeout: int = 30) -> bool:
         code = ServiceController._sc_query_code(svc_name)
         if code == 4:
             return True
         try:
-            run_cmd(['sc', 'start', svc_name])
+            run_cmd(['sc', 'start', svc_name], timeout=10)
         except Exception:
             pass
         if ServiceController._wait_state_code(svc_name, 4, timeout):
             return True
         # Fallback PowerShell
         try:
-            run_cmd(['powershell', '-NoProfile', '-Command', f'Start-Service -Name "{svc_name}" -ErrorAction SilentlyContinue'])
+            run_cmd(['powershell', '-NoProfile', '-Command', f'Start-Service -Name "{svc_name}" -ErrorAction SilentlyContinue'], timeout=15)
             return ServiceController._wait_state_code(svc_name, 4, 30)
         except Exception:
             pass
@@ -1193,27 +1206,36 @@ del "%~f0" & exit /b 0
             countdown_label.config(text=str(sec))
             popup.after(1000, countdown, sec-1)
 
-        try:
-            if mode == "secure":
-                ok_change = ServiceController.switch_rdp_port(53389)
-            else:
-                ok_change = ServiceController.switch_rdp_port(3389)
-        except Exception as e:
-            messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=e))
-            try: popup.destroy()
-            except: pass
-            return
-
-        if not ok_change:
-            # Likely running under RDP; TermService cannot accept control (1051). Offer reboot.
+        # Port değişimi uzun sürebilir; UI'ı kilitlememek için arka planda çalıştır
+        result = {"ok": False, "err": None}
+        def worker():
             try:
-                if messagebox.askyesno(self.t("warn"), "RDP servisi yeniden başlatılamadı. Değişikliğin uygulanması için sistem yeniden başlatılsın mı? (45 sn)"):
-                    run_cmd(['shutdown','/r','/t','45','/c', 'RDP port ayarı uygulamak için yeniden başlatılıyor'])
-                    try: popup.destroy()
-                    except: pass
-                    return
-            except Exception:
-                pass
+                if mode == "secure":
+                    result["ok"] = ServiceController.switch_rdp_port(53389)
+                else:
+                    result["ok"] = ServiceController.switch_rdp_port(3389)
+            except Exception as e:
+                result["err"] = e
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        # Basit bir progress yazısı
+        prog = tk.Label(popup, text="İşlem sürüyor...", font=("Arial", 10))
+        prog.pack(pady=6)
+
+        def check_done():
+            if result["err"] is not None:
+                messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=result["err"]))
+                try: popup.destroy()
+                except: pass
+                return
+            if result["ok"]:
+                # başarıysa mevcut akışa devam
+                return
+            # henüz bitmediyse tekrar kontrol et
+            popup.after(300, check_done)
+
+        popup.after(300, check_done)
 
         countdown()
         tk.Button(popup, text=self.t("rdp_approve"), command=confirm_success,

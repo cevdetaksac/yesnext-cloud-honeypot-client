@@ -166,6 +166,14 @@ I18N = {
         "info": "Bilgi",
         "warn": "Uyarı",
         "error": "Hata",
+        "menu_info": "Bilgi",
+        "menu_github": "GitHub",
+        "about_title": "Bilgi",
+        "about_fmt": (
+            "Sürüm: {ver}\n"
+            "Log dosyası: {log}\n"
+            "GitHub: {url}"
+        ),
         "startup_title": "Bilgilendirme",
         "startup_notice": (
             "Bu uygulama tünel açmak ve saldırı verisi toplamak için ağ bağlantısı kurar.\n\n"
@@ -233,6 +241,14 @@ I18N = {
         "info": "Info",
         "warn": "Warning",
         "error": "Error",
+        "menu_info": "Info",
+        "menu_github": "GitHub",
+        "about_title": "About",
+        "about_fmt": (
+            "Version: {ver}\n"
+            "Log file: {log}\n"
+            "GitHub: {url}"
+        ),
         "startup_title": "Notice",
         "startup_notice": (
             "This app opens a tunnel and collects attack data, requiring network access.\n\n"
@@ -1260,7 +1276,7 @@ del "%~f0" & exit /b 0
             if not self.root:
                 self.root = tk.Tk()
                 self.root.withdraw()
-                self.root.title(self.t("app_title"))
+                self.root.title(f"{self.t('app_title')} v{__version__}")
             self.first_run_notice()
             # Continue building actual UI below (root will be reconfigured)
             try:
@@ -1286,7 +1302,7 @@ del "%~f0" & exit /b 0
                 self.root.deiconify()
             except Exception:
                 pass
-        self.root.title(self.t("app_title"))
+        self.root.title(f"{self.t('app_title')} v{__version__}")
         self.root.geometry("820x620")
         self.root.configure(bg="#f5f5f5")
 
@@ -1318,6 +1334,21 @@ del "%~f0" & exit /b 0
         menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
 
         menu_help = tk.Menu(menubar, tearoff=0)
+        # Info dialog
+        def open_github():
+            try:
+                webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
+            except Exception as e:
+                log(f"open_github error: {e}")
+        def show_info():
+            try:
+                url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
+                messagebox.showinfo(self.t("about_title"), self.t("about_fmt").format(ver=__version__, log=LOG_FILE, url=url))
+            except Exception as e:
+                log(f"show_info error: {e}")
+        menu_help.add_command(label=self.t("menu_info"), command=show_info)
+        menu_help.add_command(label=self.t("menu_github"), command=open_github)
+        menu_help.add_separator()
         menu_help.add_command(label=self.t("menu_check_updates"), command=self.check_updates_and_prompt)
         menubar.add_cascade(label=self.t("menu_help"), menu=menu_help)
         self.root.config(menu=menubar)

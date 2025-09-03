@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -295,6 +295,7 @@ def install_excepthook():
 # ===================== DPAPI TOKEN STORE ===================== #
 class TokenStore:
     CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
     @staticmethod
     def _crypt_protect(data: bytes) -> bytes:
@@ -303,10 +304,11 @@ class TokenStore:
         crypt32  = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
 
+        flags = TokenStore.CRYPTPROTECT_UI_FORBIDDEN | TokenStore.CRYPTPROTECT_LOCAL_MACHINE
         if not crypt32.CryptProtectData(
             ctypes.byref(ctypes.c_buffer(struct.pack("I", len(data)) + data)),
             None, None, None, None,
-            TokenStore.CRYPTPROTECT_UI_FORBIDDEN,
+            flags,
             ctypes.byref(blob_out)
         ):
             raise RuntimeError("CryptProtectData failed")
@@ -322,10 +324,11 @@ class TokenStore:
         blob_out = ctypes.c_void_p()
         crypt32  = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
+        flags = TokenStore.CRYPTPROTECT_UI_FORBIDDEN | TokenStore.CRYPTPROTECT_LOCAL_MACHINE
         if not crypt32.CryptUnprotectData(
             ctypes.byref(ctypes.c_buffer(struct.pack("I", len(data)) + data)),
             None, None, None, None,
-            TokenStore.CRYPTPROTECT_UI_FORBIDDEN,
+            flags,
             ctypes.byref(blob_out)
         ):
             raise RuntimeError("CryptUnprotectData failed")
@@ -452,7 +455,7 @@ class ServiceController:
         return False
 
     @staticmethod
-    def switch_rdp_port(new_port: int):
+    def switch_rdp_port(new_port: int) -> bool:
         run_cmd([
             'reg','add', r'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp',
             '/v','PortNumber','/t','REG_DWORD','/d', str(new_port), '/f'
@@ -461,8 +464,11 @@ class ServiceController:
             'netsh','advfirewall','firewall','add','rule', f'name=RDP {new_port}',
             'dir=in','action=allow','protocol=TCP', f'localport={new_port}'
         ])
-        ServiceController.stop('TermService', timeout=60)
-        ServiceController.start('TermService', timeout=60)
+        ok_stop = ServiceController.stop('TermService', timeout=60)
+        ok_start = False
+        if ok_stop:
+            ok_start = ServiceController.start('TermService', timeout=60)
+        return ok_stop and ok_start
 
 # ===================== TUNNEL THREAD ===================== #
 class TunnelServerThread(threading.Thread):
@@ -1176,13 +1182,26 @@ del "%~f0" & exit /b 0
             popup.after(1000, countdown, sec-1)
 
         try:
-            if mode == "secure": ServiceController.switch_rdp_port(53389)
-            else: ServiceController.switch_rdp_port(3389)
+            if mode == "secure":
+                ok_change = ServiceController.switch_rdp_port(53389)
+            else:
+                ok_change = ServiceController.switch_rdp_port(3389)
         except Exception as e:
             messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=e))
             try: popup.destroy()
             except: pass
             return
+
+        if not ok_change:
+            # Likely running under RDP; TermService cannot accept control (1051). Offer reboot.
+            try:
+                if messagebox.askyesno(self.t("warn"), "RDP servisi yeniden başlatılamadı. Değişikliğin uygulanması için sistem yeniden başlatılsın mı? (45 sn)"):
+                    run_cmd(['shutdown','/r','/t','45','/c', 'RDP port ayarı uygulamak için yeniden başlatılıyor'])
+                    try: popup.destroy()
+                    except: pass
+                    return
+            except Exception:
+                pass
 
         countdown()
         tk.Button(popup, text=self.t("rdp_approve"), command=confirm_success,

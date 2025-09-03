@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -115,6 +115,7 @@ I18N = {
         "menu_lang_en": "English",
         "menu_help": "Yardım",
         "menu_check_updates": "Güncellemeleri Denetle",
+        "menu_logs": "Logları Aç",
         "update_none": "Güncel sürümü kullanıyorsunuz.",
         "update_found": "Yeni sürüm bulundu: {version}. İndirip yeniden başlatılsın mı?",
         "update_error": "Güncelleme sırasında hata: {err}",
@@ -190,6 +191,7 @@ I18N = {
         "menu_lang_en": "English",
         "menu_help": "Help",
         "menu_check_updates": "Check for Updates",
+        "menu_logs": "Open Logs",
         "update_none": "You are running the latest version.",
         "update_found": "New version available: {version}. Download and restart?",
         "update_error": "Error during update: {err}",
@@ -1039,33 +1041,41 @@ class CloudHoneypotClient:
             if latest_ver <= cur_ver:
                 messagebox.showinfo("Update", self.t("update_none")); return
 
-            assets, asset_exe, asset_sha = data.get("assets", []), None, None
+            # Use onedir ZIP + hashes
+            assets = data.get("assets", [])
+            asset_zip = None
+            asset_hashes = None
             for a in assets:
                 n = str(a.get("name", "")).lower()
-                if n in ("client.exe", "client-windows.exe", "client-signed.exe"):
-                    asset_exe = a.get("browser_download_url")
-                if n.endswith(".sha256"):
-                    asset_sha = a.get("browser_download_url")
-            if not asset_exe:
-                messagebox.showerror("Update", self.t("update_error").format(err="asset not found")); return
+                if n == "client-onedir.zip":
+                    asset_zip = a.get("browser_download_url")
+                if n == "hashes.txt":
+                    asset_hashes = a.get("browser_download_url")
+            if not asset_zip:
+                messagebox.showerror("Update", self.t("update_error").format(err="asset not found (client-onedir.zip)")); return
             if not messagebox.askyesno("Update", self.t("update_found").format(version=latest_ver)):
                 return
 
             tmpdir = tempfile.mkdtemp(prefix="chpupd-")
-            new_path = os.path.join(tmpdir, "client-new.exe")
-            self.http_download(asset_exe, new_path, timeout=60)
-            if asset_sha:
-                sha_path = os.path.join(tmpdir, "client.sha256")
-                self.http_download(asset_sha, sha_path, timeout=30)
+            zip_path = os.path.join(tmpdir, "client-onedir.zip")
+            self.http_download(asset_zip, zip_path, timeout=60)
+            if asset_hashes:
+                sha_path = os.path.join(tmpdir, "hashes.txt")
+                self.http_download(asset_hashes, sha_path, timeout=30)
                 try:
-                    exp  = open(sha_path, 'r', encoding='utf-8', errors='ignore').read().strip().split()[0]
-                    calc = self.sha256_file(new_path)
+                    exp = None
+                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        for line in f:
+                            if 'client-onedir.zip' in line:
+                                exp = line.strip().split()[0]
+                                break
+                    calc = self.sha256_file(zip_path)
                     if exp and calc.lower() != exp.lower():
                         messagebox.showerror("Update", self.t("update_error").format(err="sha256 mismatch"))
                         return
                 except Exception as e:
                     log(f"sha check error: {e}")
-            self.schedule_self_update_and_exit(new_path)
+            self.apply_onedir_update(zip_path)
         except Exception as e:
             log(f"update error: {e}")
             try:
@@ -1099,6 +1109,40 @@ del "%~f0" & exit /b 0
             subprocess.Popen(["cmd", "/c", bat_path], shell=False)
         except Exception as e:
             log(f"schedule update error: {e}")
+        finally:
+            try: os._exit(0)
+            except: sys.exit(0)
+
+    def apply_onedir_update(self, zip_path):
+        try:
+            import zipfile, shutil
+            dest_dir = os.path.dirname(self.current_executable())
+            tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(tmp_extract)
+            # Prepare updater script to copy all files then restart
+            bat_path = os.path.join(dest_dir, "update_onedir.bat")
+            bat = f"""
+@echo off
+setlocal enableextensions
+set SRC="{tmp_extract}"
+set DST="{dest_dir}"
+REM wait a moment to ensure current process exits
+ping 127.0.0.1 -n 3 >NUL
+:copyloop
+robocopy %SRC% %DST% /E /NFL /NDL /NJH /NJS /NP >NUL
+if %ERRORLEVEL% GEQ 8 (
+  ping 127.0.0.1 -n 2 >NUL
+  goto copyloop
+)
+start "" "%DST%\client-onedir.exe" --minimized
+del "%~f0" & exit /b 0
+"""
+            with open(bat_path, 'w', encoding='utf-8') as f:
+                f.write(bat)
+            subprocess.Popen(["cmd", "/c", bat_path], shell=False)
+        except Exception as e:
+            log(f"apply_onedir_update error: {e}")
         finally:
             try: os._exit(0)
             except: sys.exit(0)
@@ -1334,19 +1378,24 @@ del "%~f0" & exit /b 0
         menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
 
         menu_help = tk.Menu(menubar, tearoff=0)
-        # Info dialog
+        # Static version label as disabled entry at the top
+        menu_help.add_command(label=f"Sürüm: v{__version__}" if self.lang == 'tr' else f"Version: v{__version__}", state='disabled')
+        # Logs opener
+        def open_logs():
+            try:
+                if os.name == 'nt':
+                    os.startfile(LOG_FILE)
+                else:
+                    webbrowser.open(f"file://{LOG_FILE}")
+            except Exception as e:
+                log(f"open_logs error: {e}")
+        menu_help.add_command(label=self.t("menu_logs"), command=open_logs)
+        # GitHub opener
         def open_github():
             try:
                 webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
             except Exception as e:
                 log(f"open_github error: {e}")
-        def show_info():
-            try:
-                url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
-                messagebox.showinfo(self.t("about_title"), self.t("about_fmt").format(ver=__version__, log=LOG_FILE, url=url))
-            except Exception as e:
-                log(f"show_info error: {e}")
-        menu_help.add_command(label=self.t("menu_info"), command=show_info)
         menu_help.add_command(label=self.t("menu_github"), command=open_github)
         menu_help.add_separator()
         menu_help.add_command(label=self.t("menu_check_updates"), command=self.check_updates_and_prompt)

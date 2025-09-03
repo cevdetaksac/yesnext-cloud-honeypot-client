@@ -1,5 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 import os, sys, socket, ssl, threading, time, json, subprocess, ctypes, struct, hashlib, tempfile, argparse
+from ctypes import wintypes
 import tkinter as tk
 from tkinter import ttk, messagebox
 import requests, webbrowser, logging
@@ -297,45 +298,56 @@ class TokenStore:
     CRYPTPROTECT_UI_FORBIDDEN = 0x1
     CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+    @staticmethod
+    def _to_blob(b: bytes):
+        buf = ctypes.create_string_buffer(b)
+        blob = TokenStore.DATA_BLOB(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
+        return blob, buf  # keep buf referenced
+
+    @staticmethod
+    def _from_blob(blob) -> bytes:
+        size = int(blob.cbData)
+        ptr = ctypes.cast(blob.pbData, ctypes.POINTER(ctypes.c_byte))
+        return ctypes.string_at(ptr, size)
+
     @staticmethod
     def _crypt_protect(data: bytes) -> bytes:
-        blob_in  = ctypes.c_buffer(data, len(data))
-        blob_out = ctypes.c_void_p()
         crypt32  = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
-
         flags = TokenStore.CRYPTPROTECT_UI_FORBIDDEN | TokenStore.CRYPTPROTECT_LOCAL_MACHINE
-        if not crypt32.CryptProtectData(
-            ctypes.byref(ctypes.c_buffer(struct.pack("I", len(data)) + data)),
-            None, None, None, None,
-            flags,
-            ctypes.byref(blob_out)
-        ):
+        payload = struct.pack("I", len(data)) + data
+        in_blob, in_buf = TokenStore._to_blob(payload)
+        out_blob = TokenStore.DATA_BLOB()
+        if not crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, flags, ctypes.byref(out_blob)):
             raise RuntimeError("CryptProtectData failed")
-        cb = ctypes.cast(blob_out, ctypes.POINTER(ctypes.c_ubyte))
-        size = ctypes.cast(blob_out, ctypes.POINTER(ctypes.c_ulong))[0]
-        out = ctypes.string_at(cb, size)
-        kernel32.LocalFree(blob_out)
+        try:
+            out = TokenStore._from_blob(out_blob)
+        finally:
+            try:
+                kernel32.LocalFree(out_blob.pbData)
+            except Exception:
+                pass
         return out
 
     @staticmethod
     def _crypt_unprotect(data: bytes) -> bytes:
-        blob_in  = ctypes.c_buffer(data, len(data))
-        blob_out = ctypes.c_void_p()
         crypt32  = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
         flags = TokenStore.CRYPTPROTECT_UI_FORBIDDEN | TokenStore.CRYPTPROTECT_LOCAL_MACHINE
-        if not crypt32.CryptUnprotectData(
-            ctypes.byref(ctypes.c_buffer(struct.pack("I", len(data)) + data)),
-            None, None, None, None,
-            flags,
-            ctypes.byref(blob_out)
-        ):
+        in_blob, in_buf = TokenStore._to_blob(data)
+        out_blob = TokenStore.DATA_BLOB()
+        if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, flags, ctypes.byref(out_blob)):
             raise RuntimeError("CryptUnprotectData failed")
-        cb = ctypes.cast(blob_out, ctypes.POINTER(ctypes.c_ubyte))
-        size = ctypes.cast(blob_out, ctypes.POINTER(ctypes.c_ulong))[0]
-        out = ctypes.string_at(cb, size)
-        kernel32.LocalFree(blob_out)
+        try:
+            out = TokenStore._from_blob(out_blob)
+        finally:
+            try:
+                kernel32.LocalFree(out_blob.pbData)
+            except Exception:
+                pass
         return out[4:]  # strip prepended length
 
     @staticmethod

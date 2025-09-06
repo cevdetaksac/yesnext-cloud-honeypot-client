@@ -21,19 +21,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
-      - name: Build
+      - name: Build onedir bundle
         run: |
-          python -m PyInstaller --clean client.spec
-      - name: Hash
-        shell: bash
-        run: |
-          cd dist
-          sha256sum client.exe > client.exe.sha256
+          powershell -ExecutionPolicy Bypass -File scripts/build-onedir.ps1
       - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/client.exe
-            dist/client.exe.sha256
+            dist/client-onedir.zip
+            dist/hashes.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

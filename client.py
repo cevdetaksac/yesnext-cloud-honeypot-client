@@ -5,10 +5,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import requests, webbrowser, logging
 from logging.handlers import RotatingFileHandler
+try:
+    import firewall_agent as FW_AGENT
+except Exception:
+    FW_AGENT = None
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.3.8"
+__version__ = "1.3.9"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -1351,6 +1355,11 @@ del "%~f0" & exit /b 0
         self.state["public_ip"] = self.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        # Start firewall agent in background (Windows/Linux)
+        try:
+            self.start_firewall_agent()
+        except Exception as e:
+            log(f"firewall agent start failed (daemon): {e}")
 
         cons = self.read_consent()
         if not cons.get("accepted"):
@@ -1381,6 +1390,42 @@ del "%~f0" & exit /b 0
             pass
         log("Daemon: durduruldu.")
 
+    # ---------- Firewall Agent ---------- #
+    def start_firewall_agent(self):
+        if FW_AGENT is None:
+            log("firewall_agent module not available; skipping.")
+            return
+        token = self.state.get("token")
+        if not token:
+            log("No token; firewall agent not started.")
+            return
+        # Derive API base root (strip trailing /api if present)
+        base = (API_URL or "").strip().rstrip('/')
+        if base.lower().endswith('/api'):
+            api_base_root = base[:-4]
+        else:
+            api_base_root = base
+        cidr_feed = os.environ.get("CIDR_FEED_BASE", "https://www.ipdeny.com/ipblocks/data/countries")
+
+        def agent_thread():
+            try:
+                agent = FW_AGENT.Agent(
+                    api_base=api_base_root,
+                    token=token,
+                    refresh_interval=int(os.environ.get("REFRESH_INTERVAL_SEC", "10")),
+                    cidr_feed_base=cidr_feed,
+                    logger=LOGGER,
+                )
+                log(f"Firewall agent starting; API_BASE={api_base_root}, FEED={cidr_feed}")
+                agent.run_forever()
+            except Exception as e:
+                log(f"Firewall agent error: {e}")
+
+        # Start once; keep reference if needed
+        if not self.state.get("fw_agent_started"):
+            threading.Thread(target=agent_thread, daemon=True).start()
+            self.state["fw_agent_started"] = True
+
     # ---------- GUI ---------- #
     def build_gui(self, minimized=False):
         # One-time notice for simplicity and firewall prompts
@@ -1405,6 +1450,11 @@ del "%~f0" & exit /b 0
         self.state["public_ip"] = self.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        # Start firewall agent in background
+        try:
+            self.start_firewall_agent()
+        except Exception as e:
+            log(f"firewall agent start failed (gui): {e}")
 
         dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token}"
 

@@ -1831,90 +1831,93 @@ del "%~f0" & exit /b 0
                         self.tree.item(iid, tags=("aktif",))
                         break
 
-        def toggle_checkbox(event):
+        def on_action_click(event):
             col = self.tree.identify_column(event.x)
             if col != "#4": return
             item_id = self.tree.identify_row(event.y)
-            if item_id and self.btn_primary["text"] == self.t("btn_secure"):
-                cur = selected_ports[item_id]
-                selected_ports[item_id] = not cur
-                self.tree.set(item_id, self.t("col_active"), "☑" if selected_ports[item_id] else "☐")
-                self.tree.item(item_id, tags=("aktif",) if selected_ports[item_id] else ())
-        self.tree.bind("<Button-1>", toggle_checkbox)
+            if not item_id: return
+            vals = self.tree.item(item_id).get("values") or []
+            if len(vals) < 4: return
+            p1, p2, servis, act = str(vals[0]), str(vals[1]), str(vals[2]), str(vals[3])
+            if act.lower() == 'start':
+                self.start_single_row(p1, p2, servis)
+            else:
+                self.stop_single_row(p1, p2, servis)
+        self.tree.bind("<Button-1>", on_action_click)
 
-        frame3 = tk.Frame(self.root, bg="#f5f5f5", pady=20)
-        frame3.pack(fill="x")
 
-        # Tek buton
-        self.btn_primary = tk.Button(frame3, text=self.t("btn_secure"), font=("Arial", 13, "bold"),
+
+
+
+
                                      bg="#4CAF50", fg="white", padx=25, pady=12)
         self.btn_primary.pack(side="left", padx=10)
 
-        note = tk.Label(self.root, text=self.t("note_rdp"), font=("Arial", 9), fg="red", bg="#f5f5f5", justify="center")
-        note.pack(pady=5)
 
-        # Buton aksiyonları
-        def finalize_secure(active_rows):
-            for iid in selected_ports.keys():
-                if selected_ports[iid]:
-                    self.tree.item(iid, tags=("aktif",))
-            self.tree.unbind("<Button-1>")
-            self.set_primary_button(self.t("btn_stop"), stop_protection, "#E53935")
-            messagebox.showinfo(self.t("info"), self.t("ok_tunneled").format(n=len(active_rows)))
 
-        def do_secure_ports():
-            cons = self.read_consent()
-            if not cons.get("accepted"):
-                cons = self.ensure_consent_ui()
-                if not cons.get("accepted"):
-                    messagebox.showwarning(self.t("warn"), self.t("warn_no_consent"))
-                    return
-            self.ensure_admin()
-            active_rows = [self.tree.item(iid)["values"][:3] for iid, val in selected_ports.items() if val]
-            if not active_rows:
-                messagebox.showwarning(self.t("warn"), self.t("warn_no_ports"))
-                return
-            if any(str(p[0]) == "3389" for p in active_rows) and cons.get("rdp_move", True):
-                non_rdp = [p for p in active_rows if str(p[0]) != "3389"]
-                def after_rdp():
-                    ok = self.apply_tunnels([("3389","53389","RDP")] + non_rdp)
-                    if ok:
-                        if cons.get("autostart", False):
-                            self.install_autostart_system_boot()
-                            self.install_autostart_user_logon()
-                        finalize_secure([("3389","53389","RDP","☑")] + non_rdp)
-                        self.refresh_attack_count(async_thread=True)
-                self.rdp_move_popup("secure", after_rdp)
-                return
-            ok = self.apply_tunnels(active_rows)
-            if ok:
-                if cons.get("autostart", False):
-                    self.install_autostart_system_boot()
-                    self.install_autostart_user_logon()
-                finalize_secure(active_rows)
-                self.refresh_attack_count(async_thread=True)
 
-        def stop_protection():
-            if not messagebox.askyesno(self.t("warn"), self.t("confirm_stop")):
-                return
-            was_active, _ = self.read_status()
-            def finish_stop():
-                self.remove_tunnels()
-                self.remove_autostart()
-                for iid in selected_ports.keys():
-                    selected_ports[iid] = False
-                    self.tree.set(iid, self.t("col_active"), "☐")
-                    self.tree.item(iid, tags=())
-                self.tree.bind("<Button-1>", toggle_checkbox)
-                self.set_primary_button(self.t("btn_secure"), do_secure_ports, "#4CAF50")
-                messagebox.showinfo(self.t("info"), self.t("stopped_all"))
-                self.refresh_attack_count(async_thread=True)
-            if any(str(p[0]) == "3389" for p in was_active):
-                self.rdp_move_popup("rollback", finish_stop)
-            else:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                 finish_stop()
 
-        self.set_primary_button(self.t("btn_secure"), do_secure_ports, "#4CAF50")
+# per-row actions only
 
         # Tray
         if TRY_TRAY:
@@ -1924,18 +1927,18 @@ del "%~f0" & exit /b 0
 
         # Eski durum otomatik başlasın
         if saved_rows and saved_running:
-            ok = self.apply_tunnels(saved_rows)
-            if ok:
-                self.tree.unbind("<Button-1>")
-                self.set_primary_button(self.t("btn_stop"), stop_protection, "#E53935")
-                if minimized:
-                    self.root.withdraw()
+            for (p1,p2,svc) in saved_rows:
+                try:
+                    self.start_single_row(str(p1), str(p2), str(svc))
+                except Exception:
+                    pass
+            if minimized:
+                self.root.withdraw()
 
-        if minimized:
-            self.root.withdraw()
 
-        def _show_window():
-            try:
+
+
+
                 self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window

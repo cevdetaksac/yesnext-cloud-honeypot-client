@@ -12,7 +12,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.5"
+__version__ = "1.4.6"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -1887,12 +1887,12 @@ del "%~f0" & exit /b 0
                             except Exception:
                                 continue
                             items.append({
+                                "port": int(port) if port.isdigit() else None,
                                 "proto": "TCP",
                                 "addr": addr,
-                                "port": int(port) if port.isdigit() else None,
                                 "state": state.upper(),
-                                "pid": int(pid) if (pid and pid.isdigit()) else None,
                                 "process": None,
+                                "pid": int(pid) if (pid and pid.isdigit()) else None,
                             })
                     else:
                         # UDP lines: Proto LocalAddress ForeignAddress PID  (state missing)
@@ -1904,12 +1904,12 @@ del "%~f0" & exit /b 0
                             except Exception:
                                 continue
                             items.append({
+                                "port": int(port) if port.isdigit() else None,
                                 "proto": "UDP",
                                 "addr": addr,
-                                "port": int(port) if port.isdigit() else None,
                                 "state": "LISTEN",
-                                "pid": int(pid) if (pid and pid.isdigit()) else None,
                                 "process": None,
+                                "pid": int(pid) if (pid and pid.isdigit()) else None,
                             })
         except Exception as e:
             log(f"collect_open_ports error: {e}")

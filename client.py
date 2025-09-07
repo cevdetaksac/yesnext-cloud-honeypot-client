@@ -8,11 +8,11 @@ from logging.handlers import RotatingFileHandler
 try:
     import firewall_agent as FW_AGENT
 except Exception:
-    FW_AGENT = None
+                    pass
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.3.9"
+__version__ = "1.4.1"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -39,7 +39,7 @@ try:
     from pystray import MenuItem as TrayItem
     from PIL import Image, ImageDraw
 except Exception:
-    TRY_TRAY = False
+                    pass
 
 # ===================== UYGULAMA DİZİNİ ===================== #
 def appdata_dir() -> str:
@@ -54,6 +54,7 @@ CONSENT_FILE    = os.path.join(appdata_dir(), "consent.json")
 STATUS_FILE     = os.path.join(appdata_dir(), "status.json")
 TOKEN_FILE_NEW  = os.path.join(appdata_dir(), "token.dat")  # DPAPI ile şifreli
 TOKEN_FILE_OLD  = "token.txt"  # eski düz metin (migrasyon için)
+WATCHDOG_TOKEN_FILE = os.path.join(appdata_dir(), "watchdog.token")
 
 # ===================== LOGGING ===================== #
 def init_logging():
@@ -80,7 +81,7 @@ def log(msg):  # kısa alias
     try: LOGGER.info(str(msg))
     except: pass
 
-def run_cmd(cmd, timeout: int = 20):
+def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False):
     """Güvenli komut çalıştırma (shell=False), stdout/stderr loglar; zaman aşımı ile kilitlenmeyi önler."""
     CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
     try:
@@ -101,6 +102,8 @@ def run_cmd(cmd, timeout: int = 20):
             shell=False,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='ignore',
             creationflags=CREATE_NO_WINDOW,
             timeout=timeout if timeout and timeout > 0 else None,
         )
@@ -108,7 +111,7 @@ def run_cmd(cmd, timeout: int = 20):
             LOGGER.info(completed.stdout.strip())
         if completed.stderr:
             LOGGER.warning(completed.stderr.strip())
-        if completed.returncode != 0:
+        if completed.returncode != 0 and not suppress_rc_log:
             LOGGER.error(f"Command exited with code {completed.returncode}")
         return completed
     except subprocess.TimeoutExpired as te:
@@ -135,14 +138,14 @@ def firewall_allow_exists_tcp_port(port: int) -> bool:
             "Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'TCP' -and $_.LocalPort -eq $p };"
             "if ($r) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
         )
-        res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=10)
+        res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=10, suppress_rc_log=True)
         if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', '') and 'FOUND' in res.stdout:
             return True
     except Exception:
         pass
     # Fallback best-effort using netsh output (may be localized; ignore failures)
     try:
-        res = run_cmd(['netsh','advfirewall','firewall','show','rule','name=all'], timeout=15)
+        res = run_cmd(['netsh','advfirewall','firewall','show','rule','name=all'], timeout=15, suppress_rc_log=True)
         if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', ''):
             txt = res.stdout.lower()
             if ('localport' in txt) and (str(int(port)) in txt):
@@ -163,6 +166,85 @@ def ensure_firewall_allow_for_port(port: int, rule_name: str = None):
         'netsh','advfirewall','firewall','add','rule', f'name={name}',
         'dir=in','action=allow','protocol=TCP', f'localport={int(port)}'
     ])
+
+# ===================== WATCHDOG HELPERS ===================== #
+def write_watchdog_token(value: str):
+    try:
+        with open(WATCHDOG_TOKEN_FILE, 'w', encoding='utf-8') as f:
+            f.write(value.strip())
+    except Exception:
+        pass
+
+def read_watchdog_token() -> str:
+    try:
+        return open(WATCHDOG_TOKEN_FILE, 'r', encoding='utf-8').read().strip()
+    except Exception:
+        return ''
+
+def is_process_running_windows(pid: int) -> bool:
+    if os.name != 'nt':
+        return False
+    try:
+        # Use direct invocation to preserve /FI argument correctly
+        res = run_cmd(['tasklist','/FI', f'PID eq {pid}','/FO','CSV','/NH'], timeout=10, suppress_rc_log=True)
+        if res and res.stdout:
+            return any(str(pid) in line for line in (res.stdout or '').splitlines())
+    except Exception:
+        pass
+    return False
+
+def start_watchdog_if_needed():
+    if os.name != 'nt':
+        return
+    try:
+        if os.environ.get('CHP_WATCHDOG') == '1':
+            return
+        # Mark active to ensure restarts unless user allows exit
+        write_watchdog_token('active')
+        argv = []
+        if getattr(sys, 'frozen', False):
+            argv = [sys.executable, '--watchdog', str(os.getpid())]
+        else:
+            argv = [sys.executable, os.path.abspath(sys.argv[0]), '--watchdog', str(os.getpid())]
+        env = os.environ.copy(); env['CHP_WATCHDOG'] = '1'
+        subprocess.Popen(argv, shell=False, env=env)
+    except Exception as e:
+        log(f"start_watchdog error: {e}")
+
+def watchdog_main(parent_pid: int):
+    attempts = 0
+    max_attempts = 5
+    while attempts < max_attempts:
+        time.sleep(5)
+        tok = read_watchdog_token()
+        if tok.lower() == 'stop':
+            return
+        # Parent alive?
+        alive = is_process_running_windows(int(parent_pid))
+        if alive:
+            continue
+        # Grace period for updater to relaunch (batch starts new exe)
+        time.sleep(10)
+        # If already relaunched by updater, exit
+        # Best-effort: if any process named our exe exists, just continue waiting
+        try:
+            exe_name = os.path.basename(sys.executable)
+            res = run_cmd(['tasklist','/FI', f'IMAGENAME eq {exe_name}','/FO','CSV','/NH'], timeout=10, suppress_rc_log=True)
+            if res and exe_name.lower() in (res.stdout or '').lower():
+                continue
+        except Exception:
+            pass
+        # Relaunch
+        try:
+            attempts += 1
+            if getattr(sys, 'frozen', False):
+                subprocess.Popen([sys.executable], shell=False)
+            else:
+                subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])], shell=False)
+        except Exception:
+            pass
+    # Give up after attempts
+    return
 
 # ===================== I18N & AYARLAR ===================== #
 I18N = {
@@ -194,6 +276,11 @@ I18N = {
         "col_active": "Aktif",
         "btn_secure": "Güvene Al",
         "btn_stop": "Korumayı Durdur",
+        "btn_row_start": "Başlat",
+        "btn_row_stop": "Durdur",
+        "status": "Durum",
+        "status_running": "Çalışıyor",
+        "status_stopped": "Durduruldu",
         "warn_no_ports": "Hiçbir port seçmediniz!",
         "ok_tunneled": "{n} port tünellendi!",
         "stopped_all": "Tüm korumalar kaldırıldı.",
@@ -270,6 +357,11 @@ I18N = {
         "col_active": "Active",
         "btn_secure": "Secure",
         "btn_stop": "Stop Protection",
+        "btn_row_start": "Start",
+        "btn_row_stop": "Stop",
+        "status": "Status",
+        "status_running": "Running",
+        "status_stopped": "Stopped",
         "warn_no_ports": "No ports selected!",
         "ok_tunneled": "{n} ports secured!",
         "stopped_all": "All protections have been removed.",
@@ -344,6 +436,21 @@ def install_excepthook():
         try:
             import traceback
             LOGGER.error("UNHANDLED EXCEPTION:\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+            # Attempt self-restart once to behave like a resilient service
+            try:
+                if not os.environ.get('CHP_RELAUNCHED'):
+                    env = os.environ.copy(); env['CHP_RELAUNCHED'] = '1'
+                    exe = sys.executable if getattr(sys, 'frozen', False) else sys.executable
+                    argv = [exe]
+                    if getattr(sys, 'frozen', False):
+                        # PyInstaller onefile/onedir: executable already the app
+                        pass
+                    else:
+                        argv.append(os.path.abspath(sys.argv[0]))
+                    argv += sys.argv[1:]
+                    subprocess.Popen(argv, shell=False, env=env)
+            except Exception:
+                pass
         except Exception:
             pass
     try:
@@ -494,7 +601,7 @@ class ServiceController:
             try:
                 res = run_cmd(['sc', 'stop', svc_name], timeout=10)
             except Exception:
-                res = None
+                    pass
             if ServiceController._wait_state_code(svc_name, 1, 10):
                 return True
             time.sleep(2)
@@ -555,7 +662,7 @@ class ServiceController:
         except Exception:
             pass
         run_cmd([
-            'reg','add', r'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp',
+            'reg','add', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp',
             '/v','PortNumber','/t','REG_DWORD','/d', str(new_port), '/f'
         ])
         # Only add firewall allow if not already present (avoid duplicates on 3389/53389)
@@ -866,7 +973,7 @@ class CloudHoneypotClient:
             try:
                 conn, _ = sock.accept()
             except Exception:
-                break
+                    pass
             try:
                 conn.settimeout(2.0)
                 buf = b""
@@ -1194,7 +1301,7 @@ class CloudHoneypotClient:
                         return
                 except Exception as e:
                     log(f"sha check error: {e}")
-            self.apply_onedir_update(zip_path)
+            self.apply_onedir_update(zip_path, minimized=True)
         except Exception as e:
             log(f"update error: {e}")
             try:
@@ -1202,13 +1309,58 @@ class CloudHoneypotClient:
             except Exception:
                 pass
 
+
+    def check_updates_and_apply_silent(self):
+        try:
+            api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+            data = self.http_get_json(api, timeout=8)
+            latest_tag = data.get("tag_name") or data.get("name")
+            if not latest_tag:
+                return
+            latest_ver = str(latest_tag).lstrip('v')
+            cur_ver    = str(__version__).lstrip('v')
+            if latest_ver <= cur_ver:
+                return
+            # Assets
+            assets = data.get("assets", [])
+            asset_zip = None
+            asset_hashes = None
+            for a in assets:
+                n = str(a.get("name", "")).lower()
+                if n == "client-onedir.zip":
+                    asset_zip = a.get("browser_download_url")
+                if n == "hashes.txt":
+                    asset_hashes = a.get("browser_download_url")
+            if not asset_zip:
+                return
+            tmpdir = tempfile.mkdtemp(prefix="chpupd-")
+            zip_path = os.path.join(tmpdir, "client-onedir.zip")
+            self.http_download(asset_zip, zip_path, timeout=60)
+            if asset_hashes:
+                sha_path = os.path.join(tmpdir, "hashes.txt")
+                self.http_download(asset_hashes, sha_path, timeout=30)
+                try:
+                    exp = None
+                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        for line in f:
+                            if 'client-onedir.zip' in line:
+                                exp = line.strip().split()[0]
+                                break
+                    calc = self.sha256_file(zip_path)
+                    if exp and calc.lower() != exp.lower():
+                        return
+                except Exception as e:
+                    log(f"sha check silent error: {e}")
+            self.apply_onedir_update(zip_path)
+        except Exception as e:
+            log(f"update silent error: {e}")
     def schedule_self_update_and_exit(self, new_exe_path):
         try:
             cur = self.current_executable()
             target = cur
             up_dir = os.path.dirname(cur)
             bat_path = os.path.join(up_dir, "update_run.bat")
-            bat = f"""
+            bat = rf"""
 @echo off
 setlocal enableextensions
 set NEWEXE="{new_exe_path}"
@@ -1232,9 +1384,10 @@ del "%~f0" & exit /b 0
             try: os._exit(0)
             except: sys.exit(0)
 
-    def apply_onedir_update(self, zip_path):
+    def apply_onedir_update(self, zip_path, minimized=False):
         try:
             import zipfile, shutil
+            MIN = ("--minimized" if minimized else "")
             dest_dir = os.path.dirname(self.current_executable())
             tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
             with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -1254,7 +1407,7 @@ if %ERRORLEVEL% GEQ 8 (
   ping 127.0.0.1 -n 2 >NUL
   goto copyloop
 )
-start "" "%DST%\client-onedir.exe" --minimized
+            start "" "%DST%\\client-onedir.exe" {MIN}
 del "%~f0" & exit /b 0
 """
             with open(bat_path, 'w', encoding='utf-8') as f:
@@ -1372,7 +1525,7 @@ del "%~f0" & exit /b 0
                     "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;"
                     "if ($l) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
                 )
-                res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8)
+                res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8, suppress_rc_log=True)
                 if res and getattr(res, 'returncode', 1) == 0 and getattr(res, 'stdout', '').find('FOUND') >= 0:
                     return True
         except Exception:
@@ -1387,7 +1540,7 @@ del "%~f0" & exit /b 0
         except OSError:
             return True
         except Exception:
-            return False
+                    pass
 
     def _find_tree_item(self, listen_port: str, service_name: str):
         try:
@@ -1400,11 +1553,39 @@ del "%~f0" & exit /b 0
         return None
 
     def _update_row_ui(self, listen_port: str, service_name: str, active: bool):
-        iid = self._find_tree_item(listen_port, service_name)
-        if not iid:
-            return
-        self.tree.set(iid, self.t("col_active"), "Stop" if active else "Start")
-        self.tree.item(iid, tags=("aktif",) if active else ())
+        def apply():
+            # Prefer new stacked UI controls
+            try:
+                key = (str(listen_port), str(service_name).upper())
+                rc = getattr(self, 'row_controls', {}).get(key)
+                if rc:
+                    btn = rc.get("button"); fr = rc.get("frame"); st = rc.get("status")
+                    if active:
+                        if btn: btn.config(text=self.t('btn_row_stop'), bg="#E53935")
+                        if fr: fr.configure(bg="#EEF7EE")
+                        if st: st.config(text=f"{self.t('status')}: {self.t('status_running')}")
+                    else:
+                        if btn: btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
+                        if fr: fr.configure(bg="#ffffff")
+                        if st: st.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
+                    return
+            except Exception:
+                pass
+            # Fallback to legacy tree view if present
+            try:
+                iid = self._find_tree_item(listen_port, service_name)
+                if iid:
+                    self.tree.set(iid, self.t("col_active"), "Stop" if active else "Start")
+                    self.tree.item(iid, tags=("aktif",) if active else ())
+            except Exception:
+                pass
+        try:
+            if self.root:
+                self.root.after(0, apply)
+                return
+        except Exception:
+            pass
+        apply()
 
     def _active_rows_from_servers(self):
         rows = []
@@ -1429,7 +1610,7 @@ del "%~f0" & exit /b 0
             try:
                 cur = ServiceController.get_rdp_port()
             except Exception:
-                cur = None
+                    pass
             if cur and int(cur) == 53389:
                 st = TunnelServerThread(self, listen_port, service)
                 st.start(); time.sleep(0.15)
@@ -1540,6 +1721,11 @@ del "%~f0" & exit /b 0
             if self.state["running"]:
                 messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first"))
                 return
+            # allow watchdog to stop
+            try:
+                write_watchdog_token('stop')
+            except Exception:
+                pass
             icon.stop()
             if self.root:
                 self.root.destroy()
@@ -1547,10 +1733,18 @@ del "%~f0" & exit /b 0
             os._exit(0)
 
         self.show_cb = show_cb
-        icon.menu = (
-            TrayItem(self.t('tray_show'), lambda: show_cb()),
-            TrayItem(self.t('tray_exit'), lambda: exit_cb())
-        )
+        try:
+            menu = pystray.Menu(
+                TrayItem(self.t('tray_show'), lambda: show_cb(), default=True),
+                TrayItem(self.t('tray_exit'), lambda: exit_cb())
+            )
+            icon.menu = menu
+        except Exception:
+            # Fallback: simple menu assignment
+            icon.menu = (
+                TrayItem(self.t('tray_show'), lambda: show_cb()),
+                TrayItem(self.t('tray_exit'), lambda: exit_cb())
+            )
         icon.run()
 
     def update_tray_icon(self):
@@ -1567,6 +1761,17 @@ del "%~f0" & exit /b 0
             except: pass
             self.state["ctrl_sock"] = None
 
+    # ---------- Update Watchdog (hourly) ---------- #
+    def update_watchdog_loop(self):
+        while True:
+            try:
+                # 3600 seconds
+                for _ in range(360):
+                    time.sleep(10)
+                self.check_updates_and_apply_silent()
+            except Exception as e:
+                log(f"update_watchdog_loop error: {e}")
+
     # ---------- Daemon ---------- #
     def run_daemon(self):
         self.state["token"] = self.load_token()
@@ -1578,6 +1783,16 @@ del "%~f0" & exit /b 0
             self.start_firewall_agent()
         except Exception as e:
             log(f"firewall agent start failed (daemon): {e}")
+        # Start external watchdog
+        try:
+            start_watchdog_if_needed()
+        except Exception as e:
+            log(f"watchdog start error: {e}")
+        # Hourly update checker
+        try:
+            threading.Thread(target=self.update_watchdog_loop, daemon=True).start()
+        except Exception as e:
+            log(f"update watchdog thread error: {e}")
 
         cons = self.read_consent()
         if not cons.get("accepted"):
@@ -1673,6 +1888,16 @@ del "%~f0" & exit /b 0
             self.start_firewall_agent()
         except Exception as e:
             log(f"firewall agent start failed (gui): {e}")
+        # Start external watchdog
+        try:
+            start_watchdog_if_needed()
+        except Exception as e:
+            log(f"watchdog start error: {e}")
+        # Hourly update checker
+        try:
+            threading.Thread(target=self.update_watchdog_loop, daemon=True).start()
+        except Exception as e:
+            log(f"update watchdog thread error: {e}")
 
         dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token}"
 
@@ -1741,10 +1966,11 @@ del "%~f0" & exit /b 0
 
         # Kapatma → tray
         def on_close():
-            if TRY_TRAY:
+            # Always minimize to tray; app keeps running in background
+            try:
                 self.root.withdraw()
-            else:
-                self.root.withdraw()
+            except Exception:
+                pass
         self.root.protocol("WM_DELETE_WINDOW", on_close)
 
         style = ttk.Style()
@@ -1803,55 +2029,71 @@ del "%~f0" & exit /b 0
         frame2 = tk.LabelFrame(self.root, text=self.t("port_tunnel"), padx=10, pady=10, bg="#f5f5f5", font=("Arial", 11, "bold"))
         frame2.pack(fill="both", expand=True, padx=15, pady=10)
 
-        columns = (self.t("col_listen"), self.t("col_new"), self.t("col_service"), self.t("col_active"))
-        self.tree = ttk.Treeview(frame2, columns=columns, show="headings", height=len(self.PORT_TABLOSU))
-        self.tree.pack(fill="x")
-
-        for col in columns:
-            self.tree.heading(col, text=col); self.tree.column(col, anchor="center", width=170)
-
-        self.tree.tag_configure("aktif", background="#C8E6C9")
-
-        selected_ports = {}
-        self.state["selected_ports_map"] = selected_ports
-        row_ids = []
-        for (p1, p2, servis) in self.PORT_TABLOSU:
-            iid = self.tree.insert("", "end", values=(p1, p2, servis, "☐"))
-            selected_ports[iid] = False
-            row_ids.append((iid, p1, p2, servis))
-
-        # Önceki seçimleri uygula
+        # Stacked per-row controls (better UX than table cell clicks)
+        self.row_controls = {}
         saved_rows, saved_running = self.read_status()
+
+        def make_row(parent, p1, p2, servis):
+            fr = tk.Frame(parent, bg="#ffffff", padx=8, pady=8, highlightbackground="#ddd", highlightthickness=1)
+            fr.pack(fill="x", pady=6)
+            # Columns grow: make the middle space flexible so the button sticks right
+            try:
+                fr.grid_columnconfigure(2, weight=1)
+            except Exception:
+                pass
+            # Labels
+            tk.Label(fr, text=f"{self.t('col_service')}: {servis}", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
+            tk.Label(fr, text=f"{self.t('col_listen')}: {p1}", bg="#ffffff", anchor="w").grid(row=1, column=0, sticky="w")
+            tk.Label(fr, text=f"{self.t('col_new')}: {p2}", bg="#ffffff", anchor="w").grid(row=1, column=1, sticky="w", padx=10)
+            # Status label
+            status_lbl = tk.Label(fr, text=f"{self.t('status')}: {self.t('status_stopped')}", bg="#ffffff", anchor="w")
+            status_lbl.grid(row=1, column=2, sticky="w", padx=10)
+            # Button (right aligned)
+            btn = tk.Button(fr, text=self.t('btn_row_start'), bg="#4CAF50", fg="white", padx=18, pady=6, font=("Arial", 10, "bold"))
+
+            def toggle():
+                cur = btn["text"].lower()
+                if cur == self.t('btn_row_start').lower():
+                    if self.start_single_row(str(p1), str(p2), str(servis)):
+                        btn.config(text=self.t('btn_row_stop'), bg="#E53935")
+                        fr.configure(bg="#EEF7EE")
+                        status_lbl.config(text=f"{self.t('status')}: {self.t('status_running')}")
+                else:
+                    if self.stop_single_row(str(p1), str(p2), str(servis)):
+                        btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
+                        fr.configure(bg="#ffffff")
+                        status_lbl.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
+
+            btn.config(command=toggle)
+            btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=10)
+            self.row_controls[(str(p1), str(servis).upper())] = {"frame": fr, "button": btn, "status": status_lbl}
+
+        for (p1, p2, servis) in self.PORT_TABLOSU:
+            make_row(frame2, p1, p2, servis)
+
+        # Apply previous state to UI
         if saved_rows:
-            for iid, p1, p2, servis in row_ids:
-                for sr in saved_rows:
-                    if str(sr[0]) == str(p1) and str(sr[2]).upper() == str(servis).upper():
-                        selected_ports[iid] = True
-                        self.tree.set(iid, self.t("col_active"), "☑")
-                        self.tree.item(iid, tags=("aktif",))
-                        break
+            for (sp1, sp2, ssvc) in saved_rows:
+                key = (str(sp1), str(ssvc).upper())
+                rc = self.row_controls.get(key)
+                if rc:
+                    rc["button"].config(text=self.t('btn_row_stop'), bg="#E53935")
+                    rc["frame"].configure(bg="#EEF7EE")
+                    rc["status"].config(text=f"{self.t('status')}: {self.t('status_running')}")
 
-        def on_action_click(event):
-            col = self.tree.identify_column(event.x)
-            if col != "#4": return
-            item_id = self.tree.identify_row(event.y)
-            if not item_id: return
-            vals = self.tree.item(item_id).get("values") or []
-            if len(vals) < 4: return
-            p1, p2, servis, act = str(vals[0]), str(vals[1]), str(vals[2]), str(vals[3])
-            if act.lower() == 'start':
-                self.start_single_row(p1, p2, servis)
-            else:
-                self.stop_single_row(p1, p2, servis)
-        self.tree.bind("<Button-1>", on_action_click)
+        # Optional silent auto-update on startup if configured and no active tunnels
+        try:
+            if os.environ.get('AUTO_UPDATE_SILENT') == '1':
+                if not self.state.get('servers'):
+                    self.check_updates_and_apply_silent()
+        except Exception as e:
+            log(f"auto-update silent error: {e}")
 
 
 
 
 
 
-                                     bg="#4CAF50", fg="white", padx=25, pady=12)
-        self.btn_primary.pack(side="left", padx=10)
 
 
 
@@ -1915,9 +2157,9 @@ del "%~f0" & exit /b 0
 
 
 
-                finish_stop()
 
-# per-row actions only
+
+        # per-row actions only
 
         # Tray
         if TRY_TRAY:
@@ -1935,10 +2177,8 @@ del "%~f0" & exit /b 0
             if minimized:
                 self.root.withdraw()
 
-
-
-
-
+        def _show_window():
+            try:
                 self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
@@ -1953,7 +2193,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--minimized", action="store_true")
+    parser.add_argument("--watchdog", type=int, default=None)
     args, _ = parser.parse_known_args()
+
+    if args.watchdog is not None:
+        watchdog_main(args.watchdog)
+        sys.exit(0)
 
     app = CloudHoneypotClient()
     # Elevate early to keep UX simple: download & run
@@ -1964,3 +2209,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app.build_gui(minimized=args.minimized)
+

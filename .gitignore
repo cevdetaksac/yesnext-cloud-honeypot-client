@@ -20,6 +20,11 @@ token.txt
 consent.json
 settings.json
 commands.log
+err.txt
+upload.err
+upload.json
+out.json
+pre.txt
 
 # Local certs/keys (do NOT commit)
 certs/

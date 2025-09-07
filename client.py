@@ -123,6 +123,47 @@ def run_cmd(cmd, timeout: int = 20):
         LOGGER.exception(f"run_cmd error: {e}")
         return None
 
+# ===================== WINDOWS FIREWALL HELPERS ===================== #
+def firewall_allow_exists_tcp_port(port: int) -> bool:
+    """Checks if an inbound allow firewall rule exists for given TCP local port (Windows only)."""
+    if os.name != 'nt':
+        return False
+    try:
+        ps = (
+            f"$p={int(port)};"
+            "$r = Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow | "
+            "Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'TCP' -and $_.LocalPort -eq $p };"
+            "if ($r) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
+        )
+        res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=10)
+        if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', '') and 'FOUND' in res.stdout:
+            return True
+    except Exception:
+        pass
+    # Fallback best-effort using netsh output (may be localized; ignore failures)
+    try:
+        res = run_cmd(['netsh','advfirewall','firewall','show','rule','name=all'], timeout=15)
+        if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', ''):
+            txt = res.stdout.lower()
+            if ('localport' in txt) and (str(int(port)) in txt):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_firewall_allow_for_port(port: int, rule_name: str = None):
+    """Ensure an inbound allow rule exists for TCP port; add if missing (Windows only)."""
+    if os.name != 'nt':
+        return
+    if firewall_allow_exists_tcp_port(port):
+        return
+    name = rule_name or (f"RDP {port}" if str(port) in ('3389','53389') else f"Allow Port {port}")
+    run_cmd([
+        'netsh','advfirewall','firewall','add','rule', f'name={name}',
+        'dir=in','action=allow','protocol=TCP', f'localport={int(port)}'
+    ])
+
 # ===================== I18N & AYARLAR ===================== #
 I18N = {
     "tr": {
@@ -507,10 +548,11 @@ class ServiceController:
             'reg','add', r'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp',
             '/v','PortNumber','/t','REG_DWORD','/d', str(new_port), '/f'
         ])
-        run_cmd([
-            'netsh','advfirewall','firewall','add','rule', f'name=RDP {new_port}',
-            'dir=in','action=allow','protocol=TCP', f'localport={new_port}'
-        ])
+        # Only add firewall allow if not already present (avoid duplicates on 3389/53389)
+        try:
+            ensure_firewall_allow_for_port(int(new_port), rule_name=f"RDP {new_port}")
+        except Exception as e:
+            log(f"firewall allow check/add failed for port {new_port}: {e}")
         return ServiceController.restart('TermService')
 
 # ===================== TUNNEL THREAD ===================== #

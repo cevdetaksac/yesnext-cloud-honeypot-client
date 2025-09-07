@@ -12,7 +12,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"

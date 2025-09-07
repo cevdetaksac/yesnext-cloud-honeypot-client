@@ -285,7 +285,7 @@ I18N = {
         "ok_tunneled": "{n} port tünellendi!",
         "stopped_all": "Tüm korumalar kaldırıldı.",
         "confirm_stop": "Tüm korumaları durdurmak istediğinize emin misiniz?",
-        "note_rdp": "Not: RDP korumayı seçtiğinizde 45 sn içinde yeni porttan bağlanıp onay verin.",
+        "note_rdp": "Not: RDP korumayı seçtiğinizde 60 sn içinde yeni porttan bağlanıp onay verin.",
         "tray_show": "Göster",
         "tray_exit": "Çıkış",
         "tray_warn_stop_first": "Önce Korumayı Durdur.",
@@ -303,8 +303,8 @@ I18N = {
         "consent_cancel": "Vazgeç",
         "warn_no_consent": "İşlem iptal edildi: Onay verilmedi.",
         "rdp_title": "RDP İşlemi",
-        "rdp_go_secure": "RDP portunuz 53389'a taşınacak.\n45 saniye içinde yeni porttan bağlanın.\nAksi halde eski porta dönülecek.",
-        "rdp_rollback": "RDP portunuz 3389'a geri taşınacak.\n45 saniye içinde eski porttan bağlanın.\nAksi halde yeni port aktif kalacak.",
+        "rdp_go_secure": "RDP portunuz 53389'a taşınacak.\n60 saniye içinde yeni porttan bağlanın.\nAksi halde eski porta dönülecek.",
+        "rdp_rollback": "RDP portunuz 3389'a geri taşınacak.\n60 saniye içinde eski porttan bağlanın.\nAksi halde yeni port aktif kalacak.",
         "rdp_approve": "Onaylıyorum",
         "rollback_done": "Port {port} geri yüklendi.",
         "err_rdp": "RDP ayarlanamadı: {e}",
@@ -366,7 +366,7 @@ I18N = {
         "ok_tunneled": "{n} ports secured!",
         "stopped_all": "All protections have been removed.",
         "confirm_stop": "Are you sure you want to stop all protections?",
-        "note_rdp": "Note: When securing RDP, connect via the new port within 45s and confirm.",
+        "note_rdp": "Note: When securing RDP, connect via the new port within 60s and confirm.",
         "tray_show": "Show",
         "tray_exit": "Exit",
         "tray_warn_stop_first": "Stop Protection first.",
@@ -384,8 +384,8 @@ I18N = {
         "consent_cancel": "Cancel",
         "warn_no_consent": "Cancelled: No consent.",
         "rdp_title": "RDP Operation",
-        "rdp_go_secure": "RDP will be moved to 53389.\nReconnect within 45s.\nOtherwise rollback to old port.",
-        "rdp_rollback": "RDP will be moved back to 3389.\nReconnect within 45s.\nOtherwise keep new port.",
+        "rdp_go_secure": "RDP will be moved to 53389.\nReconnect within 60s.\nOtherwise rollback to old port.",
+        "rdp_rollback": "RDP will be moved back to 3389.\nReconnect within 60s.\nOtherwise keep new port.",
         "rdp_approve": "I Confirm",
         "rollback_done": "Port {port} restored.",
         "err_rdp": "RDP operation failed: {e}",
@@ -1425,7 +1425,7 @@ del "%~f0" & exit /b 0
         popup.title(self.t("rdp_title"))
         msg = self.t("rdp_go_secure") if mode=="secure" else self.t("rdp_rollback")
         tk.Label(popup, text=msg, font=("Arial", 11), justify="center").pack(padx=20, pady=15)
-        countdown_label = tk.Label(popup, text="45", font=("Arial", 20, "bold"), fg="red")
+        countdown_label = tk.Label(popup, text="60", font=("Arial", 20, "bold"), fg="red")
         countdown_label.pack()
 
         def rollback(port_):
@@ -1437,7 +1437,7 @@ del "%~f0" & exit /b 0
             popup.destroy()
             on_confirm()
 
-        def countdown(sec=45):
+        def countdown(sec=60):
             if sec <= 0:
                 if mode == "secure": rollback(3389)
                 else: rollback(53389)
@@ -2174,6 +2174,11 @@ del "%~f0" & exit /b 0
                     self.start_single_row(str(p1), str(p2), str(svc))
                 except Exception:
                     pass
+            # Tray ikonunu açık yeşile güncelle (aktif)
+            try:
+                self.update_tray_icon()
+            except Exception:
+                pass
             if minimized:
                 self.root.withdraw()
 
@@ -2209,4 +2214,5 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app.build_gui(minimized=args.minimized)
+
 

@@ -12,7 +12,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -1377,7 +1377,12 @@ del "%~f0" & exit /b 0
 """
             with open(bat_path, 'w', encoding='utf-8') as f:
                 f.write(bat)
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False)
+            try:
+                write_watchdog_token('stop')
+            except Exception:
+                pass
+            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
+            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             log(f"schedule update error: {e}")
         finally:
@@ -1412,7 +1417,12 @@ del "%~f0" & exit /b 0
 """
             with open(bat_path, 'w', encoding='utf-8') as f:
                 f.write(bat)
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False)
+            try:
+                write_watchdog_token('stop')
+            except Exception:
+                pass
+            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
+            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             log(f"apply_onedir_update error: {e}")
         finally:
@@ -1430,8 +1440,20 @@ del "%~f0" & exit /b 0
 
         def rollback(port_):
             ServiceController.switch_rdp_port(port_)
-            messagebox.showwarning(self.t("warn"), self.t("rollback_done").format(port=port_))
-            popup.destroy()
+            try:
+                messagebox.showwarning(self.t("warn"), self.t("rollback_done").format(port=port_))
+            except Exception:
+                pass
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            # If rollback flow timed out and we reverted back to 53389, ensure tunnel is re-opened
+            if mode == "rollback" and str(port_) == '53389':
+                try:
+                    self.start_single_row('3389','53389','RDP')
+                except Exception:
+                    pass
 
         def confirm_success():
             popup.destroy()
@@ -1666,19 +1688,20 @@ del "%~f0" & exit /b 0
         service = str(service)
         # RDP rollback flow
         if service.upper() == 'RDP' and listen_port == '3389':
-            def after_rb():
-                st = self.state["servers"].pop(int(listen_port), None)
-                try:
-                    if st: st.stop()
-                except Exception:
-                    pass
-                self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
-                if not self.state["servers"]:
-                    self.state["running"] = False
-                    self.send_heartbeat_once("offline")
-                self.update_tray_icon()
-                self._update_row_ui(listen_port, service, False)
-            self.rdp_move_popup("rollback", after_rb)
+            # First stop the existing RDP tunnel on 3389 to free the port and avoid forwarding during transition
+            st = self.state["servers"].pop(int(listen_port), None)
+            try:
+                if st: st.stop()
+            except Exception:
+                pass
+            self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
+            if not self.state["servers"]:
+                self.state["running"] = False
+                self.send_heartbeat_once("offline")
+            self.update_tray_icon()
+            self._update_row_ui(listen_port, service, False)
+            # Then run rollback popup which will switch the RDP port; if timeout reverts to 53389, it will re-open the tunnel
+            self.rdp_move_popup("rollback", lambda: None)
             return True
         # Non-RDP stop
         st = self.state["servers"].pop(int(listen_port), None)

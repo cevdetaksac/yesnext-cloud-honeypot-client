@@ -12,7 +12,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.4"
+__version__ = "1.4.5"
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -759,6 +759,7 @@ class CloudHoneypotClient:
             "selected_rows": [],   # [('3389','53389','RDP'), ...]
             "selected_ports_map": None,  # iid -> bool
             "ctrl_sock": None,
+            "reconciliation_paused": False,
         }
         self.root = None
         self.btn_primary = None
@@ -766,6 +767,8 @@ class CloudHoneypotClient:
         self.attack_entry = None
         self.ip_entry = None
         self.show_cb = None
+        # remote mgmt cache
+        self.state["remote_desired"] = {}
 
     # ---------- First-run notice ---------- #
     def _read_status_raw(self):
@@ -1433,74 +1436,95 @@ del "%~f0" & exit /b 0
     def rdp_move_popup(self, mode, on_confirm):
         popup = tk.Toplevel(self.root)
         popup.title(self.t("rdp_title"))
-        msg = self.t("rdp_go_secure") if mode=="secure" else self.t("rdp_rollback")
+        msg = self.t("rdp_go_secure") if mode == "secure" else self.t("rdp_rollback")
         tk.Label(popup, text=msg, font=("Arial", 11), justify="center").pack(padx=20, pady=15)
-        countdown_label = tk.Label(popup, text="60", font=("Arial", 20, "bold"), fg="red")
-        countdown_label.pack()
 
-        def rollback(port_):
-            ServiceController.switch_rdp_port(port_)
+        status_frame = tk.Frame(popup)
+        status_frame.pack(pady=6)
+
+        prog_label = tk.Label(status_frame, text="İşlem sürüyor...", font=("Arial", 10))
+        prog_label.pack()
+
+        countdown_label = tk.Label(status_frame, text="", font=("Arial", 20, "bold"), fg="red")
+
+        confirm_button = tk.Button(popup, text=self.t("rdp_approve"), command=lambda: None,
+                                   bg="#cccccc", fg="white", padx=15, pady=5, state="disabled")
+        confirm_button.pack(pady=10)
+
+        countdown_id = [None]
+
+        def do_rollback():
+            if countdown_id[0]:
+                try:
+                    popup.after_cancel(countdown_id[0])
+                except Exception:
+                    pass
+
+            rollback_port = 3389 if mode == "secure" else 53389
+            log(f"Zaman aşımı veya iptal. RDP portu {rollback_port} portuna geri alınıyor.")
+            ServiceController.switch_rdp_port(rollback_port)
+
             try:
-                messagebox.showwarning(self.t("warn"), self.t("rollback_done").format(port=port_))
+                messagebox.showwarning(self.t("warn"), self.t("rollback_done").format(port=rollback_port))
             except Exception:
                 pass
+
+            if mode == "rollback" and rollback_port == 53389:
+                threading.Thread(target=self.start_single_row, args=('3389', '53389', 'RDP', False), daemon=True).start()
+
             try:
                 popup.destroy()
             except Exception:
                 pass
-            # If rollback flow timed out and we reverted back to 53389, ensure tunnel is re-opened
-            if mode == "rollback" and str(port_) == '53389':
+
+        def do_confirm():
+            if countdown_id[0]:
                 try:
-                    self.start_single_row('3389','53389','RDP')
+                    popup.after_cancel(countdown_id[0])
+                except Exception:
+                    pass
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            on_confirm()
+
+        confirm_button.config(command=do_confirm)
+
+        def countdown(sec=60):
+            if sec < 0:
+                do_rollback()
+                return
+            countdown_label.config(text=str(sec))
+            countdown_id[0] = popup.after(1000, countdown, sec - 1)
+
+        def worker():
+            try:
+                new_port = 53389 if mode == "secure" else 3389
+                log(f"RDP portu {new_port} olarak değiştiriliyor...")
+
+                ok = ServiceController.switch_rdp_port(new_port)
+
+                if not ok:
+                    raise RuntimeError("Servis yeniden başlatılamadı veya port değiştirilemedi.")
+
+                log(f"RDP portu başarıyla {new_port} olarak değiştirildi. Kullanıcı onayı bekleniyor.")
+
+                prog_label.pack_forget()
+                countdown_label.pack()
+                confirm_button.config(state="normal", bg="#4CAF50")
+                countdown()
+
+            except Exception as e:
+                log(f"RDP port değiştirme hatası: {e}")
+                try:
+                    messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=e))
+                    popup.destroy()
                 except Exception:
                     pass
 
-        def confirm_success():
-            popup.destroy()
-            on_confirm()
-
-        def countdown(sec=60):
-            if sec <= 0:
-                if mode == "secure": rollback(3389)
-                else: rollback(53389)
-                return
-            countdown_label.config(text=str(sec))
-            popup.after(1000, countdown, sec-1)
-
-        # Port değişimi uzun sürebilir; UI'ı kilitlememek için arka planda çalıştır
-        result = {"ok": False, "err": None}
-        def worker():
-            try:
-                if mode == "secure":
-                    result["ok"] = ServiceController.switch_rdp_port(53389)
-                else:
-                    result["ok"] = ServiceController.switch_rdp_port(3389)
-            except Exception as e:
-                result["err"] = e
-
         threading.Thread(target=worker, daemon=True).start()
-
-        # Basit bir progress yazısı
-        prog = tk.Label(popup, text="İşlem sürüyor...", font=("Arial", 10))
-        prog.pack(pady=6)
-
-        def check_done():
-            if result["err"] is not None:
-                messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=result["err"]))
-                try: popup.destroy()
-                except: pass
-                return
-            if result["ok"]:
-                # başarıysa mevcut akışa devam
-                return
-            # henüz bitmediyse tekrar kontrol et
-            popup.after(300, check_done)
-
-        popup.after(300, check_done)
-
-        countdown()
-        tk.Button(popup, text=self.t("rdp_approve"), command=confirm_success,
-                  bg="#4CAF50", fg="white", padx=15, pady=5).pack(pady=10)
+        popup.protocol("WM_DELETE_WINDOW", do_rollback)
 
     # ---------- Uygulama kontrol ---------- #
     def apply_tunnels(self, selected_rows):
@@ -1620,56 +1644,69 @@ del "%~f0" & exit /b 0
             pass
         return rows
 
-    def start_single_row(self, p1: str, p2: str, service: str) -> bool:
+    def start_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
         try:
             self.ensure_admin()
         except Exception:
             pass
         listen_port = str(p1)
-        service = str(service)
-        # RDP special flow
-        if service.upper() == 'RDP' and listen_port == '3389':
-            try:
-                cur = ServiceController.get_rdp_port()
-            except Exception:
-                    pass
-            if cur and int(cur) == 53389:
-                st = TunnelServerThread(self, listen_port, service)
-                st.start(); time.sleep(0.15)
-                if st.is_alive():
-                    self.state["servers"][int(listen_port)] = st
-                    self.write_status(self._active_rows_from_servers(), running=True)
-                    self.state["running"] = True
-                    self.update_tray_icon(); self.send_heartbeat_once("online")
-                    self._update_row_ui(listen_port, service, True)
-                    return True
-                return False
-            # need secure popup flow
-            cons = self.read_consent()
-            if not cons.get("accepted"):
-                cons = self.ensure_consent_ui()
-                if not cons.get("accepted"):
-                    return False
-            if not cons.get("rdp_move", True):
+        service_upper = str(service).upper()
+
+        if service_upper == 'RDP' and listen_port == '3389':
+            if manual_action:
+                log("Manuel RDP güvenli port başlatma akışı tetiklendi.")
+
+                def on_rdp_confirm():
+                    log("RDP port geçişi kullanıcı tarafından onaylandı.")
+                    st = TunnelServerThread(self, listen_port, service)
+                    st.start()
+                    time.sleep(0.15)
+                    if st.is_alive():
+                        self.state["servers"][int(listen_port)] = st
+                        self.write_status(self._active_rows_from_servers(), running=True)
+                        self.state["running"] = True
+                        self.update_tray_icon()
+                        self.send_heartbeat_once("online")
+                        self._update_row_ui(listen_port, service, True)
+                        self.state["remote_desired"][service_upper] = "started"
+                        threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'start', p2), daemon=True).start()
+                    else:
+                        log("Kullanıcı onayından sonra tünel başlatılamadı.")
+
+                self.rdp_move_popup(mode="secure", on_confirm=on_rdp_confirm)
+                return True
+            else: # API-driven
+                log("API tarafından RDP güvenli port başlatma akışı tetiklendi.")
                 try:
-                    messagebox.showwarning(self.t("warn"), "RDP secure move is disabled in consent")
-                except Exception:
-                    pass
-                return False
-            def after_rdp():
-                ok = self.start_single_row('3389', '53389', 'RDP')
-                if not ok:
-                    try: messagebox.showerror(self.t("error"), "Failed to start RDP tunnel after secure move")
-                    except: pass
-            self.rdp_move_popup("secure", after_rdp)
-            return False
-        # Non-RDP: warn if port in use
+                    if ServiceController.get_rdp_port() != 53389:
+                        if not ServiceController.switch_rdp_port(53389):
+                            log("API akışı: RDP portu 53389'a değiştirilemedi.")
+                            return False
+                    
+                    st = TunnelServerThread(self, listen_port, service)
+                    st.start(); time.sleep(0.15)
+                    if st.is_alive():
+                        self.state["servers"][int(listen_port)] = st
+                        self.write_status(self._active_rows_from_servers(), running=True)
+                        self.state["running"] = True
+                        self.update_tray_icon(); self.send_heartbeat_once("online")
+                        self._update_row_ui(listen_port, service, True)
+                        self.state["remote_desired"][service_upper] = "started"
+                        threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'start', p2), daemon=True).start()
+                        return True
+                    return False
+                except Exception as e:
+                    log(f"API RDP başlatma hatası: {e}")
+                    return False
+
+        # Non-RDP flow
         if self.is_port_in_use(int(listen_port)):
             try:
                 if not messagebox.askyesno(self.t("warn"), f"Port {listen_port} seems to be in use by a service. Continue?"):
                     return False
             except Exception:
                 pass
+        
         st = TunnelServerThread(self, listen_port, service)
         st.start(); time.sleep(0.15)
         if st.is_alive():
@@ -1678,44 +1715,310 @@ del "%~f0" & exit /b 0
             self.state["running"] = True
             self.update_tray_icon(); self.send_heartbeat_once("online")
             self._update_row_ui(listen_port, service, True)
+            self.state["remote_desired"][service_upper] = "started"
+            threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'start', p2), daemon=True).start()
             return True
+        
         try: messagebox.showerror(self.t("error"), "Port is busy or cannot be listened.")
         except: pass
         return False
 
-    def stop_single_row(self, p1: str, p2: str, service: str) -> bool:
+    def stop_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
         listen_port = str(p1)
-        service = str(service)
-        # RDP rollback flow
-        if service.upper() == 'RDP' and listen_port == '3389':
-            # First stop the existing RDP tunnel on 3389 to free the port and avoid forwarding during transition
+        service_upper = str(service).upper()
+
+        if service_upper == 'RDP' and listen_port == '3389':
+            # Stop the tunnel thread first
             st = self.state["servers"].pop(int(listen_port), None)
-            try:
-                if st: st.stop()
-            except Exception:
-                pass
-            self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
-            if not self.state["servers"]:
-                self.state["running"] = False
-                self.send_heartbeat_once("offline")
-            self.update_tray_icon()
-            self._update_row_ui(listen_port, service, False)
-            # Then run rollback popup which will switch the RDP port; if timeout reverts to 53389, it will re-open the tunnel
-            self.rdp_move_popup("rollback", lambda: None)
-            return True
+            if st:
+                try:
+                    st.stop()
+                except Exception:
+                    pass
+            
+            if manual_action:
+                log("Manuel RDP güvenli port durdurma akışı tetiklendi.")
+                def on_rdp_confirm_rollback():
+                    log("RDP port geri alma işlemi kullanıcı tarafından onaylandı.")
+                    self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
+                    if not self.state["servers"]:
+                        self.state["running"] = False
+                        self.send_heartbeat_once("offline")
+                    self.update_tray_icon()
+                    self._update_row_ui(listen_port, service, False)
+                    self.state["remote_desired"][service_upper] = "stopped"
+                    threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'stop', p2), daemon=True).start()
+
+                self.rdp_move_popup(mode="rollback", on_confirm=on_rdp_confirm_rollback)
+                return True
+            else: # API-driven
+                log("API tarafından RDP güvenli port durdurma akışı tetiklendi.")
+                try:
+                    if ServiceController.get_rdp_port() != 3389:
+                        if not ServiceController.switch_rdp_port(3389):
+                            log("API akışı: RDP portu 3389'a geri alınamadı.")
+                            # We still return True because the tunnel is stopped.
+                    
+                    self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
+                    if not self.state["servers"]:
+                        self.state["running"] = False
+                        self.send_heartbeat_once("offline")
+                    self.update_tray_icon()
+                    self._update_row_ui(listen_port, service, False)
+                    self.state["remote_desired"][service_upper] = "stopped"
+                    threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'stop', p2), daemon=True).start()
+                    return True
+                except Exception as e:
+                    log(f"API RDP durdurma hatası: {e}")
+                    return False
+
         # Non-RDP stop
         st = self.state["servers"].pop(int(listen_port), None)
-        try:
-            if st: st.stop()
-        except Exception:
-            pass
-        self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
+        if st:
+            try:
+                st.stop()
+            except Exception:
+                pass
+        
+        self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
         if not self.state["servers"]:
             self.state["running"] = False
             self.send_heartbeat_once("offline")
         self.update_tray_icon()
         self._update_row_ui(listen_port, service, False)
+        self.state["remote_desired"][service_upper] = "stopped"
+        threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'stop', p2), daemon=True).start()
         return True
+
+    def report_tunnel_status_once(self):
+        try:
+            token = self.state.get('token')
+            if not token:
+                return
+            statuses = []
+            # Determine running flags by servers map
+            order = [("RDP",3389), ("MSSQL",1433), ("MYSQL",3306), ("FTP",21), ("SSH",22)]
+            for svc, lp in order:
+                running = self._is_service_running(lp, svc)
+                st = 'started' if running else 'stopped'
+                newp = 53389 if svc=='RDP' and ServiceController.get_rdp_port()==53389 else None
+                statuses.append({
+                    'service': svc,
+                    'status': st,
+                    'listen_port': lp,
+                    'new_port': newp,
+                })
+            payload = { 'token': token, 'statuses': statuses }
+            r = requests.post(f"{API_URL}/agent/tunnel-status", json=payload, timeout=8)
+            if r.status_code != 200:
+                log(f"tunnel-status HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            log(f"report_tunnel_status_once err: {e}")
+
+    def report_tunnel_action_to_api(self, service: str, action: str, new_port: str or int = None):
+        log(f"API'ye eylem bildiriliyor: servis={service}, eylem={action}")
+        try:
+            token = self.state.get('token')
+            if not token:
+                return
+
+            payload = {
+                "token": token,
+                "service": service.upper(),
+                "action": action, # 'start' or 'stop'
+            }
+            if new_port and str(new_port) != '-':
+                payload['new_port'] = int(str(new_port))
+
+            url = f"{API_URL}/premium/tunnel-set"
+            r = requests.post(url, json=payload, timeout=8)
+            if r.status_code == 200:
+                log(f"API eylem bildirimi başarılı: {service} {action}")
+            else:
+                log(f"API eylem bildirimi hatası: HTTP {r.status_code} - {r.text[:120]}")
+        except Exception as e:
+            log(f"report_tunnel_action_to_api hatası: {e}")
+
+    def report_tunnel_action_to_api(self, service: str, action: str, new_port: str or int = None):
+        log(f"API'ye eylem bildiriliyor: servis={service}, eylem={action}")
+        try:
+            token = self.state.get('token')
+            if not token:
+                return
+
+            payload = {
+                "token": token,
+                "service": service.upper(),
+                "action": action, # 'start' or 'stop'
+            }
+            if new_port and str(new_port) != '-':
+                payload['new_port'] = int(str(new_port))
+
+            url = f"{API_URL}/premium/tunnel-set"
+            r = requests.post(url, json=payload, timeout=8)
+            if r.status_code == 200:
+                log(f"API eylem bildirimi başarılı: {service} {action}")
+            else:
+                log(f"API eylem bildirimi hatası: HTTP {r.status_code} - {r.text[:120]}")
+        except Exception as e:
+            log(f"report_tunnel_action_to_api hatası: {e}")
+
+    # ---------- Remote management helpers ---------- #
+    def _collect_open_ports_windows(self):
+        items = []
+        try:
+            for proto in ("TCP", "UDP"):
+                cmd = ["netstat", "-ano", "-p", proto]
+                res = run_cmd(cmd, timeout=10, suppress_rc_log=True)
+                if not res or res.returncode != 0:
+                    continue
+                for line in (res.stdout or "").splitlines():
+                    L = line.split()
+                    if not L:
+                        continue
+                    if proto == "TCP":
+                        # TCP lines: Proto LocalAddress ForeignAddress State PID
+                        if len(L) >= 5 and L[0].upper()=="TCP":
+                            local = L[1]
+                            state = L[3]
+                            pid = L[4] if len(L) >= 5 else None
+                            try:
+                                addr, port = local.rsplit(":", 1)
+                            except Exception:
+                                continue
+                            items.append({
+                                "proto": "TCP",
+                                "addr": addr,
+                                "port": int(port) if port.isdigit() else None,
+                                "state": state.upper(),
+                                "pid": int(pid) if (pid and pid.isdigit()) else None,
+                                "process": None,
+                            })
+                    else:
+                        # UDP lines: Proto LocalAddress ForeignAddress PID  (state missing)
+                        if len(L) >= 4 and L[0].upper()=="UDP":
+                            local = L[1]
+                            pid = L[-1]
+                            try:
+                                addr, port = local.rsplit(":", 1)
+                            except Exception:
+                                continue
+                            items.append({
+                                "proto": "UDP",
+                                "addr": addr,
+                                "port": int(port) if port.isdigit() else None,
+                                "state": "LISTEN",
+                                "pid": int(pid) if (pid and pid.isdigit()) else None,
+                                "process": None,
+                            })
+        except Exception as e:
+            log(f"collect_open_ports error: {e}")
+        # Keep only listening-like entries and with valid port
+        out = []
+        for it in items:
+            try:
+                if it.get("port") and (it.get("state") in ("LISTEN", "LISTENING", "LISTEN-DRAIN", "ESTABLISHED") or it.get("proto")=="UDP"):
+                    out.append(it)
+            except Exception:
+                pass
+        return out
+
+    def report_open_ports_once(self):
+        try:
+            token = self.state.get("token")
+            if not token:
+                return
+            ports = self._collect_open_ports_windows() if os.name == 'nt' else []
+            payload = {"token": token, "ports": ports}
+            r = requests.post(f"{API_URL}/agent/open-ports", json=payload, timeout=8)
+            if r.status_code != 200:
+                log(f"open-ports HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            log(f"report_open_ports_once err: {e}")
+
+    def report_open_ports_loop(self):
+        while True:
+            try:
+                self.report_open_ports_once()
+            except Exception as e:
+                log(f"report_open_ports_loop err: {e}")
+            time.sleep(60)
+
+    def _normalize_service(self, s: str) -> str:
+        s = (s or '').upper()
+        if s == 'MYSQL':
+            return 'MySQL'
+        return s
+
+    def _is_service_running(self, listen_port: int, service_name: str) -> bool:
+        try:
+            st = self.state["servers"].get(int(listen_port))
+            if not st:
+                return False
+            return str(st.service_name or '').upper() == str(service_name or '').upper()
+        except Exception:
+            return False
+
+    def reconcile_remote_tunnels_loop(self):
+        log("Uzaktan yönetim döngüsü başlatıldı.")
+        while True:
+            try:
+                if self.state.get("reconciliation_paused"):
+                    time.sleep(5)
+                    continue
+
+                token = self.state.get("token")
+                if not token:
+                    time.sleep(15)
+                    continue
+                # pull desired
+                url = f"{API_URL}/premium/tunnel-status"
+                r = requests.get(url, params={"token": token}, timeout=8)
+                if r.status_code != 200:
+                    time.sleep(15)
+                    continue
+                data = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
+                if data:
+                    log(f"API'den hedef durum alındı: {data}")
+
+                # expected: { 'RDP': {listen_port:3389, desired:'started'|'stopped', new_port:53389}, ... }
+                order = [("RDP",3389), ("MSSQL",1433), ("MYSQL",3306), ("FTP",21), ("SSH",22)]
+                for svc_u, lp in order:
+                    entry = data.get(svc_u)
+                    if not isinstance(entry, dict):
+                        continue
+                    desired = (entry.get('desired') or 'stopped').lower()
+                    running = self._is_service_running(lp, svc_u)
+                    prev = self.state["remote_desired"].get(svc_u)
+                    if prev == desired and ((desired=='started' and running) or (desired=='stopped' and not running)):
+                        continue
+
+                    if desired == 'started' and not running:
+                        log(f"API komutu: '{svc_u}' servisi başlatılıyor.")
+                        try:
+                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != 53389:
+                                ServiceController.switch_rdp_port(53389)
+                            newp = entry.get('new_port') or (53389 if svc_u=='RDP' else '-')
+                            self.start_single_row(str(lp), str(newp), self._normalize_service(svc_u))
+                        except Exception as e:
+                            log(f"remote start {svc_u} err: {e}")
+                    elif desired == 'stopped' and running:
+                        log(f"API komutu: '{svc_u}' servisi durduruluyor.")
+                        try:
+                            self.stop_single_row(str(lp), str(entry.get('new_port') or '-'), self._normalize_service(svc_u))
+                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != 3389:
+                                ServiceController.switch_rdp_port(3389)
+                        except Exception as e:
+                            log(f"remote stop {svc_u} err: {e}")
+                    self.state["remote_desired"][svc_u] = desired
+                # push current status back so dashboard sees up-to-date state
+                try:
+                    self.report_tunnel_status_once()
+                except Exception:
+                    pass
+            except Exception as e:
+                log(f"reconcile_remote_tunnels err: {e}")
+            time.sleep(15)
 
     # ---------- Tray ---------- #
     def tray_make_image(self, active):
@@ -1801,6 +2104,15 @@ del "%~f0" & exit /b 0
         self.state["public_ip"] = self.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        # Remote management: report open ports + reconcile desired tunnels
+        try:
+            threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
+        except Exception as e:
+            log(f"open ports reporter start failed: {e}")
+        try:
+            threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
+        except Exception as e:
+            log(f"remote tunnels loop start failed: {e}")
         # Start firewall agent in background (Windows/Linux)
         try:
             self.start_firewall_agent()
@@ -1906,6 +2218,15 @@ del "%~f0" & exit /b 0
         self.state["public_ip"] = self.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        # Remote management: report open ports + reconcile desired tunnels
+        try:
+            threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
+        except Exception as e:
+            log(f"open ports reporter start failed: {e}")
+        try:
+            threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
+        except Exception as e:
+            log(f"remote tunnels loop start failed: {e}")
         # Start firewall agent in background
         try:
             self.start_firewall_agent()
@@ -2075,17 +2396,36 @@ del "%~f0" & exit /b 0
             btn = tk.Button(fr, text=self.t('btn_row_start'), bg="#4CAF50", fg="white", padx=18, pady=6, font=("Arial", 10, "bold"))
 
             def toggle():
-                cur = btn["text"].lower()
-                if cur == self.t('btn_row_start').lower():
-                    if self.start_single_row(str(p1), str(p2), str(servis)):
-                        btn.config(text=self.t('btn_row_stop'), bg="#E53935")
-                        fr.configure(bg="#EEF7EE")
-                        status_lbl.config(text=f"{self.t('status')}: {self.t('status_running')}")
-                else:
-                    if self.stop_single_row(str(p1), str(p2), str(servis)):
-                        btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
-                        fr.configure(bg="#ffffff")
-                        status_lbl.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
+                is_rdp = (str(servis).upper() == 'RDP')
+
+                if is_rdp:
+                    self.state['reconciliation_paused'] = True
+                    log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
+
+                try:
+                    cur = btn["text"].lower()
+                    if cur == self.t('btn_row_start').lower():
+                        # Pass manual_action=True for GUI-initiated actions
+                        if self.start_single_row(str(p1), str(p2), str(servis), manual_action=True):
+                            # For non-RDP, the UI updates instantly.
+                            # For RDP, the popup handles the flow, but we can preemptively update the UI.
+                            if not is_rdp:
+                                btn.config(text=self.t('btn_row_stop'), bg="#E53935")
+                                fr.configure(bg="#EEF7EE")
+                                status_lbl.config(text=f"{self.t('status')}: {self.t('status_running')}")
+                    else:
+                        # Pass manual_action=True for GUI-initiated actions
+                        if self.stop_single_row(str(p1), str(p2), str(servis), manual_action=True):
+                            if not is_rdp:
+                                btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
+                                fr.configure(bg="#ffffff")
+                                status_lbl.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
+                finally:
+                    if is_rdp:
+                        self.state['reconciliation_paused'] = False
+                        log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
+                        # Immediately report the new status to the API
+                        threading.Thread(target=self.report_tunnel_status_once, daemon=True).start()
 
             btn.config(command=toggle)
             btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=10)

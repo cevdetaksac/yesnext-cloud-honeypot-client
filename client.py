@@ -544,8 +544,18 @@ class ServiceController:
 
     @staticmethod
     def switch_rdp_port(new_port: int) -> bool:
+        try:
+            cur = ServiceController.get_rdp_port()
+            if cur and int(cur) == int(new_port):
+                try:
+                    ensure_firewall_allow_for_port(int(new_port), rule_name=f"RDP {new_port}")
+                except Exception as e:
+                    log(f"firewall allow check/add failed for port {new_port}: {e}")
+                return True
+        except Exception:
+            pass
         run_cmd([
-            'reg','add', r'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp',
+            'reg','add', r'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp',
             '/v','PortNumber','/t','REG_DWORD','/d', str(new_port), '/f'
         ])
         # Only add firewall allow if not already present (avoid duplicates on 3389/53389)
@@ -554,6 +564,22 @@ class ServiceController:
         except Exception as e:
             log(f"firewall allow check/add failed for port {new_port}: {e}")
         return ServiceController.restart('TermService')
+
+    @staticmethod
+    def get_rdp_port() -> int or None:
+        if os.name != 'nt':
+            return None
+        try:
+            import winreg as _wr
+            key = _wr.OpenKey(_wr.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp")
+            val, typ = _wr.QueryValueEx(key, "PortNumber")
+            _wr.CloseKey(key)
+            if isinstance(val, int):
+                return val
+        except Exception as e:
+            log(f"get_rdp_port error: {e}")
+        return None
 
 # ===================== TUNNEL THREAD ===================== #
 class TunnelServerThread(threading.Thread):
@@ -1336,6 +1362,156 @@ del "%~f0" & exit /b 0
             self.write_status(self.state.get("selected_rows", []), running=False)
         except: pass
         self.send_heartbeat_once("offline")
+
+    # ---------- Per-row helpers ---------- #
+    def is_port_in_use(self, port: int) -> bool:
+        try:
+            if os.name == 'nt':
+                ps = (
+                    f"$p={int(port)};"
+                    "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;"
+                    "if ($l) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
+                )
+                res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8)
+                if res and getattr(res, 'returncode', 1) == 0 and getattr(res, 'stdout', '').find('FOUND') >= 0:
+                    return True
+        except Exception:
+            pass
+        # Fallback cross-platform bind test
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", int(port)))
+            s.close()
+            return False
+        except OSError:
+            return True
+        except Exception:
+            return False
+
+    def _find_tree_item(self, listen_port: str, service_name: str):
+        try:
+            for iid in self.tree.get_children(""):
+                vals = self.tree.item(iid).get("values") or []
+                if len(vals) >= 3 and str(vals[0]) == str(listen_port) and str(vals[2]).upper() == str(service_name).upper():
+                    return iid
+        except Exception:
+            pass
+        return None
+
+    def _update_row_ui(self, listen_port: str, service_name: str, active: bool):
+        iid = self._find_tree_item(listen_port, service_name)
+        if not iid:
+            return
+        self.tree.set(iid, self.t("col_active"), "Stop" if active else "Start")
+        self.tree.item(iid, tags=("aktif",) if active else ())
+
+    def _active_rows_from_servers(self):
+        rows = []
+        try:
+            for (p1, p2, svc) in self.PORT_TABLOSU:
+                lp = int(str(p1))
+                if self.state["servers"].get(lp):
+                    rows.append((str(p1), str(p2), str(svc)))
+        except Exception:
+            pass
+        return rows
+
+    def start_single_row(self, p1: str, p2: str, service: str) -> bool:
+        try:
+            self.ensure_admin()
+        except Exception:
+            pass
+        listen_port = str(p1)
+        service = str(service)
+        # RDP special flow
+        if service.upper() == 'RDP' and listen_port == '3389':
+            try:
+                cur = ServiceController.get_rdp_port()
+            except Exception:
+                cur = None
+            if cur and int(cur) == 53389:
+                st = TunnelServerThread(self, listen_port, service)
+                st.start(); time.sleep(0.15)
+                if st.is_alive():
+                    self.state["servers"][int(listen_port)] = st
+                    self.write_status(self._active_rows_from_servers(), running=True)
+                    self.state["running"] = True
+                    self.update_tray_icon(); self.send_heartbeat_once("online")
+                    self._update_row_ui(listen_port, service, True)
+                    return True
+                return False
+            # need secure popup flow
+            cons = self.read_consent()
+            if not cons.get("accepted"):
+                cons = self.ensure_consent_ui()
+                if not cons.get("accepted"):
+                    return False
+            if not cons.get("rdp_move", True):
+                try:
+                    messagebox.showwarning(self.t("warn"), "RDP secure move is disabled in consent")
+                except Exception:
+                    pass
+                return False
+            def after_rdp():
+                ok = self.start_single_row('3389', '53389', 'RDP')
+                if not ok:
+                    try: messagebox.showerror(self.t("error"), "Failed to start RDP tunnel after secure move")
+                    except: pass
+            self.rdp_move_popup("secure", after_rdp)
+            return False
+        # Non-RDP: warn if port in use
+        if self.is_port_in_use(int(listen_port)):
+            try:
+                if not messagebox.askyesno(self.t("warn"), f"Port {listen_port} seems to be in use by a service. Continue?"):
+                    return False
+            except Exception:
+                pass
+        st = TunnelServerThread(self, listen_port, service)
+        st.start(); time.sleep(0.15)
+        if st.is_alive():
+            self.state["servers"][int(listen_port)] = st
+            self.write_status(self._active_rows_from_servers(), running=True)
+            self.state["running"] = True
+            self.update_tray_icon(); self.send_heartbeat_once("online")
+            self._update_row_ui(listen_port, service, True)
+            return True
+        try: messagebox.showerror(self.t("error"), "Port is busy or cannot be listened.")
+        except: pass
+        return False
+
+    def stop_single_row(self, p1: str, p2: str, service: str) -> bool:
+        listen_port = str(p1)
+        service = str(service)
+        # RDP rollback flow
+        if service.upper() == 'RDP' and listen_port == '3389':
+            def after_rb():
+                st = self.state["servers"].pop(int(listen_port), None)
+                try:
+                    if st: st.stop()
+                except Exception:
+                    pass
+                self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
+                if not self.state["servers"]:
+                    self.state["running"] = False
+                    self.send_heartbeat_once("offline")
+                self.update_tray_icon()
+                self._update_row_ui(listen_port, service, False)
+            self.rdp_move_popup("rollback", after_rb)
+            return True
+        # Non-RDP stop
+        st = self.state["servers"].pop(int(listen_port), None)
+        try:
+            if st: st.stop()
+        except Exception:
+            pass
+        self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"])>0)
+        if not self.state["servers"]:
+            self.state["running"] = False
+            self.send_heartbeat_once("offline")
+        self.update_tray_icon()
+        self._update_row_ui(listen_port, service, False)
+        return True
 
     # ---------- Tray ---------- #
     def tray_make_image(self, active):

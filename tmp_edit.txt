@@ -1,0 +1,7 @@
+        selected_ports = {}
+        self.state["selected_ports_map"] = selected_ports
+        row_ids = []
+        for (p1, p2, servis) in self.PORT_TABLOSU:
+            iid = self.tree.insert("", "end", values=(p1, p2, servis, "?"))
+            selected_ports[iid] = False
+            row_ids.append((iid, p1, p2, servis))

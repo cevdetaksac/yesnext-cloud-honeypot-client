@@ -1,5 +1,5 @@
 ﻿from typing import Optional, Union
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 import os, sys, socket, ssl, threading, time, json, subprocess, ctypes, struct, hashlib, tempfile, argparse
 from ctypes import wintypes
 import tkinter as tk
@@ -8,12 +8,70 @@ import requests, webbrowser, logging
 from logging.handlers import RotatingFileHandler
 try:
     import firewall_agent as FW_AGENT
-except Exception:
-                    pass
+except Exception: pass
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.6.3"
+__version__ = "1.6.5"
+
+GITHUB_OWNER = "cevdetaksac"
+GITHUB_REPO  = "yesnext-cloud-honeypot-client"
+API_URL = "https://honeypot.yesnext.com.tr/api"
+HONEYPOT_IP = "194.5.236.181"
+HONEYPOT_TUNNEL_PORT = 4443
+
+SERVER_NAME = socket.gethostname()
+RECV_SIZE = 65536
+CONNECT_TIMEOUT = 8
+
+# Tek-instance kontrol portu (localhost)
+CONTROL_HOST = "127.0.0.1"
+CONTROL_PORT = 58632  # sabit yüksek port
+
+# Görev adları
+TASK_NAME_BOOT  = "CloudHoneypotClient"
+TASK_NAME_LOGON = "CloudHoneypotClientTray"
+
+# ===================== UYGULAMA DİZİNİ ===================== #
+def appdata_dir() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "YesNext", "CloudHoneypotClient")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+LOG_FILE        = os.path.join(appdata_dir(), "client.log")
+SETTINGS_FILE   = os.path.join(appdata_dir(), "settings.json")
+CONSENT_FILE    = os.path.join(appdata_dir(), "consent.json")
+STATUS_FILE     = os.path.join(appdata_dir(), "status.json")
+TOKEN_FILE_NEW  = os.path.join(appdata_dir(), "token.dat")  # DPAPI ile şifreli
+TOKEN_FILE_OLD  = "token.txt"  # eski düz metin (migrasyon için)
+WATCHDOG_TOKEN_FILE = os.path.join(appdata_dir(), "watchdog.token")
+
+# ===================== LOGGING ===================== #
+def init_logging():
+    logger = logging.getLogger("cloud-client")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fmt = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+    return logger
+
+LOGGER = init_logging()
+
+def log(msg):  # kısa alias
+    try: LOGGER.info(str(msg))
+    except: pass
+    
 
 # ===================== ÇALIŞTIRMA MODU AYIRIMI ===================== #
 def is_service_mode():
@@ -23,24 +81,6 @@ def is_service_mode():
         ('--daemon' in sys.argv)
     )
 
-def main():
-    # Installer sonrası veya doğrudan çalıştırma
-    if '--install-service' in sys.argv:
-        log("Installer sonrası servis kurulumu tetiklendi.")
-        ensure_service_installed()
-        sys.exit(0)
-    elif is_service_mode():
-        log("Service mode detected. Service başlatılıyor.")
-        install_windows_service()
-        sys.exit(0)
-    else:
-        log("Normal mod: GUI başlatılıyor.")
-        # GUI arayüzünü başlat
-        app = CloudHoneypotClient()
-        app.run_gui()
-
-if __name__ == "__main__":
-    main()
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -119,7 +159,7 @@ def ensure_service_installed():
                     displayName="Cloud Honeypot Client Service",
                     description="Sunucu güvenliği için arka planda çalışan hizmet.",
                     startType=win32service.SERVICE_AUTO_START,
-                    exeArgs=f'"{script}" --daemon'
+                    exeArgs=f'\"{script}\" --daemon'
                 )
                 log("Service registered (native). Starting service...")
                 win32serviceutil.StartService(svc_name)
@@ -130,23 +170,6 @@ def ensure_service_installed():
     except Exception as e:
         log(f"Service install/start error: {e}")
 
-GITHUB_OWNER = "cevdetaksac"
-GITHUB_REPO  = "yesnext-cloud-honeypot-client"
-API_URL = "https://honeypot.yesnext.com.tr/api"
-HONEYPOT_IP = "194.5.236.181"
-HONEYPOT_TUNNEL_PORT = 4443
-
-SERVER_NAME = socket.gethostname()
-RECV_SIZE = 65536
-CONNECT_TIMEOUT = 8
-
-# Tek-instance kontrol portu (localhost)
-CONTROL_HOST = "127.0.0.1"
-CONTROL_PORT = 58632  # sabit yüksek port
-
-# Görev adları
-TASK_NAME_BOOT  = "CloudHoneypotClient"
-TASK_NAME_LOGON = "CloudHoneypotClientTray"
 
 # Tray opsiyonel
 TRY_TRAY = True
@@ -157,45 +180,7 @@ try:
 except Exception:
                     pass
 
-# ===================== UYGULAMA DİZİNİ ===================== #
-def appdata_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "YesNext", "CloudHoneypotClient")
-    os.makedirs(path, exist_ok=True)
-    return path
 
-LOG_FILE        = os.path.join(appdata_dir(), "client.log")
-SETTINGS_FILE   = os.path.join(appdata_dir(), "settings.json")
-CONSENT_FILE    = os.path.join(appdata_dir(), "consent.json")
-STATUS_FILE     = os.path.join(appdata_dir(), "status.json")
-TOKEN_FILE_NEW  = os.path.join(appdata_dir(), "token.dat")  # DPAPI ile şifreli
-TOKEN_FILE_OLD  = "token.txt"  # eski düz metin (migrasyon için)
-WATCHDOG_TOKEN_FILE = os.path.join(appdata_dir(), "watchdog.token")
-
-# ===================== LOGGING ===================== #
-def init_logging():
-    logger = logging.getLogger("cloud-client")
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fmt = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-    return logger
-
-LOGGER = init_logging()
-
-def log(msg):  # kısa alias
-    try: LOGGER.info(str(msg))
-    except: pass
 
 def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False):
     """Güvenli komut çalıştırma (shell=False), stdout/stderr loglar; zaman aşımı ile kilitlenmeyi önler."""
@@ -250,9 +235,9 @@ def firewall_allow_exists_tcp_port(port: int) -> bool:
         return False
     try:
         ps = (
-            f"$p={int(port)};"
+            f"$p={int(port)};" 
             "$r = Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow | "
-            "Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'TCP' -and $_.LocalPort -eq $p };"
+            "Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'TCP' -and $_.LocalPort -eq $p };" 
             "if ($r) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
         )
         res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=10, suppress_rc_log=True)
@@ -342,7 +327,7 @@ def watchdog_main(parent_pid: int):
             alive = is_process_running_windows(int(parent_pid))
         except Exception:
             alive = False
-        if alive:
+        if alive: 
             attempts = 0  # reset attempts if parent is alive
             continue
         # Grace period for updater to relaunch (batch starts new exe)
@@ -803,7 +788,7 @@ class ServiceController:
         except Exception:
             pass
         run_cmd([
-            'reg','add', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp',
+            'reg','add', r'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', 
             '/v','PortNumber','/t','REG_DWORD','/d', str(new_port), '/f'
         ])
         # Only add firewall allow if not already present (avoid duplicates on 3389/53389)
@@ -886,17 +871,149 @@ class TunnelServerThread(threading.Thread):
         except:
             pass
 
+# ===================== GÜNCELLEME VE SERVİS YÖNETİMİ (YENİ) ===================== #
+SERVICE_NAME = "CloudHoneypotClientService"
+SERVICE_DISPLAY_NAME = "Cloud Honeypot Client Service"
+SERVICE_DESCRIPTION = "Sunucu güvenliği için arka planda çalışan hizmet."
+
+def terminate_current_processes():
+    """Mevcut client.exe veya client-onedir.exe işlemlerini ve servisi durdurur."""
+    log("Güncelleme için mevcut işlemler sonlandırılıyor...")
+    try:
+        # Servisi durdur
+        log(f"Servis durduruluyor: {SERVICE_NAME}")
+        ServiceController.stop(SERVICE_NAME, timeout=30)
+        log("Servis başarıyla durduruldu.")
+    except Exception as e:
+        log(f"Servis durdurulurken bir hata oluştu: {e}")
+
+    try:
+        # Mevcut ana uygulamayı (exe) sonlandır
+        exe_name = os.path.basename(sys.executable)
+        log(f"Çalışan '{exe_name}' işlemleri kapatılıyor.")
+        # /T ile alt işlemleri de kapat
+        run_cmd(['taskkill', '/F', '/IM', exe_name, '/T'], suppress_rc_log=True)
+        log(f"'{exe_name}' işlemleri kapatıldı.")
+    except Exception as e:
+        log(f"İşlemler kapatılırken hata: {e}")
+
+def apply_update(zip_path: str, show_gui_on_restart: bool):
+    """
+    İndirilen ZIP dosyasından güncellemeyi uygular ve uygulamayı yeniden başlatır.
+    show_gui_on_restart: True ise GUI ile, False ise tepside (minimized) başlar.
+    """
+    log(f"Güncelleme uygulanıyor: {zip_path}")
+    try:
+        import zipfile, shutil
+        dest_dir = os.path.dirname(sys.executable)
+        tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(tmp_extract)
+        log("Güncelleme dosyaları geçici dizine çıkarıldı.")
+
+        # Dosyaları kopyala
+        for item in os.listdir(tmp_extract):
+            s = os.path.join(tmp_extract, item)
+            d = os.path.join(dest_dir, item)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+        log("Güncelleme dosyaları hedef dizine kopyalandı.")
+
+        # Uygulamayı yeniden başlat
+        exe_path = os.path.join(dest_dir, os.path.basename(sys.executable))
+        args = [] if show_gui_on_restart else ["--minimized"]
+        log(f"Uygulama yeniden başlatılıyor: '{exe_path}' {' '.join(args)}")
+        
+        # Watchdog'un yeniden başlatmasını engellemek için token'ı temizle
+        write_watchdog_token('stop') 
+        
+        subprocess.Popen([exe_path] + args)
+        log("Yeni uygulama süreci başlatıldı. Mevcut süreç sonlandırılıyor.")
+        os._exit(0) # Mevcut işlemi derhal sonlandır
+
+    except Exception as e:
+        log(f"Güncelleme uygulama hatası: {e}")
+        # Hata durumunda servisi geri başlatmayı dene
+        try:
+            ServiceController.start(SERVICE_NAME)
+            log("Hata sonrası servis yeniden başlatıldı.")
+        except Exception as svc_err:
+            log(f"Hata sonrası servis yeniden başlatılamadı: {svc_err}")
+
+def initiate_update(silent: bool):
+    """
+    Güncelleme sürecini başlatır. Manuel veya sessiz modu destekler.
+    silent: True ise kullanıcıya soru sormaz ve arka planda çalışır.
+    """
+    mode = "Sessiz" if silent else "Manuel"
+    log(f"{mode} güncelleme süreci başlatıldı.")
+    try:
+        api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+        data = requests.get(api, timeout=10).json()
+        latest_tag = data.get("tag_name") or data.get("name")
+        
+        if not latest_tag:
+            log("API'den sürüm bilgisi alınamadı.")
+            if not silent: messagebox.showinfo("Güncelleme", "Yeni sürüm bilgisi alınamadı.")
+            return
+
+        latest_ver = str(latest_tag).lstrip('v')
+        cur_ver = str(__version__).lstrip('v')
+
+        log(f"Mevcut Sürüm: {cur_ver}, En Son Sürüm: {latest_ver}")
+        if latest_ver <= cur_ver:
+            log("Uygulama güncel.")
+            if not silent: messagebox.showinfo("Güncelleme", "Güncel sürümü kullanıyorsunuz.")
+            return
+
+        if not silent:
+            if not messagebox.askyesno("Güncelleme", f"Yeni sürüm bulundu: {latest_ver}. İndirip güncellensin mi?"):
+                return
+        
+        log(f"Yeni sürüm {latest_ver} bulundu, indirme başlıyor.")
+        asset_zip_url = next((a.get("browser_download_url") for a in data.get("assets", []) if a.get("name", "").lower() == "client-onedir.zip"), None)
+
+        if not asset_zip_url:
+            log("Güncelleme (client-onedir.zip) dosyası repoda bulunamadı.")
+            if not silent: messagebox.showerror("Hata", "Güncelleme paketi bulunamadı.")
+            return
+
+        tmpdir = tempfile.mkdtemp(prefix="chpupd-")
+        zip_path = os.path.join(tmpdir, "client-onedir.zip")
+
+        log(f"Güncelleme indiriliyor: {asset_zip_url}")
+        with requests.get(asset_zip_url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(zip_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+        log("Güncelleme indirildi.")
+
+        # İşlemleri sonlandır ve güncellemeyi uygula
+        terminate_current_processes()
+        time.sleep(3) # İşlemlerin kapanması için kısa bir bekleme süresi
+        apply_update(zip_path, show_gui_on_restart=(not silent))
+
+    except Exception as e:
+        log(f"Güncelleme sürecinde hata: {e}")
+        if not silent:
+            try: messagebox.showerror("Güncelleme Hatası", f"Bir hata oluştu: {e}")
+            except Exception: pass
+
 # ===================== ANA UYGULAMA ===================== #
 class CloudHoneypotClient:
-    """
-    CloudHoneypotClient
-    ---
-    Ana uygulama sınıfı. GUI, servis, watchdog, port tünelleme, API entegrasyonu ve tüm iş akışını yönetir.
-    Kullanıcı arayüzü, oturum yönetimi, güncelleme, firewall, tek-instans ve uzaktan yönetim fonksiyonlarını içerir.
-    ---
-    Main application class. Manages GUI, service, watchdog, port tunneling, API integration, and overall workflow.
-    Includes user interface, session management, update, firewall, single-instance, and remote management features.
-    """
+    #"""
+    #CloudHoneypotClient
+    #---
+    #Ana uygulama sınıfı. GUI, servis, watchdog, port tünelleme, API entegrasyonu ve tüm iş akışını yönetir.
+    #Kullanıcı arayüzü, oturum yönetimi, güncelleme, firewall, tek-instans ve uzaktan yönetim fonksiyonlarını içerir.
+    #---
+    #Main application class. Manages GUI, service, watchdog, port tunneling, API integration, and overall workflow.
+    #Includes user interface, session management, update, firewall, single-instance, and remote management features.
+    #"""
     PORT_TABLOSU = [
         ("3389", "53389", "RDP"),
         ("1433", "-", "MSSQL"),
@@ -1001,7 +1118,7 @@ class CloudHoneypotClient:
                 else:
                     exe = sys.executable
                     script = os.path.abspath(sys.argv[0])
-                    params = f'"{script}" ' + " ".join(sys.argv[1:])
+                    params = f'\"{script}\" ' + " ".join(sys.argv[1:])
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
                 sys.exit(0)
         except Exception as e:
@@ -1087,14 +1204,12 @@ class CloudHoneypotClient:
                     self.state["public_ip"] = ip
                     # GUI'deki IP bilgisini güncelle
                     if self.ip_entry and self.root:
-                        try:
-                            self.root.after(0, lambda: self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})"))
-                        except:
-                            self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})")
+                        try: self.root.after(0, lambda: self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})"))
+                        except: self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})")
                     self.send_heartbeat_once()
             except Exception as e:
                 log(f"heartbeat error: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
     # ---------- Attack Count ---------- #
     def fetch_attack_count_sync(self, token):
@@ -1115,8 +1230,7 @@ class CloudHoneypotClient:
             if cnt is None: return
             try:
                 self.root.after(0, lambda: self.safe_set_entry(self.attack_entry, str(cnt)))
-            except:
-                self.safe_set_entry(self.attack_entry, str(cnt))
+            except: self.safe_set_entry(self.attack_entry, str(cnt))
         if async_thread:
             threading.Thread(target=worker, daemon=True).start()
         else:
@@ -1124,10 +1238,8 @@ class CloudHoneypotClient:
 
     def poll_attack_count(self):
         self.refresh_attack_count(async_thread=True)
-        try:
-            self.root.after(10_000, self.poll_attack_count)
-        except:
-            pass
+        try: self.root.after(10_000, self.poll_attack_count)
+        except: pass
 
     # ---------- Tek-instans ---------- #
     def control_server_loop(self, sock):
@@ -1146,14 +1258,13 @@ class CloudHoneypotClient:
                 cmd = buf.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW":
                     def do_show():
-                        if self.show_cb:
+                        if self.show_cb: 
                             try: self.show_cb()
                             except: pass
                     try:
                         if self.root: self.root.after(0, do_show)
                         else: do_show()
-                    except:
-                        do_show()
+                    except: do_show()
             except Exception:
                 pass
             finally:
@@ -1233,8 +1344,7 @@ class CloudHoneypotClient:
             self.send_json(remote, handshake)
         except Exception as e:
             log(f"Handshake hata: {e}")
-            try:
-                remote.close(); local_sock.close()
+            try: remote.close(); local_sock.close()
             except: pass
             return
 
@@ -1370,10 +1480,8 @@ class CloudHoneypotClient:
 
         win = tk.Toplevel(self.root)
         win.title(self.t("consent_title"))
-        try:
-            win.grab_set(); win.transient(self.root)
-        except Exception:
-            pass
+        try: win.grab_set(); win.transient(self.root)
+        except Exception: pass
 
         tk.Label(win, text=self.t("consent_msg"), justify="left", font=("Arial", 10)).pack(padx=16, pady=12)
 
@@ -1418,178 +1526,16 @@ class CloudHoneypotClient:
 
     # ---------- Güncelleme ---------- #
     def check_updates_and_prompt(self):
-        try:
-            api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            data = self.http_get_json(api, timeout=8)
-            latest_tag = data.get("tag_name") or data.get("name")
-            if not latest_tag:
-                messagebox.showinfo("Update", self.t("update_none")); return
-            latest_ver = str(latest_tag).lstrip('v')
-            cur_ver    = str(__version__).lstrip('v')
-            if latest_ver <= cur_ver:
-                messagebox.showinfo("Update", self.t("update_none")); return
-
-            # Use onedir ZIP + hashes
-            assets = data.get("assets", [])
-            asset_zip = None
-            asset_hashes = None
-            for a in assets:
-                n = str(a.get("name", "")).lower()
-                if n == "client-onedir.zip":
-                    asset_zip = a.get("browser_download_url")
-                if n == "hashes.txt":
-                    asset_hashes = a.get("browser_download_url")
-            if not asset_zip:
-                messagebox.showerror("Update", self.t("update_error").format(err="asset not found (client-onedir.zip)")); return
-            if not messagebox.askyesno("Update", self.t("update_found").format(version=latest_ver)):
-                return
-
-            tmpdir = tempfile.mkdtemp(prefix="chpupd-")
-            zip_path = os.path.join(tmpdir, "client-onedir.zip")
-            self.http_download(asset_zip, zip_path, timeout=60)
-            if asset_hashes:
-                sha_path = os.path.join(tmpdir, "hashes.txt")
-                self.http_download(asset_hashes, sha_path, timeout=30)
-                try:
-                    exp = None
-                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            if 'client-onedir.zip' in line:
-                                exp = line.strip().split()[0]
-                                break
-                    calc = self.sha256_file(zip_path)
-                    if exp and calc.lower() != exp.lower():
-                        messagebox.showerror("Update", self.t("update_error").format(err="sha256 mismatch"))
-                        return
-                except Exception as e:
-                    log(f"sha check error: {e}")
-            self.apply_onedir_update(zip_path, minimized=True)
-        except Exception as e:
-            log(f"update error: {e}")
-            try:
-                messagebox.showerror("Update", self.t("update_error").format(err=str(e)))
-            except Exception:
-                pass
+        """Kullanıcı tarafından GUI üzerinden manuel güncelleme denetimini başlatır."""
+        # Ayrı bir thread üzerinde çalıştırarak GUI'nin donmasını engelle
+        threading.Thread(target=initiate_update, args=(False,), daemon=True).start()
 
 
     def check_updates_and_apply_silent(self):
-        try:
-            api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            data = self.http_get_json(api, timeout=8)
-            latest_tag = data.get("tag_name") or data.get("name")
-            if not latest_tag:
-                return
-            latest_ver = str(latest_tag).lstrip('v')
-            cur_ver    = str(__version__).lstrip('v')
-            if latest_ver <= cur_ver:
-                return
-            # Assets
-            assets = data.get("assets", [])
-            asset_zip = None
-            asset_hashes = None
-            for a in assets:
-                n = str(a.get("name", "")).lower()
-                if n == "client-onedir.zip":
-                    asset_zip = a.get("browser_download_url")
-                if n == "hashes.txt":
-                    asset_hashes = a.get("browser_download_url")
-            if not asset_zip:
-                return
-            tmpdir = tempfile.mkdtemp(prefix="chpupd-")
-            zip_path = os.path.join(tmpdir, "client-onedir.zip")
-            self.http_download(asset_zip, zip_path, timeout=60)
-            if asset_hashes:
-                sha_path = os.path.join(tmpdir, "hashes.txt")
-                self.http_download(asset_hashes, sha_path, timeout=30)
-                try:
-                    exp = None
-                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            if 'client-onedir.zip' in line:
-                                exp = line.strip().split()[0]
-                                break
-                    calc = self.sha256_file(zip_path)
-                    if exp and calc.lower() != exp.lower():
-                        return
-                except Exception as e:
-                    log(f"sha check silent error: {e}")
-            self.apply_onedir_update(zip_path)
-        except Exception as e:
-            log(f"update silent error: {e}")
-    def schedule_self_update_and_exit(self, new_exe_path):
-        try:
-            # Write watchdog token to stop
-            write_watchdog_token('stop')
-            # Start new exe only if not already running
-            def is_onedir_running():
-                res = run_cmd(['tasklist','/FI','IMAGENAME eq client-onedir.exe','/FO','CSV','/NH'], timeout=10, suppress_rc_log=True)
-                return res and 'client-onedir.exe' in (res.stdout or '')
-            if not is_onedir_running():
-                if getattr(sys, 'frozen', False):
-                    subprocess.Popen([new_exe_path], shell=False)
-                else:
-                    subprocess.Popen([sys.executable, new_exe_path], shell=False)
-                log('Self-update: new exe launched, exiting old process.')
-            else:
-                log('Self-update: client-onedir.exe already running, not launching again.')
-            os._exit(0)
-        except Exception as e:
-            log(f'schedule_self_update_and_exit error: {e}')
-        finally:
-            pass
-
-    def apply_onedir_update(self, zip_path, minimized=False):
-        try:
-            import zipfile, shutil
-            MIN = ("--minimized" if minimized else "")
-            dest_dir = os.path.dirname(self.current_executable())
-            tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(tmp_extract)
-            # Dosyaları doğrudan Python ile kopyala
-            for root, dirs, files in os.walk(tmp_extract):
-                rel_path = os.path.relpath(root, tmp_extract)
-                target_dir = os.path.join(dest_dir, rel_path) if rel_path != '.' else dest_dir
-                os.makedirs(target_dir, exist_ok=True)
-                for file in files:
-                    src_file = os.path.join(root, file)
-                    dst_file = os.path.join(target_dir, file)
-                    try:
-                        shutil.copy2(src_file, dst_file)
-                        log(f"Self-update: {src_file} -> {dst_file}")
-                    except Exception as e:
-                        log(f"Self-update copy error: {src_file} -> {dst_file}: {e}")
-            try:
-                write_watchdog_token('stop')
-            except Exception:
-                pass
-            # Servis modunda mı?
-            import win32serviceutil
-            svc_name = "CloudHoneypotClientService"
-            try:
-                status = win32serviceutil.QueryServiceStatus(svc_name)
-                if status:
-                    log("Self-update: Service mode detected, restarting service...")
-                    win32serviceutil.StopService(svc_name)
-                    time.sleep(2)
-                    win32serviceutil.StartService(svc_name)
-                    log("Self-update: Service restarted.")
-                    return
-            except Exception as e:
-                log(f"Self-update: Service restart error: {e}")
-            # Normal modda yeni exe'yi başlat
-            exe_path = os.path.join(dest_dir, "client-onedir.exe")
-            try:
-                subprocess.Popen([exe_path, MIN] if MIN else [exe_path], shell=False)
-                log(f"Self-update: new exe launched: {exe_path}")
-            except Exception as e:
-                log(f"Self-update: launch error: {e}")
-            os._exit(0)
-        except Exception as e:
-            log(f"apply_onedir_update error: {e}")
-        finally:
-            try: os._exit(0)
-            except: sys.exit(0)
+        """Arka planda sessiz güncelleme denetimini başlatır."""
+        # Ayrı bir thread üzerinde çalıştırarak ana döngüyü bloklamasını engelle
+        threading.Thread(target=initiate_update, args=(True,), daemon=True).start()
+    
 
     # ---------- RDP move popup ---------- #
     def rdp_move_popup(self, mode, on_confirm):
@@ -1614,10 +1560,8 @@ class CloudHoneypotClient:
 
         def do_rollback():
             if countdown_id[0]:
-                try:
-                    popup.after_cancel(countdown_id[0])
-                except Exception:
-                    pass
+                try: popup.after_cancel(countdown_id[0])
+                except Exception: pass
 
             rollback_port = 3389 if mode == "secure" else 53389
             log(f"Zaman aşımı veya iptal. RDP portu {rollback_port} portuna geri alınıyor.")
@@ -1625,27 +1569,20 @@ class CloudHoneypotClient:
 
             try:
                 messagebox.showwarning(self.t("warn"), self.t("rollback_done").format(port=rollback_port))
-            except Exception:
-                pass
+            except Exception: pass
 
             if mode == "rollback" and rollback_port == 53389:
                 threading.Thread(target=self.start_single_row, args=('3389', '53389', 'RDP', False), daemon=True).start()
 
-            try:
-                popup.destroy()
-            except Exception:
-                pass
+            try: popup.destroy()
+            except Exception: pass
 
         def do_confirm():
             if countdown_id[0]:
-                try:
-                    popup.after_cancel(countdown_id[0])
-                except Exception:
-                    pass
-            try:
-                popup.destroy()
-            except Exception:
-                pass
+                try: popup.after_cancel(countdown_id[0])
+                except Exception: pass
+            try: popup.destroy()
+            except Exception: pass
             on_confirm()
 
         confirm_button.config(command=do_confirm)
@@ -1679,8 +1616,7 @@ class CloudHoneypotClient:
                 try:
                     messagebox.showerror(self.t("error"), self.t("err_rdp").format(e=e))
                     popup.destroy()
-                except Exception:
-                    pass
+                except Exception: pass
 
         threading.Thread(target=worker, daemon=True).start()
         popup.protocol("WM_DELETE_WINDOW", do_rollback)
@@ -1716,8 +1652,7 @@ class CloudHoneypotClient:
         self.state["servers"].clear()
         self.state["running"] = False
         self.update_tray_icon()
-        try:
-            self.write_status(self.state.get("selected_rows", []), running=False)
+        try: self.write_status(self.state.get("selected_rows", []), running=False)
         except: pass
         self.send_heartbeat_once("offline")
 
@@ -1726,8 +1661,8 @@ class CloudHoneypotClient:
         try:
             if os.name == 'nt':
                 ps = (
-                    f"$p={int(port)};"
-                    "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;"
+                    f"$p={int(port)};" 
+                    "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;" 
                     "if ($l) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
                 )
                 res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8, suppress_rc_log=True)
@@ -1749,7 +1684,7 @@ class CloudHoneypotClient:
 
     def _find_tree_item(self, listen_port: str, service_name: str):
         try:
-            for iid in self.tree.get_children(""):
+            for iid in self.tree.get_children(""): 
                 vals = self.tree.item(iid).get("values") or []
                 if len(vals) >= 3 and str(vals[0]) == str(listen_port) and str(vals[2]).upper() == str(service_name).upper():
                     return iid
@@ -1863,8 +1798,7 @@ class CloudHoneypotClient:
             try:
                 if not messagebox.askyesno(self.t("warn"), f"Port {listen_port} seems to be in use by a service. Continue?"):
                     return False
-            except Exception:
-                pass
+            except Exception: pass
         
         st = TunnelServerThread(self, listen_port, service)
         st.start(); time.sleep(0.15)
@@ -1890,10 +1824,8 @@ class CloudHoneypotClient:
             # Stop the tunnel thread first
             st = self.state["servers"].pop(int(listen_port), None)
             if st:
-                try:
-                    st.stop()
-                except Exception:
-                    pass
+                try: st.stop()
+                except Exception: pass
             
             if manual_action:
                 log("Manuel RDP güvenli port durdurma akışı tetiklendi.")
@@ -1934,10 +1866,8 @@ class CloudHoneypotClient:
         # Non-RDP stop
         st = self.state["servers"].pop(int(listen_port), None)
         if st:
-            try:
-                st.stop()
-            except Exception:
-                pass
+            try: st.stop()
+            except Exception: pass
         
         self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
         if not self.state["servers"]:
@@ -1967,7 +1897,7 @@ class CloudHoneypotClient:
                     'listen_port': lp,
                     'new_port': newp,
                 })
-            payload = { 'token': token, 'statuses': statuses }
+            payload = { "token": token, "statuses": statuses }
             r = requests.post(f"{API_URL}/agent/tunnel-status", json=payload, timeout=8)
             if r.status_code != 200:
                 log(f"tunnel-status HTTP {r.status_code}: {r.text[:120]}")
@@ -2176,19 +2106,17 @@ class CloudHoneypotClient:
 
         def show_cb():
             try:
-                if self.root:
-                    self.root.deiconify(); self.root.lift(); self.root.focus_force()
+                if self.root: self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
 
         def exit_cb():
             if self.state["running"]:
-                messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first"))
+                messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first") )
                 return
             # allow watchdog to stop
             try:
                 write_watchdog_token('stop')
-            except Exception:
-                pass
+            except Exception: pass
             icon.stop()
             if self.root:
                 self.root.destroy()
@@ -2342,10 +2270,8 @@ class CloudHoneypotClient:
                 self.root.title(f"{self.t('app_title')} v{__version__}")
             self.first_run_notice()
             # Continue building actual UI below (root will be reconfigured)
-            try:
-                self.root.deiconify()
-            except Exception:
-                pass
+            try: self.root.deiconify()
+            except Exception: pass
         except Exception as e:
             log(f"build_gui pre-notice error: {e}")
         self.start_single_instance_server()
@@ -2385,10 +2311,8 @@ class CloudHoneypotClient:
         if not self.root:
             self.root = tk.Tk()
         else:
-            try:
-                self.root.deiconify()
-            except Exception:
-                pass
+            try: self.root.deiconify()
+            except Exception: pass
         self.root.title(f"{self.t('app_title')} v{__version__}")
         self.root.geometry("820x620")
         self.root.configure(bg="#f5f5f5")
@@ -2426,19 +2350,15 @@ class CloudHoneypotClient:
         # Logs opener
         def open_logs():
             try:
-                if os.name == 'nt':
-                    os.startfile(LOG_FILE)
-                else:
-                    webbrowser.open(f"file://{LOG_FILE}")
+                if os.name == 'nt': os.startfile(LOG_FILE)
+                else: webbrowser.open(f"file://{LOG_FILE}")
             except Exception as e:
                 log(f"open_logs error: {e}")
         menu_help.add_command(label=self.t("menu_logs"), command=open_logs)
         # GitHub opener
         def open_github():
-            try:
-                webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
-            except Exception as e:
-                log(f"open_github error: {e}")
+            try: webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
+            except Exception as e: log(f"open_github error: {e}")
         menu_help.add_command(label=self.t("menu_github"), command=open_github)
         menu_help.add_separator()
         menu_help.add_command(label=self.t("menu_check_updates"), command=self.check_updates_and_prompt)
@@ -2448,10 +2368,8 @@ class CloudHoneypotClient:
         # Kapatma → tray
         def on_close():
             # Always minimize to tray; app keeps running in background
-            try:
-                self.root.withdraw()
-            except Exception:
-                pass
+            try: self.root.withdraw()
+            except Exception: pass
         self.root.protocol("WM_DELETE_WINDOW", on_close)
 
         style = ttk.Style()
@@ -2497,10 +2415,10 @@ class CloudHoneypotClient:
             tk.Button(frame1, text="📋", command=lambda e=entry: copy_entry(e)).grid(row=idx, column=2, padx=3)
 
             if key == "dash":
-                tk.Button(frame1, text="🌐 " + self.t("open"), command=open_dashboard).grid(row=idx, column=3, padx=3)
+                tk.Button(frame1, text=f"🌐 {self.t('open')}", command=open_dashboard).grid(row=idx, column=3, padx=3)
 
             if key == "attacks":
-                tk.Button(frame1, text="↻ " + self.t("refresh"), command=lambda: self.refresh_attack_count(async_thread=True)).grid(row=idx, column=3, padx=3)
+                tk.Button(frame1, text=f"↻ {self.t('refresh')}", command=lambda: self.refresh_attack_count(async_thread=True)).grid(row=idx, column=3, padx=3)
                 self.attack_entry = entry
 
             if key == "ip":
@@ -2518,10 +2436,8 @@ class CloudHoneypotClient:
             fr = tk.Frame(parent, bg="#ffffff", padx=8, pady=8, highlightbackground="#ddd", highlightthickness=1)
             fr.pack(fill="x", pady=6)
             # Columns grow: make the middle space flexible so the button sticks right
-            try:
-                fr.grid_columnconfigure(2, weight=1)
-            except Exception:
-                pass
+            try: fr.grid_columnconfigure(2, weight=1)
+            except Exception: pass
             # Labels
             tk.Label(fr, text=f"{self.t('col_service')}: {servis}", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
             tk.Label(fr, text=f"{self.t('col_listen')}: {p1}", bg="#ffffff", anchor="w").grid(row=1, column=0, sticky="w")
@@ -2589,102 +2505,24 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"auto-update silent error: {e}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        # per-row actions only
-
         # Tray
         if TRY_TRAY:
-            def tray_thread():
-                self.tray_loop()
+            def tray_thread(): self.tray_loop()
             threading.Thread(target=tray_thread, daemon=True).start()
 
         # Eski durum otomatik başlasın
         if saved_rows and saved_running:
             for (p1,p2,svc) in saved_rows:
-                try:
-                    self.start_single_row(str(p1), str(p2), str(svc))
-                except Exception:
-                    pass
+                try: self.start_single_row(str(p1), str(p2), str(svc))
+                except Exception: pass
             # Tray ikonunu açık yeşile güncelle (aktif)
-            try:
-                self.update_tray_icon()
-            except Exception:
-                pass
+            try: self.update_tray_icon()
+            except Exception: pass
             if minimized:
                 self.root.withdraw()
 
         def _show_window():
-            try:
-                self.root.deiconify(); self.root.lift(); self.root.focus_force()
+            try: self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
 
@@ -2694,45 +2532,53 @@ class CloudHoneypotClient:
         self.root.mainloop()
 
 # ===================== MAIN ===================== #
-
-# --- Windows Service entegrasyonu ---
-if __name__ == "__main__":
-    # Installer ile uyumlu servis kurulum ve loglama
-    if '--install-service' in sys.argv:
-        log("Installer parametresi ile servis kurulumu başlatıldı.")
+def main():
+    # Windows'ta, pywin32'nin servis komutlarını doğru işlemesi için
+    # sys.argv'yi doğrudan kullanması gerekebilir.
+    if os.name == 'nt':
         try:
-            install_windows_service()
-            log("Servis başarıyla kuruldu.")
+            # Bu blok, pywin32'nin 'install', 'start', 'stop' gibi komutları
+            # yakalamasını ve HandleCommandLine'a yönlendirmesini sağlar.
+            if len(sys.argv) > 1 and sys.argv[1] in ['install', 'remove', 'start', 'stop', 'debug']:
+                import win32serviceutil, win32service, win32event, servicemanager, traceback
+                win32serviceutil.HandleCommandLine(HoneypotService)
+                return # Servis komutu işlendi, programdan çık
+        except ImportError:
+            log("pywin32 modülü bulunamadı, servis işlemleri atlanıyor.")
         except Exception as e:
-            log(f"Servis kurulum hatası: {e}")
-        sys.exit(0)
+            log(f"Servis komutu işlenirken hata: {e}")
 
-    # Normal başlatma ve sonsuz döngü engelleme
-    try:
-        install_windows_service()
-    except Exception as e:
-        log(f"Service main install_windows_service error: {e}")
-    try:
-        ensure_service_installed()
-    except Exception as e:
-        log(f"Service main ensure_service_installed error: {e}")
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--daemon", action="store_true")
-    parser.add_argument("--minimized", action="store_true")
-    parser.add_argument("--watchdog", type=int, default=None)
+    # Normal uygulama başlangıcı
+    parser = argparse.ArgumentParser(description="Cloud Honeypot Client")
+    parser.add_argument("--daemon", action="store_true", help="Arka plan servisi olarak çalıştır.")
+    parser.add_argument("--minimized", action="store_true", help="GUI'yi başlangıçta tepsiye küçült.")
+    parser.add_argument("--watchdog", type=int, default=None, help="İç watchdog süreci için.")
     args, _ = parser.parse_known_args()
 
     if args.watchdog is not None:
+        log(f"Watchdog süreci başlatıldı (ebeveyn PID: {args.watchdog}).")
         watchdog_main(args.watchdog)
-        sys.exit(0)
+        return
+
+    # GUI modunda, servisin kurulu olduğundan emin ol
+    if os.name == 'nt' and not args.daemon:
+        try:
+            if not ensure_service_installed():
+                # Kurulum başarısız olursa veya atlanırsa, kullanıcıya bilgi verilebilir
+                # veya sadece loglanabilir. Şimdilik loglama yeterli.
+                log("Servis kurulumu tamamlanamadı veya atlandı. Uygulama normal modda devam ediyor.")
+        except Exception as e:
+            log(f"Başlangıçta servis kontrolü sırasında hata: {e}")
 
     app = CloudHoneypotClient()
-    app.ensure_admin()
+    app.ensure_admin() # Yönetici haklarını kontrol et/iste
+
     if args.daemon:
         log("Daemon modunda başlatılıyor.")
         app.run_daemon()
-        sys.exit(0)
-    app.build_gui(minimized=args.minimized)
+    else:
+        log("GUI modunda başlatılıyor.")
+        app.build_gui(minimized=args.minimized)
 
-
+if __name__ == '__main__':
+    main()

@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.8"
+__version__ = "1.4.9"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -278,32 +278,38 @@ def watchdog_main(parent_pid: int):
         time.sleep(5)
         tok = read_watchdog_token()
         if tok.lower() == 'stop':
+            log('Watchdog: stop token detected, exiting.')
             return
         # Parent alive?
-        alive = is_process_running_windows(int(parent_pid))
+        try:
+            alive = is_process_running_windows(int(parent_pid))
+        except Exception:
+            alive = False
         if alive:
+            attempts = 0  # reset attempts if parent is alive
             continue
         # Grace period for updater to relaunch (batch starts new exe)
         time.sleep(10)
         # If already relaunched by updater, exit
-        # Best-effort: if any process named our exe exists, just continue waiting
         try:
             exe_name = os.path.basename(sys.executable)
             res = run_cmd(['tasklist','/FI', f'IMAGENAME eq {exe_name}','/FO','CSV','/NH'], timeout=10, suppress_rc_log=True)
             if res and exe_name.lower() in (res.stdout or '').lower():
-                continue
+                log('Watchdog: new exe already running, exiting.')
+                return
         except Exception:
             pass
         # Relaunch
         try:
             attempts += 1
+            log(f'Watchdog: parent not alive, relaunching exe (attempt {attempts})')
             if getattr(sys, 'frozen', False):
                 subprocess.Popen([sys.executable], shell=False)
             else:
                 subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])], shell=False)
-        except Exception:
-            pass
-    # Give up after attempts
+        except Exception as e:
+            log(f'Watchdog relaunch error: {e}')
+    log('Watchdog: max attempts reached, exiting.')
     return
 
 # ===================== I18N & AYARLAR ===================== #
@@ -1419,38 +1425,25 @@ class CloudHoneypotClient:
             log(f"update silent error: {e}")
     def schedule_self_update_and_exit(self, new_exe_path):
         try:
-            cur = self.current_executable()
-            target = cur
-            up_dir = os.path.dirname(cur)
-            bat_path = os.path.join(up_dir, "update_run.bat")
-            bat = rf"""
-@echo off
-setlocal enableextensions
-set NEWEXE="{new_exe_path}"
-set TARGET="{target}"
-ping 127.0.0.1 -n 3 >NUL
-:loop
-copy /y %NEWEXE% %TARGET% >NUL 2>&1
-if errorlevel 1 (
-  ping 127.0.0.1 -n 2 >NUL
-  goto loop
-)
-start "" %TARGET%
-del "%~f0" & exit /b 0
-"""
-            with open(bat_path, 'w', encoding='utf-8') as f:
-                f.write(bat)
-            try:
-                write_watchdog_token('stop')
-            except Exception:
-                pass
-            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
+            # Write watchdog token to stop
+            write_watchdog_token('stop')
+            # Start new exe only if not already running
+            def is_onedir_running():
+                res = run_cmd(['tasklist','/FI','IMAGENAME eq client-onedir.exe','/FO','CSV','/NH'], timeout=10, suppress_rc_log=True)
+                return res and 'client-onedir.exe' in (res.stdout or '')
+            if not is_onedir_running():
+                if getattr(sys, 'frozen', False):
+                    subprocess.Popen([new_exe_path], shell=False)
+                else:
+                    subprocess.Popen([sys.executable, new_exe_path], shell=False)
+                log('Self-update: new exe launched, exiting old process.')
+            else:
+                log('Self-update: client-onedir.exe already running, not launching again.')
+            os._exit(0)
         except Exception as e:
-            log(f"schedule update error: {e}")
+            log(f'schedule_self_update_and_exit error: {e}')
         finally:
-            try: os._exit(0)
-            except: sys.exit(0)
+            pass
 
     def apply_onedir_update(self, zip_path, minimized=False):
         try:

@@ -29,7 +29,7 @@ Section "Install"
   Sleep 2000 ; Give service time to start
 
   ; Start GUI in background AFTER service is started (no CMD window)
-  ExecShell "open" "$INSTDIR\client-onedir.exe" "" SW_NORMAL
+  ExecShell "open" "$INSTDIR\client-onedir.exe" "" "SW_SHOWNORMAL"
 
   ; Create shortcut on Desktop
   CreateShortCut "$DESKTOP\CloudClient.lnk" "$INSTDIR\client-onedir.exe"

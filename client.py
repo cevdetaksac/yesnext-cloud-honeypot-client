@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -56,6 +56,12 @@ def ensure_service_installed():
     import subprocess
     import sys
     svc_name = "CloudHoneypotClientService"
+    # win32serviceutil modülü var mı kontrol et
+    try:
+        import win32serviceutil
+    except ImportError:
+        log("[SAFEGUARD] win32serviceutil modülü eksik, servis kurulumu atlanıyor. Uygulama normal modda devam edecek.")
+        return
     try:
         log("Service check: querying service status...")
         res = subprocess.run(['sc', 'query', svc_name], capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -64,33 +70,20 @@ def ensure_service_installed():
             log("Service not found. Registering...")
             exe = sys.executable if getattr(sys, 'frozen', False) else sys.executable
             script = os.path.abspath(sys.argv[0])
-            # install parametresiyle çalışan process var mı kontrol et
-            def is_install_running():
-                res = subprocess.run(['tasklist','/FI','IMAGENAME eq client-onedir.exe','/FO','CSV','/NH'], capture_output=True, text=True, encoding='utf-8', errors='replace')
-                if res and res.stdout:
-                    for line in res.stdout.splitlines():
-                        if 'client-onedir.exe' in line:
-                            # Komut satırı argümanlarını kontrol et
-                            import psutil
-                            for proc in psutil.process_iter(['pid','name','cmdline']):
-                                if proc.info['name'] == 'client-onedir.exe' and 'install' in (proc.info['cmdline'] or []):
-                                    log(f"[SAFEGUARD] client-onedir.exe install process already running: PID={proc.info['pid']} CMD={proc.info['cmdline']}")
-                                    return True
-                return False
             try:
-                import psutil
-            except ImportError:
-                log("psutil not installed, cannot check running install process.")
-                psutil = None
-            if psutil and is_install_running():
-                log("[SAFEGUARD] Skipping new install process, already running.")
+                log(f"[SPAWN] subprocess.run: {[exe, script, 'install']}")
+                result = subprocess.run([exe, script, 'install'], check=True)
+            except Exception as e:
+                log(f"[SAFEGUARD] Service install denemesi başarısız: {e}. Sonsuz döngü engellendi, uygulama normal modda devam edecek.")
                 return
-            log(f"[SPAWN] subprocess.run: {[exe, script, 'install']}")
-            subprocess.run([exe, script, 'install'], check=True)
             log("Service registered. Starting service...")
-            log(f"[SPAWN] subprocess.run: {['sc', 'start', svc_name]}")
-            subprocess.run(['sc', 'start', svc_name], check=True)
-            log("Service started.")
+            try:
+                log(f"[SPAWN] subprocess.run: {['sc', 'start', svc_name]}")
+                subprocess.run(['sc', 'start', svc_name], check=True)
+                log("Service started.")
+            except Exception as e:
+                log(f"[SAFEGUARD] Service başlatma hatası: {e}. Sonsuz döngü engellendi, uygulama normal modda devam edecek.")
+                return
         else:
             log("Service already registered and running or stopped.")
     except Exception as e:
@@ -549,6 +542,15 @@ def install_excepthook():
 
 # ===================== DPAPI TOKEN STORE ===================== #
 class TokenStore:
+    """
+    TokenStore
+    ---
+    Uygulama token'ını güvenli şekilde saklama, yükleme ve migrasyon işlemlerini yönetir.
+    Windows DPAPI ile şifreleme kullanır. Token bütünlüğü ve gizliliği sağlar.
+    ---
+    Manages secure storage, loading, and migration of the application token.
+    Uses Windows DPAPI encryption for confidentiality and integrity.
+    """
     CRYPTPROTECT_UI_FORBIDDEN = 0x1
     CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
@@ -649,6 +651,15 @@ class TokenStore:
 
 # ===================== HİZMET KONTROLÜ (TermService) ===================== #
 class ServiceController:
+    """
+    ServiceController
+    ---
+    Windows servis yönetimi, RDP port değişimi ve servis başlat/durdur işlemlerini merkezi olarak kontrol eder.
+    Servis durumunu sorgular, başlatır, durdurur ve yeniden başlatır. RDP portunu değiştirir.
+    ---
+    Centralized control for Windows service management, RDP port switching, and service start/stop/restart operations.
+    Queries, starts, stops, and restarts services. Handles RDP port changes.
+    """
     @staticmethod
     def _sc_query_code(svc_name: str) -> int:
         """
@@ -779,6 +790,15 @@ class ServiceController:
 
 # ===================== TUNNEL THREAD ===================== #
 class TunnelServerThread(threading.Thread):
+    """
+    TunnelServerThread
+    ---
+    Belirli bir portu dinleyerek gelen bağlantıları tünel sunucusuna yönlendiren arka plan thread'i.
+    Saldırı trafiğini honeypot sunucusuna iletir, bağlantı yönetimini sağlar.
+    ---
+    Background thread that listens on a specific port and forwards incoming connections to the honeypot tunnel server.
+    Handles attack traffic and connection management.
+    """
     def __init__(self, app, listen_port: int, service_name: str):
         super().__init__(daemon=True)
         self.app = app
@@ -827,6 +847,15 @@ class TunnelServerThread(threading.Thread):
 
 # ===================== ANA UYGULAMA ===================== #
 class CloudHoneypotClient:
+    """
+    CloudHoneypotClient
+    ---
+    Ana uygulama sınıfı. GUI, servis, watchdog, port tünelleme, API entegrasyonu ve tüm iş akışını yönetir.
+    Kullanıcı arayüzü, oturum yönetimi, güncelleme, firewall, tek-instans ve uzaktan yönetim fonksiyonlarını içerir.
+    ---
+    Main application class. Manages GUI, service, watchdog, port tunneling, API integration, and overall workflow.
+    Includes user interface, session management, update, firewall, single-instance, and remote management features.
+    """
     PORT_TABLOSU = [
         ("3389", "53389", "RDP"),
         ("1433", "-", "MSSQL"),

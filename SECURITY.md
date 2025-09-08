@@ -3,7 +3,7 @@ Security Policy
 
 Reporting a Vulnerability
 - Please DO NOT open public issues for security vulnerabilities.
-- Instead, email security reports to security@yourdomain.example (or use your preferred private channel).
+- Instead, email security reports to cevdetaksac@gmail.com (or use your preferred private channel).
 - We aim to triage within 72 hours.
 
 Scope

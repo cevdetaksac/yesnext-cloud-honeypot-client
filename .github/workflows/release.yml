@@ -1,4 +1,4 @@
-name: release
+name: Cloud Client Release
 
 on:
   push:
@@ -16,19 +16,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
-      - name: Build onedir bundle
+          choco install nsis -y
+      - name: Build client (onedir + installer)
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/build-onedir.ps1
+          powershell -ExecutionPolicy Bypass -File scripts/build-client.ps1 -Version ${{ github.ref_name }}
       - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
+          name: Cloud Client ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            Cloud Client otomatik build ve imzalı installer.
+            Sürüm: ${{ github.ref_name }}
           files: |
             dist/client-onedir.zip
             dist/hashes.txt
+            dist/cloud-client-installer.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

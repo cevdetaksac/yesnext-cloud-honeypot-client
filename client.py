@@ -13,7 +13,34 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.6.1"
+__version__ = "1.6.3"
+
+# ===================== ÇALIŞTIRMA MODU AYIRIMI ===================== #
+def is_service_mode():
+    # Servis parametresi veya Windows Service ortamı
+    return (
+        (len(sys.argv) > 1 and sys.argv[1] in ['install', 'remove', 'start', 'stop', 'restart']) or
+        ('--daemon' in sys.argv)
+    )
+
+def main():
+    # Installer sonrası veya doğrudan çalıştırma
+    if '--install-service' in sys.argv:
+        log("Installer sonrası servis kurulumu tetiklendi.")
+        ensure_service_installed()
+        sys.exit(0)
+    elif is_service_mode():
+        log("Service mode detected. Service başlatılıyor.")
+        install_windows_service()
+        sys.exit(0)
+    else:
+        log("Normal mod: GUI başlatılıyor.")
+        # GUI arayüzünü başlat
+        app = CloudHoneypotClient()
+        app.run_gui()
+
+if __name__ == "__main__":
+    main()
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil

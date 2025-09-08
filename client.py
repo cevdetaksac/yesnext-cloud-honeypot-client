@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.7"
+__version__ = "1.4.8"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -1926,62 +1926,40 @@ del "%~f0" & exit /b 0
     # ---------- Remote management helpers ---------- #
     def _collect_open_ports_windows(self):
         items = []
+        seen = set()
         try:
-            for proto in ("TCP", "UDP"):
-                cmd = ["netstat", "-ano", "-p", proto]
-                res = run_cmd(cmd, timeout=10, suppress_rc_log=True)
-                if not res or res.returncode != 0:
+            cmd = ["netstat", "-ano", "-p", "TCP"]
+            res = run_cmd(cmd, timeout=10, suppress_rc_log=True)
+            if not res or res.returncode != 0:
+                return []
+            for line in (res.stdout or "").splitlines():
+                L = line.split()
+                if not L:
                     continue
-                for line in (res.stdout or "").splitlines():
-                    L = line.split()
-                    if not L:
+                if len(L) >= 5 and L[0].upper()=="TCP":
+                    local = L[1]
+                    state = L[3]
+                    pid = L[4] if len(L) >= 5 else None
+                    try:
+                        addr, port = local.rsplit(":", 1)
+                    except Exception:
                         continue
-                    if proto == "TCP":
-                        # TCP lines: Proto LocalAddress ForeignAddress State PID
-                        if len(L) >= 5 and L[0].upper()=="TCP":
-                            local = L[1]
-                            state = L[3]
-                            pid = L[4] if len(L) >= 5 else None
-                            try:
-                                addr, port = local.rsplit(":", 1)
-                            except Exception:
-                                continue
-                            items.append({
-                                "port": int(port) if port.isdigit() else None,
-                                "proto": "TCP",
-                                "addr": addr,
-                                "state": state.upper(),
-                                "process": None,
-                                "pid": int(pid) if (pid and pid.isdigit()) else None,
-                            })
-                    else:
-                        # UDP lines: Proto LocalAddress ForeignAddress PID  (state missing)
-                        if len(L) >= 4 and L[0].upper()=="UDP":
-                            local = L[1]
-                            pid = L[-1]
-                            try:
-                                addr, port = local.rsplit(":", 1)
-                            except Exception:
-                                continue
-                            items.append({
-                                "port": int(port) if port.isdigit() else None,
-                                "proto": "UDP",
-                                "addr": addr,
-                                "state": "LISTEN",
-                                "process": None,
-                                "pid": int(pid) if (pid and pid.isdigit()) else None,
-                            })
+                    key = ("TCP", int(port) if port.isdigit() else port)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if state.upper() in ("LISTEN", "LISTENING", "LISTEN-DRAIN", "ESTABLISHED") and port.isdigit():
+                        items.append({
+                            "port": int(port),
+                            "proto": "TCP",
+                            "addr": addr,
+                            "state": state.upper(),
+                            "process": None,
+                            "pid": int(pid) if (pid and pid.isdigit()) else None,
+                        })
         except Exception as e:
             log(f"collect_open_ports error: {e}")
-        # Keep only listening-like entries and with valid port
-        out = []
-        for it in items:
-            try:
-                if it.get("port") and (it.get("state") in ("LISTEN", "LISTENING", "LISTEN-DRAIN", "ESTABLISHED") or it.get("proto")=="UDP"):
-                    out.append(it)
-            except Exception:
-                pass
-        return out
+        return items
 
     def report_open_ports_once(self):
         try:

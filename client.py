@@ -1,4 +1,5 @@
-﻿# -*- coding: utf-8 -*-
+﻿from typing import Optional, Union
+# -*- coding: utf-8 -*-
 import os, sys, socket, ssl, threading, time, json, subprocess, ctypes, struct, hashlib, tempfile, argparse
 from ctypes import wintypes
 import tkinter as tk
@@ -12,7 +13,65 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.6"
+__version__ = "1.4.7"
+# ===================== WINDOWS SERVICE KAYDI ===================== #
+def install_windows_service():
+    import win32serviceutil
+    import win32service
+    import win32event
+    import servicemanager
+    import traceback
+    import sys
+    class HoneypotService(win32serviceutil.ServiceFramework):
+        _svc_name_ = "CloudHoneypotClientService"
+        _svc_display_name_ = "Cloud Honeypot Client Service"
+        _svc_description_ = "Sunucu güvenliği için arka planda çalışan hizmet."
+        def __init__(self, args):
+            win32serviceutil.ServiceFramework.__init__(self, args)
+            self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+            self.running = True
+        def SvcStop(self):
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            self.running = False
+            win32event.SetEvent(self.hWaitStop)
+        def SvcDoRun(self):
+            servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE,
+                                  servicemanager.PYS_SERVICE_STARTED,
+                                  (self._svc_name_, ''))
+            try:
+                # Daemon mantığını çağır
+                app = CloudHoneypotClient()
+                app.run_daemon()
+            except Exception:
+                servicemanager.LogErrorMsg(traceback.format_exc())
+
+    # Eğer service olarak çalıştırılıyorsa
+    if len(sys.argv) > 1 and sys.argv[1] in ['install', 'remove', 'start', 'stop', 'restart']:
+        log(f"Service command detected: {sys.argv[1]}")
+        win32serviceutil.HandleCommandLine(HoneypotService)
+        log(f"Service command executed: {sys.argv[1]}")
+        sys.exit(0)
+
+def ensure_service_installed():
+    import subprocess
+    import sys
+    svc_name = "CloudHoneypotClientService"
+    try:
+        log("Service check: querying service status...")
+        res = subprocess.run(['sc', 'query', svc_name], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        stdout = res.stdout if res.stdout is not None else ''
+        if 'FAILED' in stdout or 'does not exist' in stdout:
+            log("Service not found. Registering...")
+            exe = sys.executable if getattr(sys, 'frozen', False) else sys.executable
+            script = os.path.abspath(sys.argv[0])
+            subprocess.run([exe, script, 'install'], check=True)
+            log("Service registered. Starting service...")
+            subprocess.run(['sc', 'start', svc_name], check=True)
+            log("Service started.")
+        else:
+            log("Service already registered and running or stopped.")
+    except Exception as e:
+        log(f"Service install/start error: {e}")
 
 GITHUB_OWNER = "cevdetaksac"
 GITHUB_REPO  = "yesnext-cloud-honeypot-client"
@@ -103,7 +162,8 @@ def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False):
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='ignore',
+            errors='replace',
+            universal_newlines=True,
             creationflags=CREATE_NO_WINDOW,
             timeout=timeout if timeout and timeout > 0 else None,
         )
@@ -529,7 +589,7 @@ class TokenStore:
             log(f"token save error: {e}")
 
     @staticmethod
-    def load() -> str or None:
+    def load() -> Optional[str]:
         try:
             if os.path.exists(TOKEN_FILE_NEW):
                 enc = open(TOKEN_FILE_NEW, "rb").read()
@@ -673,7 +733,7 @@ class ServiceController:
         return ServiceController.restart('TermService')
 
     @staticmethod
-    def get_rdp_port() -> int or None:
+    def get_rdp_port() -> Optional[int]:
         if os.name != 'nt':
             return None
         try:
@@ -849,7 +909,7 @@ class CloudHoneypotClient:
             log(f"ensure_admin error: {e}")
 
     # ---------- Token ---------- #
-    def register_client(self) -> str or None:
+    def register_client(self) -> Optional[str]:
         try:
             ip = self.get_public_ip()
             resp = requests.post(f"{API_URL}/register",
@@ -867,7 +927,7 @@ class CloudHoneypotClient:
             messagebox.showerror(self.t("error"), self.t("err_api_register").format(e=e))
         return None
 
-    def load_token(self) -> str or None:
+    def load_token(self) -> Optional[str]:
         TokenStore.migrate_from_plain()
         tok = TokenStore.load()
         if tok:
@@ -1815,7 +1875,7 @@ del "%~f0" & exit /b 0
         except Exception as e:
             log(f"report_tunnel_status_once err: {e}")
 
-    def report_tunnel_action_to_api(self, service: str, action: str, new_port: str or int = None):
+    def report_tunnel_action_to_api(self, service: str, action: str, new_port: Union[str, int, None] = None):
         log(f"API'ye eylem bildiriliyor: servis={service}, eylem={action}")
         try:
             token = self.state.get('token')
@@ -2557,7 +2617,20 @@ del "%~f0" & exit /b 0
         self.root.mainloop()
 
 # ===================== MAIN ===================== #
+
+# --- Windows Service entegrasyonu ---
 if __name__ == "__main__":
+    # Önce service modunu kontrol et
+    try:
+        install_windows_service()
+    except Exception as e:
+        log(f"Service main install_windows_service error: {e}")
+    # Eğer service olarak kayıtlı değilse, ilk çalıştırmada kendini kaydet
+    try:
+        ensure_service_installed()
+    except Exception as e:
+        log(f"Service main ensure_service_installed error: {e}")
+
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--minimized", action="store_true")
@@ -2569,13 +2642,10 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app = CloudHoneypotClient()
-    # Elevate early to keep UX simple: download & run
     app.ensure_admin()
-
     if args.daemon:
         app.run_daemon()
         sys.exit(0)
-
     app.build_gui(minimized=args.minimized)
 
 

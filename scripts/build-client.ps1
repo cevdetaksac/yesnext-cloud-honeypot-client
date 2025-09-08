@@ -11,7 +11,7 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build error (exit $LASTEXITCODE)" 
 
 # 2. NSIS ile installer üret
 Write-Host "[NSIS] Installer derleniyor..." -ForegroundColor Cyan
-& "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+& "C:\Program Files (x86)\NSIS\makensis.exe" "${PSScriptRoot}\..\installer.nsi"
 if ($LASTEXITCODE -ne 0) { throw "NSIS build error (exit $LASTEXITCODE)" }
 
 # 3. Zip dosyasını oluştur

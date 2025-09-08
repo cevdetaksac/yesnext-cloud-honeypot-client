@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -1519,32 +1519,45 @@ class CloudHoneypotClient:
             tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(tmp_extract)
-            # Prepare updater script to copy all files then restart
-            bat_path = os.path.join(dest_dir, "update_onedir.bat")
-            bat = f"""
-@echo off
-setlocal enableextensions
-set SRC="{tmp_extract}"
-set DST="{dest_dir}"
-REM wait a moment to ensure current process exits
-ping 127.0.0.1 -n 3 >NUL
-:copyloop
-robocopy %SRC% %DST% /E /NFL /NDL /NJH /NJS /NP >NUL
-if %ERRORLEVEL% GEQ 8 (
-  ping 127.0.0.1 -n 2 >NUL
-  goto copyloop
-)
-            start "" "%DST%\\client-onedir.exe" {MIN}
-del "%~f0" & exit /b 0
-"""
-            with open(bat_path, 'w', encoding='utf-8') as f:
-                f.write(bat)
+            # Dosyaları doğrudan Python ile kopyala
+            for root, dirs, files in os.walk(tmp_extract):
+                rel_path = os.path.relpath(root, tmp_extract)
+                target_dir = os.path.join(dest_dir, rel_path) if rel_path != '.' else dest_dir
+                os.makedirs(target_dir, exist_ok=True)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    dst_file = os.path.join(target_dir, file)
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        log(f"Self-update: {src_file} -> {dst_file}")
+                    except Exception as e:
+                        log(f"Self-update copy error: {src_file} -> {dst_file}: {e}")
             try:
                 write_watchdog_token('stop')
             except Exception:
                 pass
-            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
+            # Servis modunda mı?
+            import win32serviceutil
+            svc_name = "CloudHoneypotClientService"
+            try:
+                status = win32serviceutil.QueryServiceStatus(svc_name)
+                if status:
+                    log("Self-update: Service mode detected, restarting service...")
+                    win32serviceutil.StopService(svc_name)
+                    time.sleep(2)
+                    win32serviceutil.StartService(svc_name)
+                    log("Self-update: Service restarted.")
+                    return
+            except Exception as e:
+                log(f"Self-update: Service restart error: {e}")
+            # Normal modda yeni exe'yi başlat
+            exe_path = os.path.join(dest_dir, "client-onedir.exe")
+            try:
+                subprocess.Popen([exe_path, MIN] if MIN else [exe_path], shell=False)
+                log(f"Self-update: new exe launched: {exe_path}")
+            except Exception as e:
+                log(f"Self-update: launch error: {e}")
+            os._exit(0)
         except Exception as e:
             log(f"apply_onedir_update error: {e}")
         finally:
@@ -2657,12 +2670,21 @@ del "%~f0" & exit /b 0
 
 # --- Windows Service entegrasyonu ---
 if __name__ == "__main__":
-    # Önce service modunu kontrol et
+    # Installer ile uyumlu servis kurulum ve loglama
+    if '--install-service' in sys.argv:
+        log("Installer parametresi ile servis kurulumu başlatıldı.")
+        try:
+            install_windows_service()
+            log("Servis başarıyla kuruldu.")
+        except Exception as e:
+            log(f"Servis kurulum hatası: {e}")
+        sys.exit(0)
+
+    # Normal başlatma ve sonsuz döngü engelleme
     try:
         install_windows_service()
     except Exception as e:
         log(f"Service main install_windows_service error: {e}")
-    # Eğer service olarak kayıtlı değilse, ilk çalıştırmada kendini kaydet
     try:
         ensure_service_installed()
     except Exception as e:
@@ -2681,6 +2703,7 @@ if __name__ == "__main__":
     app = CloudHoneypotClient()
     app.ensure_admin()
     if args.daemon:
+        log("Daemon modunda başlatılıyor.")
         app.run_daemon()
         sys.exit(0)
     app.build_gui(minimized=args.minimized)

@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.4.9"
+__version__ = "1.5.0"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -64,8 +64,31 @@ def ensure_service_installed():
             log("Service not found. Registering...")
             exe = sys.executable if getattr(sys, 'frozen', False) else sys.executable
             script = os.path.abspath(sys.argv[0])
+            # install parametresiyle çalışan process var mı kontrol et
+            def is_install_running():
+                res = subprocess.run(['tasklist','/FI','IMAGENAME eq client-onedir.exe','/FO','CSV','/NH'], capture_output=True, text=True, encoding='utf-8', errors='replace')
+                if res and res.stdout:
+                    for line in res.stdout.splitlines():
+                        if 'client-onedir.exe' in line:
+                            # Komut satırı argümanlarını kontrol et
+                            import psutil
+                            for proc in psutil.process_iter(['pid','name','cmdline']):
+                                if proc.info['name'] == 'client-onedir.exe' and 'install' in (proc.info['cmdline'] or []):
+                                    log(f"[SAFEGUARD] client-onedir.exe install process already running: PID={proc.info['pid']} CMD={proc.info['cmdline']}")
+                                    return True
+                return False
+            try:
+                import psutil
+            except ImportError:
+                log("psutil not installed, cannot check running install process.")
+                psutil = None
+            if psutil and is_install_running():
+                log("[SAFEGUARD] Skipping new install process, already running.")
+                return
+            log(f"[SPAWN] subprocess.run: {[exe, script, 'install']}")
             subprocess.run([exe, script, 'install'], check=True)
             log("Service registered. Starting service...")
+            log(f"[SPAWN] subprocess.run: {['sc', 'start', svc_name]}")
             subprocess.run(['sc', 'start', svc_name], check=True)
             log("Service started.")
         else:

@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 # 1. PyInstaller ile onedir exe üret
 Write-Host "[BUILD] PyInstaller ile exe oluşturuluyor..." -ForegroundColor Cyan
-pyinstaller --clean --noconfirm --onefile --name client-onedir client.py
+pyinstaller --clean --noconfirm --onefile --windowed --name client-onedir client.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build error (exit $LASTEXITCODE)" }
 
 # 2. NSIS ile installer üret

@@ -16,6 +16,9 @@ Section "Install"
   ; Register Windows Service (calls exe with service install param)
   ExecWait '"$INSTDIR\client-onedir.exe" --install-service'
 
+  ; Start GUI in background (no CMD window)
+  ExecShell "open" "$INSTDIR\client-onedir.exe"
+
   ; Create shortcut on Desktop
   CreateShortCut "$DESKTOP\CloudClient.lnk" "$INSTDIR\client-onedir.exe"
 

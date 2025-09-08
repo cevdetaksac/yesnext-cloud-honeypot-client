@@ -10,12 +10,25 @@ Page directory
 Page instfiles
 
 Section "Install"
+  ; Stop existing service and processes first
+  nsExec::ExecToLog 'sc stop CloudHoneypotClientService'
+  Sleep 2000 ; Give some time for service to stop
+  
+  ; Kill any running client processes
+  nsExec::ExecToLog 'taskkill /F /IM client-onedir.exe'
+  Sleep 1000 ; Wait for processes to close
+  
   SetOutPath "$INSTDIR"
   File "dist\\client-onedir.exe"
 
   ; Register Windows Service (calls exe with service install param)
   ExecWait '"$INSTDIR\client-onedir.exe" --install-service'
-
+  Sleep 1000 ; Wait for service registration
+  
+  ; Start service and GUI
+  nsExec::ExecToLog 'sc start CloudHoneypotClientService'
+  Sleep 2000 ; Give service time to start
+  
   ; Start GUI in background (no CMD window)
   ExecShell "open" "$INSTDIR\client-onedir.exe"
 
@@ -27,6 +40,16 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; Stop service and processes before uninstalling
+  nsExec::ExecToLog 'sc stop CloudHoneypotClientService'
+  Sleep 2000
+  nsExec::ExecToLog 'taskkill /F /IM client-onedir.exe'
+  Sleep 1000
+  
+  ; Remove service
+  nsExec::ExecToLog 'sc delete CloudHoneypotClientService'
+  Sleep 1000
+  
   Delete "$INSTDIR\client-onedir.exe"
   Delete "$DESKTOP\CloudClient.lnk"
   Delete "$INSTDIR\Uninstall.exe"

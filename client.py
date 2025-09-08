@@ -13,7 +13,7 @@ except Exception:
 
 # ===================== KURULUM & SABİTLER ===================== #
 TEST_MODE = 0  # 1=log only, 0=real
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 # ===================== WINDOWS SERVICE KAYDI ===================== #
 def install_windows_service():
     import win32serviceutil
@@ -56,6 +56,17 @@ def ensure_service_installed():
     import subprocess
     import sys
     svc_name = "CloudHoneypotClientService"
+    # Yönetici yetkisi yoksa yükselt
+    try:
+        if os.name == "nt" and not ctypes.windll.shell32.IsUserAnAdmin():
+            log("[SAFEGUARD] Yönetici yetkisi yok, uygulama kendini yönetici olarak yeniden başlatıyor.")
+            exe = sys.executable
+            params = f'"{os.path.abspath(sys.argv[0])}" ' + " ".join(sys.argv[1:])
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+            sys.exit(0)
+    except Exception as e:
+        log(f"[SAFEGUARD] Yönetici yükseltme hatası: {e}")
+        return
     # win32serviceutil modülü var mı kontrol et
     try:
         import win32serviceutil
@@ -63,29 +74,32 @@ def ensure_service_installed():
         log("[SAFEGUARD] win32serviceutil modülü eksik, servis kurulumu atlanıyor. Uygulama normal modda devam edecek.")
         return
     try:
-        log("Service check: querying service status...")
-        res = subprocess.run(['sc', 'query', svc_name], capture_output=True, text=True, encoding='utf-8', errors='replace')
-        stdout = res.stdout if res.stdout is not None else ''
-        if 'FAILED' in stdout or 'does not exist' in stdout:
-            log("Service not found. Registering...")
+        import win32serviceutil, win32service
+        log("Service check: querying service status (native)...")
+        try:
+            status = win32serviceutil.QueryServiceStatus(svc_name)
+            log(f"Service status: {status}")
+            log("Service already registered and running or stopped.")
+            return
+        except Exception:
+            log("Service not found. Registering (native)...")
             exe = sys.executable if getattr(sys, 'frozen', False) else sys.executable
             script = os.path.abspath(sys.argv[0])
             try:
-                log(f"[SPAWN] subprocess.run: {[exe, script, 'install']}")
-                result = subprocess.run([exe, script, 'install'], check=True)
+                win32serviceutil.InstallService(
+                    exe,
+                    svc_name,
+                    displayName="Cloud Honeypot Client Service",
+                    description="Sunucu güvenliği için arka planda çalışan hizmet.",
+                    startType=win32service.SERVICE_AUTO_START,
+                    exeArgs=f'"{script}" --daemon'
+                )
+                log("Service registered (native). Starting service...")
+                win32serviceutil.StartService(svc_name)
+                log("Service started (native).")
             except Exception as e:
-                log(f"[SAFEGUARD] Service install denemesi başarısız: {e}. Sonsuz döngü engellendi, uygulama normal modda devam edecek.")
+                log(f"[SAFEGUARD] Native service install/start error: {e}. Sonsuz döngü engellendi, uygulama normal modda devam edecek.")
                 return
-            log("Service registered. Starting service...")
-            try:
-                log(f"[SPAWN] subprocess.run: {['sc', 'start', svc_name]}")
-                subprocess.run(['sc', 'start', svc_name], check=True)
-                log("Service started.")
-            except Exception as e:
-                log(f"[SAFEGUARD] Service başlatma hatası: {e}. Sonsuz döngü engellendi, uygulama normal modda devam edecek.")
-                return
-        else:
-            log("Service already registered and running or stopped.")
     except Exception as e:
         log(f"Service install/start error: {e}")
 

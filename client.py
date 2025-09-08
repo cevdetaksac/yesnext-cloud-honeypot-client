@@ -82,6 +82,9 @@ def is_service_mode():
     )
 
 # ===================== WINDOWS SERVICE KAYDI ===================== #
+class HoneypotService:
+    pass  # Placeholder for IDEs; actual definition below
+
 def install_windows_service():
     import win32serviceutil
     import win32service
@@ -89,6 +92,7 @@ def install_windows_service():
     import servicemanager
     import traceback
     import sys
+    global HoneypotService
     class HoneypotService(win32serviceutil.ServiceFramework):
         _svc_name_ = "CloudHoneypotClientService"
         _svc_display_name_ = "Cloud Honeypot Client Service"
@@ -1928,7 +1932,7 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"report_tunnel_action_to_api hatası: {e}")
 
-    def report_tunnel_action_to_api(self, service: str, action: str, new_port: str or int = None):
+    def report_tunnel_action_to_api(self, service: str, action: str, new_port: Union[str, int] = None):
         log(f"API'ye eylem bildiriliyor: servis={service}, eylem={action}")
         try:
             token = self.state.get('token')

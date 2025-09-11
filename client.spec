@@ -37,4 +37,5 @@ exe = EXE(
     entitlements_file=None,
     uac_admin=True,
     icon='certs/honeypot.ico',
+    manifest='client.manifest',
 )

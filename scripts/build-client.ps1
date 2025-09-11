@@ -27,6 +27,10 @@ Copy-Item "client_lang.json" "dist\honeypot-client\"
 Write-Host "Converting custom PNG icons to ICO..." -ForegroundColor Yellow
 python scripts\convert_png_to_ico.py
 
+# Run Defender compatibility helper
+Write-Host "Setting up Windows Defender compatibility..." -ForegroundColor Yellow
+python scripts\defender_helper.py
+
 # Copy icon if not exists
 if (!(Test-Path "certs\honeypot.ico")) {
     New-Item -ItemType Directory -Force -Path "certs"

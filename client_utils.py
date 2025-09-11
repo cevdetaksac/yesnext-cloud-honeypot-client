@@ -699,17 +699,18 @@ class ServiceController:
             port_3389_in_use = ServiceController._check_port_in_use(3389)
             log_func(f"3389 portu kullanımda mı: {port_3389_in_use}")
             
-            # 53389 port durumunu kontrol et
-            port_53389_in_use = ServiceController._check_port_in_use(53389)
-            log_func(f"53389 portu kullanımda mı: {port_53389_in_use}")
+            # RDP güvenli port durumunu kontrol et
+            rdp_secure_port = get_rdp_secure_port()
+            port_secure_in_use = ServiceController._check_port_in_use(rdp_secure_port)
+            log_func(f"{rdp_secure_port} portu kullanımda mı: {port_secure_in_use}")
             
             # Terminal servisi durumunu kontrol et
             svc_status = ServiceController._sc_query_code("TermService")
             log_func(f"Terminal Servis durumu kodu: {svc_status}")
             
-            if current_port == 53389:
+            if current_port == rdp_secure_port:
                 # Port zaten güvenli konumda
-                log_func("RDP port güvenli konumda (53389)")
+                log_func(f"RDP port güvenli konumda ({rdp_secure_port})")
                 if not port_3389_in_use:
                     log_func("3389 portu boşta, tünel başlatılabilir")
                 else:
@@ -718,8 +719,8 @@ class ServiceController:
             elif current_port == 3389:
                 # Port varsayılan konumda, koruma başlatılabilir
                 log_func("RDP port varsayılan konumda (3389)")
-                if port_53389_in_use:
-                    log_func("UYARI: 53389 portu kullanımda!")
+                if port_secure_in_use:
+                    log_func(f"UYARI: {rdp_secure_port} portu kullanımda!")
                 return True
             else:
                 # Port beklenmeyen bir değerde
@@ -1035,7 +1036,7 @@ def load_config() -> dict:
     default_config = {
         "application": {
             "name": "Cloud Honeypot Client",
-            "version": "2.1.0",
+            "version": "2.2.1",
             "author": "YesNext Technology"
         },
         "language": {
@@ -1066,6 +1067,13 @@ def load_config() -> dict:
             "base_url": "https://honeypot.yesnext.com.tr/api",
             "timeout": 30,
             "retry_count": 3
+        },
+        "honeypot": {
+            "server_ip": "194.5.236.181",
+            "tunnel_port": 4443,
+            "connect_timeout": 8,
+            "receive_buffer_size": 65536,
+            "server_name": None
         },
         "tunnels": {
             "auto_start": False,
@@ -1142,6 +1150,55 @@ def get_config_value(key_path: str, default=None):
     except (KeyError, TypeError):
         return default
 
+# Alias for backward compatibility
+def get_from_config(key_path: str, fallback):
+    """Helper to get values from config with fallback - alias for get_config_value"""
+    return get_config_value(key_path, fallback)
+
+def get_port_table():
+    """Get port table from configuration file
+    
+    Returns:
+        List[Tuple[str, str, str]]: Port table in format [(listen_port, new_port, service), ...]
+    """
+    try:
+        config = load_config()
+        default_ports = config.get("tunnels", {}).get("default_ports", [])
+        
+        port_table = []
+        for port_config in default_ports:
+            listen_port = str(port_config.get("local", ""))
+            remote_port = str(port_config.get("remote", 0)) if port_config.get("remote", 0) > 0 else "-"
+            service = str(port_config.get("service", ""))
+            
+            if listen_port and service:
+                port_table.append((listen_port, remote_port, service))
+        
+        print(f"[CONFIG] Port table loaded from config: {len(port_table)} entries")
+        return port_table
+        
+    except Exception as e:
+        print(f"[CONFIG] Error loading port table: {e}")
+        # Fallback to default table
+        return [
+            ("3389", "53389", "RDP"),
+            ("1433", "-", "MSSQL"),
+            ("3306", "-", "MySQL"),
+            ("21", "-", "FTP"),
+            ("22", "-", "SSH"),
+        ]
+
+def get_rdp_secure_port():
+    """Get RDP secure port from configuration
+    
+    Returns:
+        int: RDP secure port number
+    """
+    try:
+        return get_config_value("tunnels.rdp_port", 53389)
+    except Exception:
+        return 53389
+
 def set_config_value(key_path: str, value) -> bool:
     """Set a configuration value using dot notation"""
     config = load_config()
@@ -1169,3 +1226,454 @@ def update_language_config(language: str, selected_by_user: bool = True) -> bool
 # ===== CONFIG SYSTEM FINALIZED =====
 # All settings are now managed through client_config.json
 # No legacy migration needed - pure config-driven architecture
+
+
+# ===================== INSTALLER-BASED UPDATE SYSTEM ===================== #
+
+class InstallerUpdateManager:
+    """Yeni installer tabanlı güncelleme sistemi"""
+    
+    def __init__(self, github_owner: str, github_repo: str, log_func=None):
+        self.github_owner = github_owner
+        self.github_repo = github_repo
+        self.log = log_func if log_func else print
+        self.base_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases/latest"
+        
+    def get_current_version(self) -> str:
+        """Mevcut sürümü al"""
+        try:
+            config = load_config()
+            return config.get("application", {}).get("version", "1.0.0")
+        except:
+            return "1.0.0"
+    
+    def check_for_updates(self) -> Dict[str, Any]:
+        """Güncelleme kontrolü yap"""
+        try:
+            self.log("[UPDATE] Güncelleme kontrol ediliyor...")
+            
+            # GitHub API'den son sürüm bilgisini al
+            import requests
+            response = requests.get(self.base_url, timeout=10)
+            if response.status_code != 200:
+                return {"error": "API erişim hatası", "current_version": self.get_current_version()}
+            
+            data = response.json()
+            latest_tag = data.get("tag_name") or data.get("name", "")
+            latest_version = latest_tag.lstrip('v')
+            current_version = self.get_current_version().lstrip('v')
+            
+            self.log(f"[UPDATE] Mevcut sürüm: {current_version}")
+            self.log(f"[UPDATE] Son sürüm: {latest_version}")
+            
+            # Sürüm karşılaştırması
+            if self._compare_versions(latest_version, current_version) <= 0:
+                return {
+                    "has_update": False,
+                    "current_version": current_version,
+                    "latest_version": latest_version,
+                    "message": "Güncel sürüm kullanılıyor"
+                }
+            
+            # Installer asset'ini bul
+            assets = data.get("assets", [])
+            installer_asset = None
+            
+            for asset in assets:
+                name = asset.get("name", "").lower()
+                if name.endswith("-installer.exe") or name.endswith("installer.exe"):
+                    installer_asset = asset
+                    break
+            
+            if not installer_asset:
+                return {"error": "Installer dosyası bulunamadı", "current_version": current_version}
+            
+            return {
+                "has_update": True,
+                "current_version": current_version,
+                "latest_version": latest_version,
+                "release_notes": data.get("body", ""),
+                "installer_url": installer_asset.get("browser_download_url"),
+                "installer_size": installer_asset.get("size", 0),
+                "installer_name": installer_asset.get("name"),
+                "published_at": data.get("published_at")
+            }
+            
+        except Exception as e:
+            self.log(f"[UPDATE] Kontrol hatası: {e}")
+            return {"error": str(e), "current_version": self.get_current_version()}
+    
+    def _compare_versions(self, version1: str, version2: str) -> int:
+        """Sürüm karşılaştırması (-1: v1<v2, 0: v1=v2, 1: v1>v2)"""
+        try:
+            def normalize(v):
+                return [int(x) for x in v.replace('v', '').split('.')]
+            
+            v1_parts = normalize(version1)
+            v2_parts = normalize(version2)
+            
+            # Uzunlukları eşitle
+            max_len = max(len(v1_parts), len(v2_parts))
+            v1_parts.extend([0] * (max_len - len(v1_parts)))
+            v2_parts.extend([0] * (max_len - len(v2_parts)))
+            
+            if v1_parts < v2_parts:
+                return -1
+            elif v1_parts > v2_parts:
+                return 1
+            else:
+                return 0
+        except:
+            return 0
+    
+    def download_installer(self, download_url: str, progress_callback=None) -> Optional[str]:
+        """Installer'ı indir"""
+        try:
+            import requests
+            import tempfile
+            
+            self.log("[UPDATE] Installer indiriliyor...")
+            
+            # Temp dizinde installer dosyası oluştur
+            temp_dir = tempfile.mkdtemp(prefix="honeypot_update_")
+            installer_path = os.path.join(temp_dir, "honeypot-client-installer.exe")
+            
+            response = requests.get(download_url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(installer_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if progress_callback and total_size > 0:
+                            progress = int((downloaded / total_size) * 100)
+                            progress_callback(progress)
+            
+            self.log(f"[UPDATE] Installer indirildi: {installer_path}")
+            return installer_path
+            
+        except Exception as e:
+            self.log(f"[UPDATE] İndirme hatası: {e}")
+            return None
+    
+    def install_update(self, installer_path: str, silent: bool = False) -> bool:
+        """Güncellemeyi yükle"""
+        try:
+            if not os.path.exists(installer_path):
+                self.log("[UPDATE] Installer dosyası bulunamadı")
+                return False
+            
+            self.log("[UPDATE] Güncelleme yükleniyor...")
+            
+            # Mevcut process'leri sonlandır
+            self._terminate_running_instances()
+            
+            # Installer'ı çalıştır
+            cmd = [installer_path]
+            if silent:
+                cmd.extend(["/S", "/silent"])  # NSIS silent install
+            
+            self.log(f"[UPDATE] Installer komutu: {' '.join(cmd)}")
+            
+            # Installer'ı başlat ve tamamlanmasını bekle
+            import subprocess
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                self.log("[UPDATE] Güncelleme başarıyla yüklendi")
+                
+                # Temp dosyayı temizle
+                try:
+                    os.remove(installer_path)
+                    os.rmdir(os.path.dirname(installer_path))
+                except:
+                    pass
+                
+                return True
+            else:
+                self.log(f"[UPDATE] Installer hatası: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            self.log(f"[UPDATE] Yükleme hatası: {e}")
+            return False
+    
+    def _terminate_running_instances(self):
+        """Çalışan honeypot instance'larını sonlandır"""
+        try:
+            import subprocess
+            
+            # Honeypot process'lerini bul ve sonlandır
+            process_names = ["honeypot-client.exe", "client.exe", "python.exe"]
+            
+            for proc_name in process_names:
+                try:
+                    result = subprocess.run(
+                        ["taskkill", "/F", "/IM", proc_name],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        self.log(f"[UPDATE] Process sonlandırıldı: {proc_name}")
+                except:
+                    pass
+                    
+        except Exception as e:
+            self.log(f"[UPDATE] Process sonlandırma hatası: {e}")
+    
+    def start_new_version(self, silent: bool = False):
+        """Yeni sürümü başlat"""
+        try:
+            # Varsayılan kurulum dizininden başlat
+            possible_paths = [
+                r"C:\Program Files\YesNext\Cloud Honeypot Client\honeypot-client.exe",
+                r"C:\Program Files (x86)\YesNext\Cloud Honeypot Client\honeypot-client.exe",
+                os.path.join(os.path.dirname(sys.executable), "honeypot-client.exe")
+            ]
+            
+            for exe_path in possible_paths:
+                if os.path.exists(exe_path):
+                    self.log(f"[UPDATE] Yeni sürüm başlatılıyor: {exe_path}")
+                    
+                    cmd = [exe_path]
+                    if silent:
+                        cmd.append("--minimized")
+                    
+                    import subprocess
+                    subprocess.Popen(cmd, creationflags=0x08000000)  # CREATE_NO_WINDOW
+                    return True
+            
+            self.log("[UPDATE] Yeni sürüm executable'ı bulunamadı")
+            return False
+            
+        except Exception as e:
+            self.log(f"[UPDATE] Yeni sürüm başlatma hatası: {e}")
+            return False
+    
+    def update_with_progress(self, progress_callback=None, silent: bool = False) -> bool:
+        """Progress callback ile güncelleme yap"""
+        try:
+            if progress_callback:
+                progress_callback(10, "Güncelleme kontrol ediliyor...")
+            
+            # Güncelleme kontrolü
+            update_info = self.check_for_updates()
+            if update_info.get("error"):
+                if progress_callback:
+                    progress_callback(0, f"Hata: {update_info['error']}")
+                return False
+            
+            if not update_info.get("has_update"):
+                if progress_callback:
+                    progress_callback(100, "Zaten güncel sürüm kullanılıyor")
+                return True
+            
+            if progress_callback:
+                progress_callback(30, "Installer indiriliyor...")
+            
+            # Installer'ı indir
+            def download_progress(percent):
+                if progress_callback:
+                    progress_callback(30 + (percent * 0.4), f"İndiriliyor... %{percent}")
+            
+            installer_path = self.download_installer(
+                update_info["installer_url"], 
+                download_progress
+            )
+            
+            if not installer_path:
+                if progress_callback:
+                    progress_callback(0, "İndirme başarısız")
+                return False
+            
+            if progress_callback:
+                progress_callback(70, "Güncelleme yükleniyor...")
+            
+            # Güncellemeyi yükle
+            success = self.install_update(installer_path, silent)
+            
+            if success:
+                if progress_callback:
+                    progress_callback(90, "Yeni sürüm başlatılıyor...")
+                
+                # Kısa bekleme sonrası yeni sürümü başlat
+                import time
+                time.sleep(2)
+                self.start_new_version(silent)
+                
+                if progress_callback:
+                    progress_callback(100, "Güncelleme tamamlandı")
+                return True
+            else:
+                if progress_callback:
+                    progress_callback(0, "Yükleme başarısız")
+                return False
+                
+        except Exception as e:
+            self.log(f"[UPDATE] Güncelleme süreci hatası: {e}")
+            if progress_callback:
+                progress_callback(0, f"Hata: {str(e)}")
+            return False
+
+
+# ===================== UPDATE UI HELPERS ===================== #
+
+class UpdateProgressDialog:
+    """Güncelleme progress dialog'u"""
+    
+    def __init__(self, parent=None, title="Güncelleme"):
+        self.parent = parent
+        self.title = title
+        self.dialog = None
+        self.progress_var = None
+        self.status_var = None
+        self.progress_bar = None
+    
+    def create_dialog(self):
+        """Dialog oluştur"""
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            
+            self.dialog = tk.Toplevel(self.parent) if self.parent else tk.Tk()
+            self.dialog.title(self.title)
+            self.dialog.geometry("400x150")
+            self.dialog.resizable(False, False)
+            
+            # Ortala
+            if self.parent:
+                self.dialog.transient(self.parent)
+                self.dialog.grab_set()
+                
+                # Parent'ın merkezine konumlandır
+                parent_x = self.parent.winfo_rootx()
+                parent_y = self.parent.winfo_rooty()
+                parent_w = self.parent.winfo_width()
+                parent_h = self.parent.winfo_height()
+                
+                x = parent_x + (parent_w // 2) - 200
+                y = parent_y + (parent_h // 2) - 75
+                self.dialog.geometry(f"400x150+{x}+{y}")
+            
+            # Durum metni
+            self.status_var = tk.StringVar(value="Başlatılıyor...")
+            status_label = tk.Label(
+                self.dialog, 
+                textvariable=self.status_var, 
+                font=("Arial", 10)
+            )
+            status_label.pack(pady=15)
+            
+            # Progress bar
+            self.progress_var = tk.IntVar()
+            self.progress_bar = ttk.Progressbar(
+                self.dialog,
+                variable=self.progress_var,
+                maximum=100,
+                length=350
+            )
+            self.progress_bar.pack(pady=10)
+            
+            # Progress yüzdesi
+            self.percent_var = tk.StringVar(value="0%")
+            percent_label = tk.Label(
+                self.dialog,
+                textvariable=self.percent_var,
+                font=("Arial", 9)
+            )
+            percent_label.pack()
+            
+            return True
+            
+        except Exception as e:
+            print(f"Dialog oluşturma hatası: {e}")
+            return False
+    
+    def update_progress(self, percent: int, message: str = ""):
+        """Progress güncelle"""
+        try:
+            if self.dialog and self.progress_var and self.status_var:
+                self.progress_var.set(percent)
+                if message:
+                    self.status_var.set(message)
+                self.percent_var.set(f"{percent}%")
+                self.dialog.update()
+        except Exception as e:
+            print(f"Progress güncelleme hatası: {e}")
+    
+    def close_dialog(self):
+        """Dialog'u kapat"""
+        try:
+            if self.dialog:
+                self.dialog.destroy()
+                self.dialog = None
+        except Exception as e:
+            print(f"Dialog kapatma hatası: {e}")
+
+
+def create_update_manager(github_owner: str = "cevdetaksac", 
+                         github_repo: str = "yesnext-cloud-honeypot-client",
+                         log_func=None) -> InstallerUpdateManager:
+    """Update manager factory fonksiyonu"""
+    return InstallerUpdateManager(github_owner, github_repo, log_func)
+
+
+# ===================== LEGACY COMPATIBILITY ===================== #
+
+def migrate_from_zip_to_installer():
+    """Eski zip tabanlı sistemden installer tabanlı sisteme geçiş"""
+    try:
+        # Eski zip güncellemesi dosyalarını temizle
+        temp_dirs = []
+        import tempfile
+        temp_root = tempfile.gettempdir()
+        
+        for item in os.listdir(temp_root):
+            if item.startswith("chpupd-") or item.startswith("chpzip-"):
+                old_path = os.path.join(temp_root, item)
+                if os.path.isdir(old_path):
+                    temp_dirs.append(old_path)
+        
+        for temp_dir in temp_dirs:
+            try:
+                import shutil
+                shutil.rmtree(temp_dir)
+                print(f"Eski temp dizin temizlendi: {temp_dir}")
+            except:
+                pass
+                
+        # Eski güncelleme betikleri
+        old_scripts = ["update_onedir.bat", "update_run.bat"]
+        for script in old_scripts:
+            if os.path.exists(script):
+                try:
+                    os.remove(script)
+                    print(f"Eski güncelleme betiği temizlendi: {script}")
+                except:
+                    pass
+                    
+        print("Zip tabanlı sistemden installer sistemine geçiş tamamlandı")
+        return True
+        
+    except Exception as e:
+        print(f"Geçiş sırasında hata: {e}")
+        return False
+
+
+# Initialization
+if __name__ == "__main__":
+    # Test update manager
+    print("Testing InstallerUpdateManager...")
+    
+    def test_log(msg):
+        print(f"[TEST] {msg}")
+    
+    update_mgr = create_update_manager(log_func=test_log)
+    update_info = update_mgr.check_for_updates()
+    
+    print(f"Update check result: {update_info}")
+    print("InstallerUpdateManager test completed ✅")

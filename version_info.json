@@ -1,12 +1,12 @@
 {
   "CompanyName": "YesNext Technology",
   "FileDescription": "Cloud Honeypot Client - Network Security Monitor",
-  "FileVersion": "2.1.0",
+  "FileVersion": "2.2.1",
   "InternalName": "honeypot-client",
   "LegalCopyright": "Copyright \u00a9 2024 YesNext Technology",
   "OriginalFilename": "honeypot-client.exe",
   "ProductName": "Cloud Honeypot Client",
-  "ProductVersion": "2.1.0",
+  "ProductVersion": "2.2.1",
   "Purpose": "Network Security and Threat Detection",
   "Category": "Security Software"
 }

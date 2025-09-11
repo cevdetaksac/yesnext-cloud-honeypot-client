@@ -15,10 +15,11 @@ from typing import Optional, Union, Dict, Any
 import datetime as dt
 import requests, webbrowser, logging, struct, hashlib
 
-# Third-party imports
-import firewall_agent as FW_AGENT
-
 # Local module imports - Modularized honeypot client components
+from client_firewall import FirewallAgent
+from client_helpers import log, run_cmd, ClientHelpers
+import client_helpers
+from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
 from client_api import HoneypotAPIClient, test_api_connection, AsyncAttackCounter
 from client_gui import LoadingScreen, LanguageDialog, AdminPrivilegeDialog, ConsentDialog
 from client_gui import show_startup_notice, show_error_message, show_info_message, show_warning_message
@@ -29,7 +30,8 @@ from client_utils import (ConfigManager, LanguageManager, LoggerManager, Securit
                          is_process_running_windows, write_watchdog_token, read_watchdog_token,
                          start_watchdog_if_needed, is_admin, set_autostart, watchdog_main,
                          install_excepthook, load_config, save_config, get_config_value, 
-                         set_config_value, update_language_config)
+                         set_config_value, update_language_config, get_port_table, get_from_config,
+                         get_rdp_secure_port)
 
 # ===================== APPLICATION CONFIGURATION ===================== #
 # Purpose: Central configuration management and file paths
@@ -116,19 +118,6 @@ def get_app_config():
         _CONFIG = load_config()
     return _CONFIG
 
-# Application constants loaded from config
-def get_from_config(key_path: str, fallback):
-    """Helper to get values from config with fallback"""
-    try:
-        config = get_app_config()
-        keys = key_path.split('.')
-        value = config
-        for key in keys:
-            value = value[key]
-        return value
-    except (KeyError, TypeError):
-        return fallback
-
 # Application metadata from config
 __version__ = get_from_config("application.version", "2.1.0")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -136,7 +125,9 @@ GITHUB_OWNER, GITHUB_REPO = "cevdetaksac", "yesnext-cloud-honeypot-client"
 
 # Service configuration from config
 API_URL = get_from_config("api.base_url", "https://honeypot.yesnext.com.tr/api")
-HONEYPOT_IP, HONEYPOT_TUNNEL_PORT = "194.5.236.181", 4443
+# Network configuration - loaded from config
+HONEYPOT_IP = get_from_config("honeypot.server_ip", "194.5.236.181") 
+HONEYPOT_TUNNEL_PORT = get_from_config("honeypot.tunnel_port", 4443)
 CONTROL_HOST, CONTROL_PORT = "127.0.0.1", 58632  # Single instance control
 
 # Network settings
@@ -205,20 +196,6 @@ try:
     logging.getLogger('PIL').setLevel(logging.WARNING)
 except:
     pass
-
-# ===================== UTILITY FUNCTIONS ===================== #
-# Purpose: Compact utility functions for logging and command execution
-
-def log(msg: str) -> None:
-    """Centralized logging function with error handling"""
-    try:
-        LOGGER.info(str(msg))
-    except Exception as e:
-        LOGGER.error(f"Log error: {e}")
-
-def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False):
-    """Execute system commands using modular SystemUtils"""
-    return SystemUtils.run_cmd(cmd, timeout, suppress_rc_log, log)
 
 # ===================== WINDOWS DEFENDER COMPATIBILITY ===================== #
 # Purpose: Windows Defender uyumluluğu ve güven sinyalleri
@@ -310,66 +287,15 @@ def create_defender_trust_signals():
 # Load I18N messages from JSON
 I18N = load_i18n()
 
-# ===================== TUNNEL SERVER IMPLEMENTATION ===================== #
-# Purpose: High-performance tunnel server for honeypot traffic forwarding
-class TunnelServerThread(threading.Thread):
-    """High-performance tunnel server for forwarding honeypot traffic"""
-    
-    def __init__(self, app, listen_port: int, service_name: str):
-        super().__init__(daemon=True)
-        self.app, self.listen_port, self.service_name = app, int(listen_port), service_name
-        self.stop_evt, self.sock = threading.Event(), None
-
-    def run(self):
-        """Main server loop with optimized connection handling"""
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.sock.bind(("0.0.0.0", self.listen_port))
-            self.sock.listen(200)
-            log(f"[{self.service_name}] Listening on 0.0.0.0:{self.listen_port}")
-        except Exception as e:
-            log(f"[{self.service_name}] Failed to bind port {self.listen_port}: {e}")
-            return
-
-        # Main accept loop with timeout handling
-        while not self.stop_evt.is_set():
-            try:
-                self.sock.settimeout(1.0)
-                client_sock, _ = self.sock.accept()
-                
-                # Handle connection in separate thread
-                threading.Thread(
-                    target=self.app.handle_incoming_connection,
-                    args=(client_sock, self.listen_port, self.service_name),
-                    daemon=True
-                ).start()
-                
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if not self.stop_evt.is_set():
-                    log(f"[{self.service_name}] Accept error: {e}")
-
-    def stop(self):
-        """Gracefully stop the tunnel server"""
-        self.stop_evt.set()
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-
 # ===================== ANA UYGULAMA ===================== #
 class CloudHoneypotClient:
-    # Default port mappings
-    PORT_TABLOSU = [
-        ("3389", "53389", "RDP"),
-        ("1433", "-", "MSSQL"),
-        ("3306", "-", "MySQL"),
-        ("21",   "-", "FTP"),
-        ("22",   "-", "SSH"),
-    ]
+    # Port mappings loaded from configuration
+    @property
+    def PORT_TABLOSU(self):
+        """Get port table from configuration file"""
+        if not hasattr(self, '_port_table_cache'):
+            self._port_table_cache = get_port_table()
+        return self._port_table_cache
 
     def get_token(self) -> Optional[str]:
         # Kaydedilmiş token'ı yükler
@@ -412,6 +338,11 @@ class CloudHoneypotClient:
         # Load configuration directly - pure config-driven architecture
         self.config = load_config()
         
+        # Initialize networking configuration
+        set_config_function(get_from_config)
+        load_network_config()
+        log(f"Network configuration loaded: {HONEYPOT_IP}:{HONEYPOT_TUNNEL_PORT}")
+        
         # Initialize language with safe fallback from config
         try:
             lang = self.config["language"]["selected"]
@@ -423,6 +354,10 @@ class CloudHoneypotClient:
 
         # Initialize core components
         self.api_client = HoneypotAPIClient(API_URL, log)
+        
+        # Set global logger for helper functions
+        if LOGGER:
+            client_helpers.set_logger(LOGGER)
         self.reconciliation_lock = threading.Lock()
         self.rdp_transition_complete = threading.Event()
         
@@ -433,6 +368,18 @@ class CloudHoneypotClient:
             "selected_ports_map": None, "ctrl_sock": None,
             "reconciliation_paused": False, "remote_desired": {}
         }
+        
+        # Load token early - before any API operations
+        try:
+            token = self.load_token()
+            self.state["token"] = token
+            if token:
+                log(f"Token başarıyla yüklendi: {token[:8]}...")
+            else:
+                log("Token yüklenemedi - yeni token kaydı gerekebilir")
+        except Exception as e:
+            log(f"Token yükleme hatası: {e}")
+            self.state["token"] = None
         
         # Initialize GUI elements
         self.root = self.btn_primary = self.tree = None
@@ -530,29 +477,6 @@ class CloudHoneypotClient:
             return key  # Return key itself as fallback
 
     # ---------- Helper Methods ---------- #
-    def current_executable(self) -> str:
-        return sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
-
-    def http_get_json(self, url: str, timeout: int = 8) -> Dict:
-        r = requests.get(url, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-
-    def http_download(self, url: str, dest_path: str, timeout: int = 30):
-        with requests.get(url, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            with open(dest_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-
-    def sha256_file(self, path: str) -> str:
-        h = hashlib.sha256()
-        with open(path, 'rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''):
-                h.update(chunk)
-        return h.hexdigest()
-
     def require_admin_for_operation(self, operation_name: str) -> bool:
         """Check and request admin privileges for critical operations"""
         if ctypes.windll.shell32.IsUserAnAdmin():
@@ -602,7 +526,7 @@ class CloudHoneypotClient:
         """Register client with API and get token"""
         for attempt in range(3):
             try:
-                ip = self.get_public_ip()
+                ip = ClientHelpers.get_public_ip()
                 resp = requests.post(f"{API_URL}/register",
                                    json={"server_name": f"{SERVER_NAME} ({ip})", "ip": ip},
                                    timeout=8)
@@ -674,14 +598,6 @@ class CloudHoneypotClient:
             time.sleep(60)  # Check connection every minute when healthy
 
 # ---------- IP & Heartbeat Management ---------- #
-    def get_public_ip(self) -> str:
-        """Get public IP address with fallback"""
-        try:
-            return requests.get("https://api.ipify.org", timeout=5).text.strip()
-        except Exception as e:
-            log(f"get_public_ip error: {e}")
-            return "0.0.0.0"
-
     def update_client_ip(self, new_ip: str):
         """Update client IP address via API"""
         try:
@@ -706,7 +622,7 @@ class CloudHoneypotClient:
             if not token:
                 return
             
-            ip = self.state.get("public_ip") or self.get_public_ip()
+            ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
             status = status_override if status_override in ("online", "offline") else \
                     ("online" if self.state.get("running") else "offline")
             
@@ -724,7 +640,7 @@ class CloudHoneypotClient:
             try:
                 token = self.state.get("token")
                 if token:
-                    ip = self.get_public_ip()
+                    ip = ClientHelpers.get_public_ip()
                     if ip and ip != last_ip:
                         self.update_client_ip(ip)
                         last_ip = ip
@@ -732,9 +648,9 @@ class CloudHoneypotClient:
                     # GUI'deki IP bilgisini güncelle
                     if self.ip_entry and self.root:
                         try:
-                            self.root.after(0, lambda: self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})"))
+                            self.root.after(0, lambda: ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})"))
                         except:
-                            self.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})")
+                            ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})")
                     self.send_heartbeat_once()
             except Exception as e:
                 log(f"heartbeat error: {e}")
@@ -769,7 +685,7 @@ class CloudHoneypotClient:
                 # GUI thread-safe güncelleme
                 try:
                     def update_entry():
-                        self.safe_set_entry(self.attack_entry, str(cnt))
+                        ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
                         log(f"[GUI] Entry güncellendi: {self.attack_entry.get()}")
                     
                     # Check if main loop is running
@@ -779,13 +695,13 @@ class CloudHoneypotClient:
                     except RuntimeError as e:
                         if "main thread is not in main loop" in str(e):
                             # Main loop not started yet, update directly
-                            self.safe_set_entry(self.attack_entry, str(cnt))
+                            ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
                             log(f"[GUI] Saldırı sayacı direkt güncellendi: {cnt}")
                         else:
                             raise e
                 except Exception as e:
                     log(f"[GUI] Saldırı sayacı güncellenirken hata: {e}")
-                    self.safe_set_entry(self.attack_entry, str(cnt))
+                    ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
             except Exception as e:
                 log(f"[GUI] Saldırı sayısı güncelleme worker hatası: {e}")
                 
@@ -861,128 +777,12 @@ class CloudHoneypotClient:
         threading.Thread(target=self.control_server_loop, args=(s,), daemon=True).start()
 
     # ---------- TLS & Tunnel Management ---------- #
-    def create_tls_socket(self):
-        """Create TLS connection to honeypot server"""
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        raw = socket.create_connection((HONEYPOT_IP, HONEYPOT_TUNNEL_PORT), timeout=CONNECT_TIMEOUT)
-        return ctx.wrap_socket(raw, server_hostname=HONEYPOT_IP)
+        # Network methods moved to NetworkingHelpers
 
-    def send_json(self, sock, obj: Dict):
-        """Send JSON object over socket"""
-        data = (json.dumps(obj, separators=(',', ':')) + "\n").encode("utf-8")
-        sock.sendall(data)
-
-    def pipe_streams(self, src, dst):
-        """Pipe data between two sockets"""
-        try:
-            while True:
-                data = src.recv(RECV_SIZE)
-                if not data: 
-                    break
-                dst.sendall(data)
-        except:
-            pass
-        finally:
-            for s in (dst, src):
-                try: 
-                    s.shutdown(socket.SHUT_RDWR)
-                except: 
-                    pass
-                try: 
-                    s.close()
-                except: 
-                    pass
-
-    def handle_incoming_connection(self, local_sock, listen_port: str, service_name: str):
-        """Handle incoming connection and forward to honeypot"""
-        try:
-            peer = local_sock.getpeername()
-            attacker_ip, attacker_port = peer[0], peer[1]
-        except:
-            attacker_ip, attacker_port = "0.0.0.0", 0
-
-        try:
-            remote = self.create_tls_socket()
-        except Exception as e:
-            log(f"[{service_name}:{listen_port}] TLS bağlanamadı: {e}")
-            try: local_sock.close()
-            except: pass
-            return
-
-        try:
-            handshake = {
-                "op": "open", "token": self.state.get("token"),
-                "client_ip": self.state.get("public_ip") or self.get_public_ip(),
-                "hostname": SERVER_NAME, "service": service_name,
-                "listen_port": int(listen_port), "attacker_ip": attacker_ip,
-                "attacker_port": attacker_port
-            }
-            log(f"[{service_name}:{listen_port}] Honeypot'a gönderilen handshake: {json.dumps(handshake, indent=2)}")
-            self.send_json(remote, handshake)
-            log(f"[{service_name}:{listen_port}] Handshake başarıyla gönderildi - Hedef: {HONEYPOT_IP}:{HONEYPOT_TUNNEL_PORT}")
-        except Exception as e:
-            log(f"Handshake hata: {e}")
-            try: remote.close(); local_sock.close()
-            except: pass
-            return
-
-        # Start bidirectional pipe threads
-        t1 = threading.Thread(target=self.pipe_streams, args=(local_sock, remote), daemon=True)
-        t2 = threading.Thread(target=self.pipe_streams, args=(remote, local_sock), daemon=True)
-        t1.start(); t2.start(); t1.join(); t2.join()
-        log(f"[{service_name}:{listen_port}] bağlantı kapandı ({attacker_ip}:{attacker_port})")
-
-    def tunnel_sync_loop(self):
-        """Regularly synchronize tunnel states with API"""
-        while True:
-            try:
-                current_time = time.time()
-                last_sync = self.state.get("last_tunnel_sync", 0)
-                sync_interval = self.state.get("tunnel_sync_interval", 30)
-                
-                if current_time - last_sync >= sync_interval:
-                    self.sync_tunnel_states()
-                    self.state["last_tunnel_sync"] = current_time
-                    
-            except Exception as e:
-                log(f"Tünel senkronizasyon döngüsü hatası: {e}")
-                
-            time.sleep(5)  # Reduce CPU usage
+        # Tunnel sync loop moved to TunnelManager
 
 # ---------- Watchdog & Persistence ---------- #
-    def tunnel_watchdog_loop(self):
-        """Monitor and restart dead tunnels"""
-        while True:
-            try:
-                if self.state.get("running"):
-                    desired = {(str(p[0]), str(p[2]).upper()) for p in self.state.get("selected_rows", [])}
-                    
-                    # Restart missing/dead tunnels
-                    for (listen_port, new_port, service) in self.state.get("selected_rows", []):
-                        lp = int(str(listen_port))
-                        st = self.state["servers"].get(lp)
-                        if (st is None) or (not st.is_alive()):
-                            try:
-                                st2 = TunnelServerThread(self, lp, str(service))
-                                st2.start(); time.sleep(0.2)
-                                if st2.is_alive():
-                                    self.state["servers"][lp] = st2
-                                    log(f"[watchdog] {service}:{lp} yeniden başlatıldı")
-                            except Exception as e:
-                                log(f"[watchdog] {service}:{lp} başlatılamadı: {e}")
-
-                    # Stop excess tunnels
-                    for lp, st in list(self.state["servers"].items()):
-                        key = (str(lp), str(st.service_name).upper())
-                        if key not in desired:
-                            try: st.stop(); del self.state["servers"][lp]
-                            except Exception: pass
-            except Exception as e:
-                log(f"watchdog loop err: {e}")
-            time.sleep(10)
+        # Tunnel watchdog moved to TunnelManager
 
     def write_status(self, active_rows, running: bool = True):
         """Write current status to persistent storage"""
@@ -1111,65 +911,59 @@ class CloudHoneypotClient:
         return self.state.get("consent", cons)
 
     # ---------- UI Helpers ---------- #
-    def safe_set_entry(self, entry: tk.Entry, text: str):
-        """Safely update entry widget text"""
-        try: entry.config(state="normal"); entry.delete(0, tk.END); entry.insert(0, text); entry.config(state="readonly")
-        except Exception as e: log(f"safe_set_entry error: {e}")
-
-    def set_primary_button(self, text: str, cmd, color: str):
-        """Update primary button properties"""
-        if self.btn_primary: self.btn_primary.config(text=text, command=cmd, bg=color)
-
     # ---------- Update Management ---------- #
     def check_updates_and_prompt(self):
-        """Check for updates and prompt user"""
+        """Check for updates and prompt user with installer-based system"""
         try:
-            api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            data = self.http_get_json(api, timeout=8)
-            latest_tag = data.get("tag_name") or data.get("name")
-            if not latest_tag:
-                messagebox.showinfo("Update", self.t("update_none")); return
+            from client_utils import create_update_manager, UpdateProgressDialog
+            
+            # Update manager oluştur
+            update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+            
+            # Güncelleme kontrolü
+            update_info = update_mgr.check_for_updates()
+            
+            if update_info.get("error"):
+                messagebox.showerror("Update", self.t("update_error").format(err=update_info["error"]))
+                return
                 
-            latest_ver = str(latest_tag).lstrip('v')
-            cur_ver = str(__version__).lstrip('v')
-            if latest_ver <= cur_ver:
-                messagebox.showinfo("Update", self.t("update_none")); return
+            if not update_info.get("has_update"):
+                messagebox.showinfo("Update", self.t("update_none"))
+                return
 
-            # Find required assets
-            assets = data.get("assets", [])
-            asset_zip = asset_hashes = None
-            for a in assets:
-                n = str(a.get("name", "")).lower()
-                if n == "client-onedir.zip": asset_zip = a.get("browser_download_url")
-                if n == "hashes.txt": asset_hashes = a.get("browser_download_url")
-                
-            if not asset_zip:
-                messagebox.showerror("Update", self.t("update_error").format(err="asset not found (client-onedir.zip)")); return
+            # Kullanıcıdan onay al
+            latest_ver = update_info["latest_version"]
             if not messagebox.askyesno("Update", self.t("update_found").format(version=latest_ver)):
                 return
 
-            tmpdir = tempfile.mkdtemp(prefix="chpupd-")
-            zip_path = os.path.join(tmpdir, "client-onedir.zip")
-            self.http_download(asset_zip, zip_path, timeout=60)
-            if asset_hashes:
-                sha_path = os.path.join(tmpdir, "hashes.txt")
-                self.http_download(asset_hashes, sha_path, timeout=30)
-                try:
-                    exp = None
-                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            if 'client-onedir.zip' in line:
-                                exp = line.strip().split()[0]
-                                break
-                    calc = self.sha256_file(zip_path)
-                    if exp and calc.lower() != exp.lower():
-                        messagebox.showerror("Update", self.t("update_error").format(err="sha256 mismatch"))
-                        return
-                except Exception as e:
-                    log(f"sha check error: {e}")
-            self.apply_onedir_update(zip_path, minimized=True)
+            # Progress dialog oluştur
+            progress_dialog = UpdateProgressDialog(self.root, "Güncelleme")
+            if not progress_dialog.create_dialog():
+                messagebox.showerror("Update", "Progress dialog oluşturulamadı")
+                return
+
+            def progress_callback(percent, message):
+                progress_dialog.update_progress(percent, message)
+                if percent >= 100:
+                    progress_dialog.close_dialog()
+
+            # Güncellemeyi başlat
+            try:
+                success = update_mgr.update_with_progress(progress_callback, silent=False)
+                if success:
+                    messagebox.showinfo("Update", "Güncelleme tamamlandı! Yeni sürüm başlatılıyor...")
+                    # Mevcut uygulamayı kapat
+                    try: os._exit(0)
+                    except: sys.exit(0)
+                else:
+                    messagebox.showerror("Update", "Güncelleme başarısız oldu")
+                    progress_dialog.close_dialog()
+            except Exception as e:
+                progress_dialog.close_dialog()
+                messagebox.showerror("Update", f"Güncelleme hatası: {str(e)}")
+                
         except Exception as e:
-            log(f"update error: {e}")
+            log(f"update prompt error: {e}")
             try:
                 messagebox.showerror("Update", self.t("update_error").format(err=str(e)))
             except Exception:
@@ -1177,115 +971,37 @@ class CloudHoneypotClient:
 
 
     def check_updates_and_apply_silent(self):
+        """Silent update with installer-based system"""
         try:
-            api = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            data = self.http_get_json(api, timeout=8)
-            latest_tag = data.get("tag_name") or data.get("name")
-            if not latest_tag:
-                return
-            latest_ver = str(latest_tag).lstrip('v')
-            cur_ver    = str(__version__).lstrip('v')
-            if latest_ver <= cur_ver:
-                return
-            # Assets
-            assets = data.get("assets", [])
-            asset_zip = None
-            asset_hashes = None
-            for a in assets:
-                n = str(a.get("name", "")).lower()
-                if n == "client-onedir.zip":
-                    asset_zip = a.get("browser_download_url")
-                if n == "hashes.txt":
-                    asset_hashes = a.get("browser_download_url")
-            if not asset_zip:
-                return
-            tmpdir = tempfile.mkdtemp(prefix="chpupd-")
-            zip_path = os.path.join(tmpdir, "client-onedir.zip")
-            self.http_download(asset_zip, zip_path, timeout=60)
-            if asset_hashes:
-                sha_path = os.path.join(tmpdir, "hashes.txt")
-                self.http_download(asset_hashes, sha_path, timeout=30)
-                try:
-                    exp = None
-                    with open(sha_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            if 'client-onedir.zip' in line:
-                                exp = line.strip().split()[0]; break
-                    calc = self.sha256_file(zip_path)
-                    if exp and calc.lower() != exp.lower(): return
-                except Exception as e:
-                    log(f"sha check silent error: {e}")
-            self.apply_onedir_update(zip_path)
-        except Exception as e:
-            log(f"update silent error: {e}")
-
-    def schedule_self_update_and_exit(self, new_exe_path: str):
-        """Schedule update and restart application"""
-        try:
-            cur = self.current_executable()
-            target = cur
-            up_dir = os.path.dirname(cur)
-            bat_path = os.path.join(up_dir, "update_run.bat")
-            bat = f'''@echo off
-setlocal enableextensions
-set NEWEXE="{new_exe_path}"
-set TARGET="{target}"
-ping 127.0.0.1 -n 3 >NUL
-:loop
-copy /y %NEWEXE% %TARGET% >NUL 2>&1
-if errorlevel 1 (
-  ping 127.0.0.1 -n 2 >NUL
-  goto loop
-)
-start "" %TARGET%
-del "%~f0" & exit /b 0
-'''
-            with open(bat_path, 'w', encoding='utf-8') as f: f.write(bat)
-            try: write_watchdog_token('stop')
-            except Exception: pass
-            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
-        except Exception as e:
-            log(f"schedule update error: {e}")
-        finally:
-            try: os._exit(0)
-            except: sys.exit(0)
-
-    def apply_onedir_update(self, zip_path: str, minimized: bool = False):
-        """Apply onedir update from zip file"""
-        try:
-            import zipfile, shutil
-            MIN = ("--minimized" if minimized else "")
-            dest_dir = os.path.dirname(self.current_executable())
-            tmp_extract = tempfile.mkdtemp(prefix="chpzip-")
-            with zipfile.ZipFile(zip_path, 'r') as zf: zf.extractall(tmp_extract)
+            from client_utils import create_update_manager
             
-            # Prepare updater script
-            bat_path = os.path.join(dest_dir, "update_onedir.bat")
-            bat = f'''@echo off
-setlocal enableextensions
-set SRC="{tmp_extract}"
-set DST="{dest_dir}"
-ping 127.0.0.1 -n 3 >NUL
-:copyloop
-robocopy %SRC% %DST% /E /NFL /NDL /NJH /NJS /NP >NUL
-if %ERRORLEVEL% GEQ 8 (
-  ping 127.0.0.1 -n 2 >NUL
-  goto copyloop
-)
-start "" "%DST%\\client-onedir.exe" {MIN}
-del "%~f0" & exit /b 0
-'''
-            with open(bat_path, 'w', encoding='utf-8') as f: f.write(bat)
-            try: write_watchdog_token('stop')
-            except Exception: pass
-            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-            subprocess.Popen(["cmd", "/c", bat_path], shell=False, creationflags=CREATE_NO_WINDOW)
+            # Update manager oluştur
+            update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+            
+            # Güncelleme kontrolü
+            update_info = update_mgr.check_for_updates()
+            
+            if update_info.get("error") or not update_info.get("has_update"):
+                return
+                
+            log(f"[SILENT UPDATE] Yeni sürüm bulundu: {update_info['latest_version']}")
+            
+            # Sessiz güncellemeyi başlat
+            success = update_mgr.update_with_progress(silent=True)
+            if success:
+                log("[SILENT UPDATE] Güncelleme tamamlandı, uygulama yeniden başlatılıyor")
+                # Kısa süre bekle ve çık
+                import time
+                time.sleep(1)
+                try: os._exit(0)
+                except: sys.exit(0)
+            else:
+                log("[SILENT UPDATE] Güncelleme başarısız")
+                
         except Exception as e:
-            log(f"apply_onedir_update error: {e}")
-        finally:
-            try: os._exit(0)
-            except: sys.exit(0)
+            log(f"silent update error: {e}")
+
+    # Legacy onedir update methods removed - now using installer-based system
 
     # ---------- RDP Management UI ---------- #
     def rdp_move_popup(self, mode: str, on_confirm):
@@ -1336,7 +1052,7 @@ del "%~f0" & exit /b 0
 
             # Eğer geçiş başarılıysa ve rollback gerekiyorsa
             if transition_success[0]:
-                rollback_port = 3389 if mode == "secure" else 53389
+                rollback_port = 3389 if mode == "secure" else RDP_SECURE_PORT
                 log(f"Zaman aşımı veya iptal. RDP portu {rollback_port} portuna geri alınıyor.")
                 
                 def handle_rollback():
@@ -1361,7 +1077,7 @@ del "%~f0" & exit /b 0
                             if not self.report_tunnel_action_to_api("RDP", "stop", None):
                                 log("API'ye stop bildirimi başarısız")
                         else:
-                            if not self.report_tunnel_action_to_api("RDP", "start", "53389"):
+                            if not self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT)):
                                 log("API'ye start bildirimi başarısız")
                             
                         time.sleep(5)  # Wait for API response
@@ -1373,8 +1089,8 @@ del "%~f0" & exit /b 0
                         
                 threading.Thread(target=handle_rollback, daemon=True).start()
 
-                if mode == "rollback" and rollback_port == 53389:
-                    threading.Thread(target=self.start_single_row, args=('3389', '53389', 'RDP', False), daemon=True).start()
+                if mode == "rollback" and rollback_port == RDP_SECURE_PORT:
+                    threading.Thread(target=self.start_single_row, args=('3389', str(RDP_SECURE_PORT), 'RDP', False), daemon=True).start()
 
             try: popup.destroy()
             except Exception: pass
@@ -1409,14 +1125,14 @@ del "%~f0" & exit /b 0
                     on_confirm()
 
                     # Butonun durumu Durdur olarak güncelleniyor
-                    self.set_primary_button(self.t('btn_stop'), self.remove_tunnels, "#E53935")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935")
                     self.state["running"] = True
                     self._update_row_ui("3389", "RDP", True)
 
                     log("RDP port geçişi başarılı, API'ye bildirim yapılıyor...")
                     # Report new RDP state to API
                     if mode == "secure":
-                        self.report_tunnel_action_to_api("RDP", "start", "53389")
+                        self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
                     else:
                         self.report_tunnel_action_to_api("RDP", "stop", "3389")
 
@@ -1430,7 +1146,7 @@ del "%~f0" & exit /b 0
 
                     # Senkronizasyon thread'i yoksa başlat
                     if not any(t.name == "tunnel_sync_loop" and t.is_alive() for t in threading.enumerate()):
-                        threading.Thread(target=self.tunnel_sync_loop, name="tunnel_sync_loop", daemon=True).start()
+                        threading.Thread(target=TunnelManager.tunnel_sync_loop, args=(self,), name="tunnel_sync_loop", daemon=True).start()
                     
                 except Exception as e:
                     log(f"RDP durum güncellemesi sırasında hata: {str(e)}")
@@ -1584,63 +1300,11 @@ del "%~f0" & exit /b 0
             state[svc] = item
         return state
 
-    def sync_tunnel_states(self):
-        if self.state.get("reconciliation_paused"):
-            log("Senkronizasyon duraklatıldı, atlanıyor...")
-            return
-        try:
-            remote = self.api_request("GET", "premium/tunnel-status") or {}
-            local  = self.get_local_tunnel_state()
-
-            for service, remote_cfg in remote.items():
-                if service not in DEFAULT_TUNNELS: 
-                    continue
-                listen_port = str(DEFAULT_TUNNELS[service]["listen_port"])
-                desired = (remote_cfg.get('desired') or 'stopped').lower()
-                local_status = (local.get(service, {}).get('status') or 'stopped').lower()
-
-                if desired == 'started' and local_status != 'started':
-                    newp = str(remote_cfg.get('new_port') or listen_port)
-                    self.start_single_row(listen_port, newp, service)
-                    # UI güncelleme: listen_port ile
-                    self._update_row_ui(listen_port, service, True)
-                elif desired == 'stopped' and local_status != 'stopped':
-                    newp = str(remote_cfg.get('new_port') or listen_port)
-                    self.stop_single_row(listen_port, newp, service)
-
-            self.report_tunnel_status_once()
-        except Exception as e:
-            log(f"Tünel durumları senkronize edilirken hata: {e}")
-        finally:
-            with self.reconciliation_lock:
-                self.state["reconciliation_paused"] = False
+        # Tunnel state sync moved to TunnelManager
 
 
 # ---------- Per-row helpers ---------- #
-    def is_port_in_use(self, port: int) -> bool:
-        try:
-            if os.name == 'nt':
-                ps = (
-                    f"$p={int(port)};"
-                    "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;"
-                    "if ($l) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
-                )
-                res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8, suppress_rc_log=True)
-                if res and getattr(res, 'returncode', 1) == 0 and getattr(res, 'stdout', '').find('FOUND') >= 0:
-                    return True
-        except Exception as e:
-            log(f"Exception: {e}")
-        # Fallback cross-platform bind test
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("0.0.0.0", int(port)))
-            s.close()
-            return False
-        except OSError:
-            return True
-        except Exception:
-                    pass
+        # Port checking moved to NetworkingHelpers
 
     def _find_tree_item(self, listen_port: str, service_name: str):
         try:
@@ -1657,10 +1321,10 @@ del "%~f0" & exit /b 0
             # RDP için ana butonu da güncelle ve logla
             if service_name.upper() == 'RDP':
                 if active:
-                    self.set_primary_button(self.t('btn_stop'), self.remove_tunnels, "#E53935")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935")
                     log(f"[UI] Updating row UI for {service_name}: btn_stop")
                 else:
-                    self.set_primary_button(self.t('btn_row_start'), self.apply_tunnels, "#4CAF50")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_row_start'), self.apply_tunnels, "#4CAF50")
                     log(f"[UI] Updating row UI for {service_name}: btn_row_start")
             # Prefer new stacked UI controls
             try:
@@ -1737,8 +1401,8 @@ del "%~f0" & exit /b 0
             
             # Önce mevcut RDP durumunu kontrol et
             current_rdp_port = ServiceController.get_rdp_port()
-            if current_rdp_port == 53389:
-                log("RDP zaten güvenli portta (53389), koruma aktif kabul ediliyor")
+            if current_rdp_port == RDP_SECURE_PORT:
+                log(f"RDP zaten güvenli portta ({RDP_SECURE_PORT}), koruma aktif kabul ediliyor")
                 
                 # 3389'da tünel başlat
                 st = TunnelServerThread(self, listen_port, service)
@@ -1757,7 +1421,7 @@ del "%~f0" & exit /b 0
                     
                     # API'ye koruma aktif bilgisini gönder
                     log("API'ye RDP koruma durumu bildiriliyor (aktif)")
-                    self.report_tunnel_action_to_api("RDP", "start", "53389")
+                    self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
                     
                     # API senkronizasyonunu devam ettir
                     with self.reconciliation_lock:
@@ -1771,9 +1435,9 @@ del "%~f0" & exit /b 0
 
             # Önce mevcut RDP port durumunu kontrol et
             current_rdp_port = ServiceController.get_rdp_port()
-            if current_rdp_port == 53389 and not self.is_port_in_use(3389):
+            if current_rdp_port == RDP_SECURE_PORT and not NetworkingHelpers.is_port_in_use(3389):
                 # RDP zaten güvenli portta ve 3389 boşta, direkt tüneli başlat
-                log("RDP zaten güvenli portta (53389), direkt tünel başlatılıyor...")
+                log(f"RDP zaten güvenli portta ({RDP_SECURE_PORT}), direkt tünel başlatılıyor...")
                 st = TunnelServerThread(self, listen_port, service)
                 st.start()
                 time.sleep(0.15)
@@ -1836,14 +1500,14 @@ del "%~f0" & exit /b 0
                         self.state["reconciliation_paused"] = True
                         log("RDP geçişi için API senkronizasyonu duraklatıldı.")
 
-                    if ServiceController.get_rdp_port() != 53389:
+                    if ServiceController.get_rdp_port() != RDP_SECURE_PORT:
                         if not self.start_rdp_transition("secure"):
-                            log("API akışı: RDP 53389'a taşınamadı.")
+                            log(f"API akışı: RDP {RDP_SECURE_PORT}'a taşınamadı.")
                             return False
 
-                    # 3389 (tünel) + 53389 (RDP) için firewall
+                    # 3389 (tünel) + RDP güvenli port için firewall
                     ensure_firewall_allow_for_port(3389,  "RDP 3389 (Tunnel)")
-                    ensure_firewall_allow_for_port(53389, "RDP 53389")
+                    ensure_firewall_allow_for_port(RDP_SECURE_PORT, f"RDP {RDP_SECURE_PORT}")
 
                     # 3389 tünel
                     st = TunnelServerThread(self, '3389', service)
@@ -1858,7 +1522,7 @@ del "%~f0" & exit /b 0
                     self.update_tray_icon(); self.send_heartbeat_once("online")
                     self._update_row_ui('3389', service, True)
                     self.state["remote_desired"][service_upper] = "started"
-                    self.set_primary_button(self.t('btn_stop'), self.remove_tunnels, "#E53935")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935")
 
                     # API bildirimi
                     threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'start', p2), daemon=True).start()
@@ -1879,7 +1543,7 @@ del "%~f0" & exit /b 0
                     return False
 
         # Non-RDP flow
-        if self.is_port_in_use(int(listen_port)):
+        if NetworkingHelpers.is_port_in_use(int(listen_port)):
             try:
                 if not messagebox.askyesno(self.t("warn"), self.t("port_in_use").format(port=listen_port)):
                     return False
@@ -1946,7 +1610,7 @@ del "%~f0" & exit /b 0
             else:
                 # API-driven
                 ensure_firewall_allow_for_port(3389,  "RDP 3389")
-                ensure_firewall_allow_for_port(53389, "RDP 53389")
+                ensure_firewall_allow_for_port(RDP_SECURE_PORT, f"RDP {RDP_SECURE_PORT}")
                 if not self.start_rdp_transition("rollback"):
                     log("API akışı: RDP 3389'a geri alınamadı.")
 
@@ -2015,11 +1679,11 @@ del "%~f0" & exit /b 0
                     "status": "started" if running else "stopped",
                     "listen_port": listen_port
                 }
-                # RDP için hem 3389 hem 53389 portunu kontrol et
+                # RDP için hem 3389 hem güvenli portu kontrol et
                 if service == "RDP":
                     current_port = ServiceController.get_rdp_port()
                     status["new_port"] = current_port
-                    rdp_running = self._is_service_running(3389, service) or self._is_service_running(53389, service)
+                    rdp_running = self._is_service_running(3389, service) or self._is_service_running(RDP_SECURE_PORT, service)
                     status["status"] = "started" if rdp_running else "stopped"
                 statuses.append(status)
                 log(f"Tünel durumu: {service} -> {status['status']} (port: {listen_port})")
@@ -2098,13 +1762,13 @@ del "%~f0" & exit /b 0
     def _ensure_rdp_firewall_both(self):
         try:
             ensure_firewall_allow_for_port(3389,  "RDP 3389")
-            ensure_firewall_allow_for_port(53389, "RDP 53389")
+            ensure_firewall_allow_for_port(RDP_SECURE_PORT, f"RDP {RDP_SECURE_PORT}")
         except Exception as e:
             log(f"ensure_rdp_firewall_both err: {e}")
 
     def start_rdp_transition(self, transition_mode: str = "secure") -> bool:
         """
-        3389<->53389 arası güvenli geri/ileri geçiş.
+        3389<->RDP güvenli port arası güvenli geri/ileri geçiş.
         Adımlar: RDP port güvenliği kontrolü -> stop TermService -> firewall iki port -> reg set -> start TermService -> dinleme/doğrulama.
         """
         try:
@@ -2117,27 +1781,27 @@ del "%~f0" & exit /b 0
                 log("RDP port güvenlik kontrolü başarısız")
                 return False
 
-            target = 53389 if transition_mode == "secure" else 3389
-            source = 3389  if transition_mode == "secure" else 53389
+            target = RDP_SECURE_PORT if transition_mode == "secure" else 3389
+            source = 3389  if transition_mode == "secure" else RDP_SECURE_PORT
             deadline = time.time() + 120  # 120 saniye timeout
 
             # Zaten hedefte ve dinliyorsa kontrol et
             cur = ServiceController.get_rdp_port()
             if cur == target:
                 svc_ok = (ServiceController._sc_query_code("TermService") == 4)
-                tgt_listen = self.is_port_in_use(target)
-                src_listen = self.is_port_in_use(source)
+                tgt_listen = NetworkingHelpers.is_port_in_use(target)
+                src_listen = NetworkingHelpers.is_port_in_use(source)
                 
                 if svc_ok and tgt_listen:
                     log(f"RDP zaten {target} portunda ve dinlemede")
                     
                     if transition_mode == "secure":
-                        # 53389'da ve 3389 boşta, tüneli başlat
+                        # Güvenli portta ve 3389 boşta, tüneli başlat
                         if not src_listen:
                             log("3389 portu boş, tünel başlatılıyor...")
-                            if self.start_single_row('3389', '53389', 'RDP'):
+                            if self.start_single_row('3389', str(RDP_SECURE_PORT), 'RDP'):
                                 log("Tünel başlatıldı, API'ye bildiriliyor...")
-                                self.report_tunnel_action_to_api("RDP", "start", "53389")
+                                self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
                             else:
                                 log("Tünel başlatılamadı!")
                         else:
@@ -2181,8 +1845,8 @@ del "%~f0" & exit /b 0
             while time.time() < deadline:
                 svc_ok     = (ServiceController._sc_query_code("TermService") == 4)
                 reg_ok     = (ServiceController.get_rdp_port() == target)
-                tgt_listen = self.is_port_in_use(target)
-                src_listen = self.is_port_in_use(source)
+                tgt_listen = NetworkingHelpers.is_port_in_use(target)
+                src_listen = NetworkingHelpers.is_port_in_use(source)
                 log(f"[RDP transition] svc_ok={svc_ok} reg_ok={reg_ok} tgt_listen={tgt_listen} src_listen={src_listen}")
 
                 if not svc_ok or not reg_ok:
@@ -2218,7 +1882,7 @@ del "%~f0" & exit /b 0
             try:
                 # emniyet rollback
                 ServiceController.stop("TermService")
-                self._set_rdp_port_registry(3389 if transition_mode == "secure" else 53389)
+                self._set_rdp_port_registry(3389 if transition_mode == "secure" else RDP_SECURE_PORT)
                 ServiceController.start("TermService")
             except Exception:
                 pass
@@ -2389,9 +2053,9 @@ del "%~f0" & exit /b 0
                     if desired == 'started' and not running:
                         log(f"API komutu: '{svc_u}' servisi başlatılıyor.")
                         try:
-                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != 53389:
-                                ServiceController.switch_rdp_port(53389)
-                            newp = entry.get('new_port') or (53389 if svc_u=='RDP' else '-')
+                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != RDP_SECURE_PORT:
+                                ServiceController.switch_rdp_port(RDP_SECURE_PORT)
+                            newp = entry.get('new_port') or (RDP_SECURE_PORT if svc_u=='RDP' else '-')
                             self.start_single_row(str(lp), str(newp), self._normalize_service(svc_u))
                         except Exception as e:
                             log(f"remote start {svc_u} err: {e}")
@@ -2607,9 +2271,9 @@ del "%~f0" & exit /b 0
     # ---------- Daemon ---------- #
     def run_daemon(self):
         self.state["token"] = self.load_token()
-        self.state["public_ip"] = self.get_public_ip()
+        self.state["public_ip"] = ClientHelpers.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-        threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        threading.Thread(target=TunnelManager.tunnel_watchdog_loop, args=(self,), daemon=True).start()
         # Remote management: report open ports + reconcile desired tunnels
         try:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
@@ -2666,13 +2330,18 @@ del "%~f0" & exit /b 0
 
     # ---------- Firewall Agent ---------- #
     def start_firewall_agent(self):
-        if FW_AGENT is None:
-            log("firewall_agent module not available; skipping.")
+        """Start firewall agent with updated client_firewall module"""
+        try:
+            from client_firewall import FirewallAgent
+        except ImportError:
+            log("client_firewall module not available; skipping.")
             return
+            
         token = self.state.get("token")
         if not token:
             log("No token; firewall agent not started.")
             return
+            
         # Derive API base root (strip trailing /api if present)
         base = (API_URL or "").strip().rstrip('/')
         if base.lower().endswith('/api'):
@@ -2683,7 +2352,7 @@ del "%~f0" & exit /b 0
 
         def agent_thread():
             try:
-                agent = FW_AGENT.Agent(
+                agent = FirewallAgent(
                     api_base=api_base_root,
                     token=token,
                     refresh_interval=int(os.environ.get("REFRESH_INTERVAL_SEC", "10")),
@@ -2757,7 +2426,7 @@ del "%~f0" & exit /b 0
 
         # Background services will be started after GUI creation and token loading
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-        threading.Thread(target=self.tunnel_watchdog_loop, daemon=True).start()
+        threading.Thread(target=TunnelManager.tunnel_watchdog_loop, args=(self,), daemon=True).start()
         # Remote management: report open ports + reconcile desired tunnels
         try:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
@@ -2827,7 +2496,7 @@ del "%~f0" & exit /b 0
             except Exception as e: 
                 log(f"[CONFIG] Language change error: {e}")
             messagebox.showinfo(self.t("info"), self.t("restart_needed_lang"))
-            exe = self.current_executable()
+            exe = ClientHelpers.current_executable()
             try:
                 subprocess.Popen([exe] + sys.argv[1:], shell=False)
             except Exception:
@@ -2891,7 +2560,7 @@ del "%~f0" & exit /b 0
         # Token'ı yükle
         token = self.load_token()
         self.state["token"] = token
-        self.state["public_ip"] = self.get_public_ip()
+        self.state["public_ip"] = ClientHelpers.get_public_ip()
         
         # Create dashboard URL after token is loaded
         dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token if token else ''}"
@@ -3014,6 +2683,13 @@ del "%~f0" & exit /b 0
                     rc["button"].config(text=self.t('btn_row_stop'), bg="#E53935")
                     rc["frame"].configure(bg="#EEF7EE")
                     rc["status"].config(text=f"{self.t('status')}: {self.t('status_running')}")
+
+        # Migration: Eski zip tabanlı güncelleme sisteminden installer sistemine geçiş
+        try:
+            from client_utils import migrate_from_zip_to_installer
+            migrate_from_zip_to_installer()
+        except Exception as e:
+            log(f"migration error: {e}")
 
         # Optional silent auto-update on startup if configured and no active tunnels
         try:
@@ -3353,5 +3029,4 @@ if __name__ == "__main__":
             loading.close()
         log("Application interrupted by user")
         sys.exit(0)
-
 

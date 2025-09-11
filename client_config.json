@@ -1,7 +1,7 @@
 {
   "application": {
     "name": "Cloud Honeypot Client",
-    "version": "2.1.0",
+    "version": "2.2.1",
     "author": "YesNext Technology"
   },
   "language": {
@@ -35,6 +35,14 @@
     "base_url": "https://honeypot.yesnext.com.tr/api",
     "timeout": 30,
     "retry_count": 3
+  },
+  "honeypot": {
+    "_comment": "Honeypot server network configuration - can be updated via API in future",
+    "server_ip": "194.5.236.181",
+    "tunnel_port": 4443,
+    "connect_timeout": 8,
+    "receive_buffer_size": 65536,
+    "server_name": null
   },
   "tunnels": {
     "auto_start": false,

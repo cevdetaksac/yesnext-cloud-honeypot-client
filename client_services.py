@@ -137,7 +137,12 @@ class RDPManager:
         self.log = log_func if log_func else print
         self.registry_path = r"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
         self.default_port = 3389
-        self.secure_port = 53389
+        # Import here to avoid circular imports
+        try:
+            from client_utils import get_rdp_secure_port
+            self.secure_port = get_rdp_secure_port()
+        except ImportError:
+            self.secure_port = 53389  # fallback
     
     def get_rdp_port_from_registry(self) -> Optional[int]:
         """Registry'den RDP portunu al"""

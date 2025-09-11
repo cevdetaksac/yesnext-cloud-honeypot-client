@@ -28,6 +28,12 @@ class LoadingScreen:
         self.window.geometry('400x150')
         self.window.resizable(False, False)
         
+        # Window icon ayarla
+        try:
+            self.window.iconbitmap('certs/honeypot.ico')
+        except:
+            pass  # Icon yüklenemezse sessizce devam et
+        
         # Ekranı ortala
         self.window.eval('tk::PlaceWindow . center')
         
@@ -131,6 +137,12 @@ class LanguageDialog:
         self.window.title("Dil Seçimi / Language Selection")
         self.window.geometry('400x280')
         self.window.resizable(False, False)
+        
+        # Window icon ayarla
+        try:
+            self.window.iconbitmap('certs/honeypot.ico')
+        except:
+            pass  # Icon yüklenemezse sessizce devam et
         
         # Pencereyi ekranın ortasına yerleştir
         self.window.eval('tk::PlaceWindow . center')
@@ -266,6 +278,12 @@ class AdminPrivilegeDialog:
         """Admin yetki dialog'unu göster"""
         self.window = tk.Tk()
         self.window.title("Yönetici Yetkileri Gerekli")
+        
+        # Window icon ayarla
+        try:
+            self.window.iconbitmap('certs/honeypot.ico')
+        except:
+            pass  # Icon yüklenemezse sessizce devam et)
         self.window.geometry('500x400')  # Boyutu artırdım
         self.window.resizable(False, False)
         
@@ -434,6 +452,12 @@ class ConsentDialog:
         self.window.title(self.i18n.get('consent_title', 'Security Consent'))
         self.window.geometry('500x350')
         self.window.resizable(False, False)
+        
+        # Window icon ayarla
+        try:
+            self.window.iconbitmap('certs/honeypot.ico')
+        except:
+            pass  # Icon yüklenemezse sessizce devam et
         
         # Ekranı ortala
         self.window.eval('tk::PlaceWindow . center')

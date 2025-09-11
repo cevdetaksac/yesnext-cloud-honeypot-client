@@ -2320,12 +2320,67 @@ del "%~f0" & exit /b 0
 
     # ---------- Tray ---------- #
     def tray_make_image(self, active):
-        from PIL import Image, ImageDraw
-        col = "green" if active else "red"
-        img = Image.new('RGB', (64, 64), "white")
-        d = ImageDraw.Draw(img)
-        d.ellipse((8, 8, 56, 56), fill=col)
-        return img
+        """Load appropriate tray icon based on protection status"""
+        try:
+            # Determine icon file based on state
+            if active:
+                icon_file = "certs/honeypot_active_16.ico"
+            else:
+                icon_file = "certs/honeypot_inactive_16.ico"
+            
+            # Try to load from file system first
+            if os.path.exists(icon_file):
+                from PIL import Image
+                return Image.open(icon_file)
+            
+            # Fallback to programmatic generation
+            from PIL import Image, ImageDraw
+            size = 16
+            bg_color = (76, 175, 80, 255) if active else (244, 67, 54, 255)  # Green or Red
+            
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            # Draw background circle
+            center = size // 2
+            radius = int(size * 0.4)
+            draw.ellipse([center - radius, center - radius, 
+                          center + radius, center + radius], 
+                         fill=bg_color)
+            
+            # Draw simplified cloud shape
+            cloud_color = (255, 255, 255, 255)  # White
+            cloud_radius = int(size * 0.2)
+            draw.ellipse([center - cloud_radius, center - cloud_radius,
+                          center + cloud_radius, center + cloud_radius],
+                         fill=cloud_color)
+            
+            return img
+            
+        except Exception as e:
+            # Ultimate fallback - simple colored circle
+            from PIL import Image, ImageDraw
+            col = "green" if active else "red"
+            img = Image.new('RGB', (16, 16), "white")
+            d = ImageDraw.Draw(img)
+            d.ellipse((2, 2, 14, 14), fill=col)
+            return img
+    
+    def update_tray_icon(self):
+        """Update tray icon to reflect current protection status"""
+        if TRY_TRAY and self.state.get("tray"):
+            try:
+                # Update icon based on current state
+                is_active = bool(self.state.get("selected_rows", []))
+                new_icon = self.tray_make_image(is_active)
+                self.state["tray"].icon = new_icon
+                
+                # Update title with status
+                status = self.t("protection_active") if is_active else self.t("protection_inactive")
+                self.state["tray"].title = f"{self.t('app_title')} - {status}"
+                
+            except Exception as e:
+                log(f"Tray icon update error: {e}")
 
     def tray_loop(self):
         if not TRY_TRAY:
@@ -2414,14 +2469,6 @@ del "%~f0" & exit /b 0
         # Tray ikonunu başlat    
         icon.run()
 
-    def update_tray_icon(self):
-        if not TRY_TRAY: return
-        icon = self.state.get("tray")
-        if not icon: return
-        icon.icon = self.tray_make_image(self.state["running"])
-        icon.title = f"{self.t('app_title')} v{__version__}"
-        icon.visible = True
-        
     def on_close(self):
         # Pencere kapatma işleyicisi
         try:
@@ -2569,6 +2616,21 @@ del "%~f0" & exit /b 0
                 
                 # Ana pencere özelliklerini ayarla - use hardcoded title for now
                 self.root.title(f"Cloud Honeypot Client v{__version__}")
+                
+                # Window icon ayarla
+                try:
+                    self.root.iconbitmap('certs/honeypot.ico')
+                    # Taskbar icon için ayrıca PhotoImage ile ayarla
+                    try:
+                        from PIL import Image, ImageTk
+                        img = Image.open('certs/honeypot.ico')
+                        photo = ImageTk.PhotoImage(img)
+                        self.root.iconphoto(True, photo)
+                    except:
+                        pass
+                except:
+                    pass  # Icon yüklenemezse sessizce devam et
+                
                 self.root.protocol("WM_DELETE_WINDOW", self.on_close)
                 self.root.resizable(True, True)
                 
@@ -2634,6 +2696,21 @@ del "%~f0" & exit /b 0
             except Exception:
                 pass
         self.root.title(f"{self.t('app_title')} v{__version__}")
+        
+        # Window icon ayarla
+        try:
+            self.root.iconbitmap('certs/honeypot.ico')
+            # Taskbar icon için ayrıca PhotoImage ile ayarla
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open('certs/honeypot.ico')
+                photo = ImageTk.PhotoImage(img)
+                self.root.iconphoto(True, photo)
+            except:
+                pass
+        except:
+            pass  # Icon yüklenemezse sessizce devam et
+            
         self.root.geometry("820x620")
         self.root.configure(bg="#f5f5f5")
 

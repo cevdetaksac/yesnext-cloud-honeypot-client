@@ -23,6 +23,10 @@ Copy-Item "service_wrapper.py" "dist\honeypot-client\"
 Copy-Item "client_config.json" "dist\honeypot-client\"
 Copy-Item "client_lang.json" "dist\honeypot-client\"
 
+# Update icons from custom PNGs
+Write-Host "Converting custom PNG icons to ICO..." -ForegroundColor Yellow
+python scripts\convert_png_to_ico.py
+
 # Copy icon if not exists
 if (!(Test-Path "certs\honeypot.ico")) {
     New-Item -ItemType Directory -Force -Path "certs"

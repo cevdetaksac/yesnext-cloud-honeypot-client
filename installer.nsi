@@ -125,16 +125,19 @@ Section "Install"
     ; Add files
     File /r "dist\honeypot-client\*.*"
     
+    ; Copy icon file for shortcuts
+    File "certs\honeypot.ico"
+    
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     
     ; Start Menu
     CreateDirectory "$SMPROGRAMS\${COMPANYNAME}"
-    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot-client.exe" 0
+    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot.ico" 0
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
     
     ; Desktop Shortcut
-    CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot-client.exe" 0
+    CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot.ico" 0
     
     ; Registry information for add/remove programs
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "DisplayName" "${APPNAME}"

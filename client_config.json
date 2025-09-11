@@ -6,7 +6,7 @@
   },
   "language": {
     "selected": "tr",
-    "selected_by_user": false,
+    "selected_by_user": true,
     "available_languages": [
       "tr",
       "en"

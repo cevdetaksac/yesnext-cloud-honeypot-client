@@ -33,6 +33,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=True,
+    icon='certs/honeypot.ico',
 )
 coll = COLLECT(
     exe,

@@ -107,7 +107,7 @@ def is_admin() -> bool:
 
 
 def run_cmd(cmd: List[str], timeout: int = 20) -> Tuple[int, str, str]:
-    """Run command with timeout. Returns (rc, stdout, stderr)."""
+    # Run command with timeout. Returns (rc, stdout, stderr).
     try:
         p = subprocess.run(
             cmd,

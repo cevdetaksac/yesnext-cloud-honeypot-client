@@ -1,7 +1,0 @@
-{
-  "github_owner": "cevdetaksac",
-  "github_repo": "yesnext-cloud-honeypot-client",
-  "api_url": "https://honeypot.yesnext.com.tr/api",
-  "honeypot_ip": "194.5.236.181",
-  "honeypot_tunnel_port": 4443
-}

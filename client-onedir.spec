@@ -5,7 +5,7 @@ a = Analysis(
     ['client.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('client_config.json', '.'), ('client_lang.json', '.'), ('service_wrapper.py', '.')],
     hiddenimports=['unicodedata'],
     hookspath=[],
     hooksconfig={},
@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='client-onedir',
+    name='honeypot-client',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,5 +41,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='client-onedir',
+    name='honeypot-client'
 )

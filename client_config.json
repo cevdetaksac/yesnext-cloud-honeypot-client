@@ -1,0 +1,86 @@
+{
+  "application": {
+    "name": "Cloud Honeypot Client",
+    "version": "2.1.0",
+    "author": "YesNext Technology"
+  },
+  "language": {
+    "selected": "tr",
+    "selected_by_user": false,
+    "available_languages": [
+      "tr",
+      "en"
+    ],
+    "default": "tr"
+  },
+  "ui": {
+    "window_width": 900,
+    "window_height": 700,
+    "theme": "dark",
+    "show_loading_screen": true,
+    "loading_timeout": 30
+  },
+  "admin": {
+    "require_admin_privileges": true,
+    "auto_restart_as_admin": false,
+    "show_admin_dialog": true
+  },
+  "logging": {
+    "level": "INFO",
+    "max_file_size_mb": 10,
+    "backup_count": 5,
+    "debug_mode": false
+  },
+  "api": {
+    "base_url": "https://honeypot.yesnext.com.tr/api",
+    "timeout": 30,
+    "retry_count": 3
+  },
+  "tunnels": {
+    "auto_start": false,
+    "rdp_port": 53389,
+    "default_ports": [
+      {
+        "local": 3389,
+        "remote": 53389,
+        "service": "RDP",
+        "enabled": true
+      },
+      {
+        "local": 1433,
+        "remote": 0,
+        "service": "MSSQL",
+        "enabled": false
+      },
+      {
+        "local": 3306,
+        "remote": 0,
+        "service": "MySQL",
+        "enabled": false
+      },
+      {
+        "local": 21,
+        "remote": 0,
+        "service": "FTP",
+        "enabled": false
+      },
+      {
+        "local": 22,
+        "remote": 0,
+        "service": "SSH",
+        "enabled": false
+      }
+    ]
+  },
+  "updates": {
+    "auto_check": true,
+    "check_interval_hours": 24,
+    "show_notifications": true
+  },
+  "advanced": {
+    "startup_delay": 0,
+    "minimize_to_tray": true,
+    "auto_start_with_windows": false,
+    "single_instance": true
+  }
+}

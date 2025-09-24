@@ -1,7 +1,7 @@
-# Cloud Honeypot Client v2.2.0 - Release Notes
+# Cloud Honeypot Client v2.2.3 - Release Notes
 
 **Release Date**: September 24, 2025  
-**Version**: 2.2.0 - Windows Service Edition
+**Version**: 2.2.3 - Windows Service Edition
 
 ## 🚀 Major New Features
 

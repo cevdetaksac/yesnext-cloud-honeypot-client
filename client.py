@@ -119,7 +119,7 @@ def get_app_config():
     return _CONFIG
 
 # Application metadata from config
-__version__ = get_from_config("application.version", "2.2.0")
+__version__ = get_from_config("application.version", "2.2.3")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 GITHUB_OWNER, GITHUB_REPO = "cevdetaksac", "yesnext-cloud-honeypot-client"
 

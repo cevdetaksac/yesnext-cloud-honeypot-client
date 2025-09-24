@@ -29,7 +29,7 @@ Copy-Item "install_service.bat" "dist\honeypot-client\"
 Copy-Item "remove_service.bat" "dist\honeypot-client\"
 Copy-Item "check_service_status.bat" "dist\honeypot-client\"
 Copy-Item "SERVICE_MANAGEMENT.md" "dist\honeypot-client\"
-Copy-Item "RELEASE_NOTES_v2.2.0.md" "dist\honeypot-client\"
+Copy-Item "RELEASE_NOTES_v2.2.3.md" "dist\honeypot-client\"
 
 # Update icons from custom PNGs
 Write-Host "Converting custom PNG icons to ICO..." -ForegroundColor Yellow

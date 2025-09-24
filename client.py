@@ -119,7 +119,7 @@ def get_app_config():
     return _CONFIG
 
 # Application metadata from config
-__version__ = get_from_config("application.version", "2.1.0")
+__version__ = get_from_config("application.version", "2.2.0")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 GITHUB_OWNER, GITHUB_REPO = "cevdetaksac", "yesnext-cloud-honeypot-client"
 
@@ -280,6 +280,75 @@ def create_defender_trust_signals():
     except Exception as e:
         log(f"Failed to create trust signals: {e}")
         return None
+
+# ===================== SERVICE MANAGEMENT ===================== #
+def handle_service_commands(args):
+    """Handle service management commands"""
+    import os
+    import sys
+    import subprocess
+    
+    # Service script path (same directory as main executable)
+    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
+    if not os.path.exists(service_script):
+        # Fallback: try current directory
+        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
+        
+    if not os.path.exists(service_script):
+        print("❌ Service script not found! Please ensure service_wrapper.py is in the application directory.")
+        return False
+    
+    try:
+        if args.install:
+            print("📦 Installing Cloud Honeypot Monitor Service...")
+            result = subprocess.run([
+                sys.executable, service_script, 'install'
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                print("✅ Service installed successfully!")
+                print("🔧 The service will automatically monitor and restart the client application.")
+                print("📊 You can check the service status in Windows Services (services.msc)")
+            else:
+                print("❌ Service installation failed:")
+                if result.stdout: print(result.stdout)
+                if result.stderr: print(result.stderr)
+            return result.returncode == 0
+            
+        elif args.remove:
+            print("🗑️ Removing Cloud Honeypot Monitor Service...")
+            result = subprocess.run([
+                sys.executable, service_script, 'uninstall'
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                print("✅ Service removed successfully!")
+            else:
+                print("❌ Service removal failed:")
+                if result.stdout: print(result.stdout)
+                if result.stderr: print(result.stderr)
+            return result.returncode == 0
+            
+        elif getattr(args, 'service_status', False):
+            print("📊 Checking Cloud Honeypot Monitor Service status...")
+            result = subprocess.run([
+                sys.executable, service_script, 'status'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.stdout: 
+                print(result.stdout)
+            if result.stderr: 
+                print(result.stderr)
+            return True
+            
+    except subprocess.TimeoutExpired:
+        print("❌ Service command timed out")
+        return False
+    except Exception as e:
+        print(f"❌ Service management error: {e}")
+        return False
+        
+    return True
 
 # ===================== INTERNATIONALIZATION ===================== #
 # Purpose: Load and manage multi-language support
@@ -2328,6 +2397,8 @@ class CloudHoneypotClient:
             log(f"Exception: {e}")
         log("Daemon: durduruldu.")
 
+
+
     # ---------- Firewall Agent ---------- #
     def start_firewall_agent(self):
         """Start firewall agent with updated client_firewall module"""
@@ -2507,6 +2578,128 @@ class CloudHoneypotClient:
         lang_menu.add_command(label=self.t("menu_lang_en"), command=lambda: set_lang("en"))
         menu_settings.add_cascade(label=self.t("menu_language"), menu=lang_menu)
         menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
+
+        # Windows Service Menu
+        menu_service = tk.Menu(menubar, tearoff=0)
+        
+        def check_service_status():
+            """Check and display current service status"""
+            try:
+                import subprocess
+                import sys
+                import os
+                
+                # Service script path
+                service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
+                if not os.path.exists(service_script):
+                    service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
+                
+                if not os.path.exists(service_script):
+                    messagebox.showerror(self.t("error"), "Service wrapper not found!")
+                    return
+                
+                # Run status check
+                result = subprocess.run([
+                    sys.executable, service_script, 'status'
+                ], capture_output=True, text=True, timeout=30)
+                
+                status_text = result.stdout if result.stdout else result.stderr
+                if not status_text:
+                    status_text = "Service status unknown"
+                
+                messagebox.showinfo(self.t("service_status") if hasattr(self, 't') else "Service Status", status_text)
+                
+            except Exception as e:
+                messagebox.showerror(self.t("error"), f"Service status check failed: {str(e)}")
+        
+        def install_service():
+            """Install Windows service"""
+            try:
+                result = messagebox.askquestion(
+                    self.t("service_install") if hasattr(self, 't') else "Install Service", 
+                    self.t("service_install_confirm") if hasattr(self, 't') else "Install Cloud Honeypot Monitor Service?\n\nThis service will automatically restart the client if it crashes."
+                )
+                
+                if result == 'yes':
+                    import subprocess
+                    import sys
+                    import os
+                    
+                    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
+                    if not os.path.exists(service_script):
+                        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
+                    
+                    if not os.path.exists(service_script):
+                        messagebox.showerror(self.t("error"), "Service wrapper not found!")
+                        return
+                    
+                    # Run installation
+                    result = subprocess.run([
+                        sys.executable, service_script, 'install'
+                    ], capture_output=True, text=True, timeout=60)
+                    
+                    if result.returncode == 0:
+                        messagebox.showinfo(
+                            self.t("success") if hasattr(self, 't') else "Success", 
+                            self.t("service_installed") if hasattr(self, 't') else "Service installed successfully!\n\nThe client is now protected by the monitor service."
+                        )
+                    else:
+                        error_msg = result.stderr or result.stdout or "Unknown error"
+                        messagebox.showerror(
+                            self.t("error"), 
+                            f"Service installation failed:\n{error_msg}\n\nPlease run as Administrator."
+                        )
+                        
+            except Exception as e:
+                messagebox.showerror(self.t("error"), f"Service installation error: {str(e)}")
+        
+        def remove_service():
+            """Remove Windows service"""
+            try:
+                result = messagebox.askquestion(
+                    self.t("service_remove") if hasattr(self, 't') else "Remove Service", 
+                    self.t("service_remove_confirm") if hasattr(self, 't') else "Remove Cloud Honeypot Monitor Service?\n\nThe client will continue working but won't auto-restart if it crashes.",
+                    icon='warning'
+                )
+                
+                if result == 'yes':
+                    import subprocess
+                    import sys
+                    import os
+                    
+                    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
+                    if not os.path.exists(service_script):
+                        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
+                    
+                    if not os.path.exists(service_script):
+                        messagebox.showerror(self.t("error"), "Service wrapper not found!")
+                        return
+                    
+                    # Run removal
+                    result = subprocess.run([
+                        sys.executable, service_script, 'uninstall'
+                    ], capture_output=True, text=True, timeout=60)
+                    
+                    if result.returncode == 0:
+                        messagebox.showinfo(
+                            self.t("success") if hasattr(self, 't') else "Success", 
+                            self.t("service_removed") if hasattr(self, 't') else "Service removed successfully!"
+                        )
+                    else:
+                        error_msg = result.stderr or result.stdout or "Unknown error"
+                        messagebox.showerror(
+                            self.t("error"), 
+                            f"Service removal failed:\n{error_msg}"
+                        )
+                        
+            except Exception as e:
+                messagebox.showerror(self.t("error"), f"Service removal error: {str(e)}")
+        
+        menu_service.add_command(label=self.t("service_status") if hasattr(self, 't') else "Service Status", command=check_service_status)
+        menu_service.add_separator()
+        menu_service.add_command(label=self.t("service_install") if hasattr(self, 't') else "Install Service", command=install_service)
+        menu_service.add_command(label=self.t("service_remove") if hasattr(self, 't') else "Remove Service", command=remove_service)
+        menubar.add_cascade(label=self.t("menu_service") if hasattr(self, 't') else "Win-Service", menu=menu_service)
 
         menu_help = tk.Menu(menubar, tearoff=0)
         # Static version label as disabled entry at the top
@@ -2727,20 +2920,30 @@ class CloudHoneypotClient:
 
         self.root.mainloop()
 
+
+
+
+
 # ===================== MAIN ===================== #
 if __name__ == "__main__":
     # Parse arguments first to check for non-GUI modes
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--minimized", type=str, default="true", help="Start minimized")
     parser.add_argument("--watchdog", type=int, default=None, help="Watchdog process ID")
-    parser.add_argument("--install", action="store_true", help="Install the service")
-    parser.add_argument("--remove", action="store_true", help="Remove the service")
+    parser.add_argument("--install", action="store_true", help="Install the monitor service")
+    parser.add_argument("--remove", action="store_true", help="Remove the monitor service")
+    parser.add_argument("--service-status", action="store_true", dest="service_status", help="Show service status")
     args = parser.parse_args()
 
     # Handle special cases that don't need GUI
     if args.watchdog is not None:
         watchdog_main(args.watchdog)
+        sys.exit(0)
+        
+    # Handle service management commands
+    if args.install or args.remove or getattr(args, 'service_status', False):
+        handle_service_commands(args)
         sys.exit(0)
 
     # For daemon mode, skip GUI entirely
@@ -2959,13 +3162,21 @@ if __name__ == "__main__":
         loading_msg = current_i18n.get("loading_checking_services", "Checking services...")
         loading.update_progress(60, loading_msg)
         
-        if args.install:
+        # Handle service management commands
+        if getattr(args, 'install', False):
             loading.close()
             log("Servis kurulum modunda çalışıyor")
-            sys.exit(0)
-        elif args.remove:
+            success = handle_service_commands(args)
+            sys.exit(0 if success else 1)
+        elif getattr(args, 'remove', False):
             loading.close()
             log("Servis kaldırma modunda çalışıyor")
+            success = handle_service_commands(args)
+            sys.exit(0 if success else 1)
+        elif getattr(args, 'service_status', False):
+            loading.close()
+            log("Servis durumu kontrol ediliyor")
+            handle_service_commands(args)
             sys.exit(0)
 
         # Step 8: Show first run notice if needed (75%)

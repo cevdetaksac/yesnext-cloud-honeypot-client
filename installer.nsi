@@ -31,6 +31,7 @@ RequestExecutionLevel admin
 ; Pages
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "LICENSE"
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -95,7 +96,8 @@ Function .onInit
 FunctionEnd
 
 ; Installer Sections
-Section "Install"
+Section "Cloud Honeypot Client (Required)" SEC_MAIN
+    SectionIn RO  ; Read-only (always installed)
     ; Make sure the installation directory is empty and writable
     RMDir /r "$INSTDIR"
     CreateDirectory "$INSTDIR"
@@ -148,29 +150,71 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "Publisher" "${COMPANYNAME}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "DisplayVersion" "${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD}"
     
-    ; Install and start the Windows service
-    DetailPrint "Installing service..."
-    ExecWait '"$INSTDIR\honeypot-client.exe" install'
-    DetailPrint "Starting service..."
-    ExecWait 'net start CloudHoneypotClient'
+    ; Start the application 
+    DetailPrint "Starting honeypot client application..."
+    Exec '"$INSTDIR\honeypot-client.exe" --minimized'
     
-    ; Start the application with runas to ensure proper elevation
-    DetailPrint "Starting application..."
-    Exec '"$INSTDIR\honeypot-client.exe" --minimized=false'
-    
-    ; Wait a moment for everything to start
-    Sleep 1000
+    ; Wait for everything to initialize
+    Sleep 2000
 SectionEnd
+
+; Windows Service Monitor (Optional but Recommended)
+Section "Windows Service Monitor (Recommended)" SEC_SERVICE
+    DetailPrint "Installing Cloud Honeypot Monitor Service..."
+    
+    ; Try multiple methods to install the service
+    ExecWait '"$SYSDIR\python.exe" "$INSTDIR\service_wrapper.py" install' $0
+    ${If} $0 == 0
+        DetailPrint "Service installed successfully using system Python"
+    ${Else}
+        DetailPrint "System Python failed, trying alternative methods..."
+        ; Fallback: Try with Python executable in install dir if available
+        ExecWait '"$INSTDIR\python.exe" "$INSTDIR\service_wrapper.py" install' $1
+        ${If} $1 == 0
+            DetailPrint "Service installed successfully using local Python"
+        ${Else}
+            ; Try using client script
+            ExecWait '"$SYSDIR\python.exe" "$INSTDIR\client.py" --install' $2
+            ${If} $2 == 0
+                DetailPrint "Service installed successfully using client script"
+            ${Else}
+                DetailPrint "Service installation failed. You can install it manually later using install_service.bat"
+                Goto service_end
+            ${EndIf}
+        ${EndIf}
+    ${EndIf}
+    
+    DetailPrint "Starting monitor service..."
+    ExecWait 'net start CloudHoneypotMonitor' $3
+    ${If} $3 == 0
+        DetailPrint "Monitor service started successfully - Your client is now protected!"
+    ${Else}
+        DetailPrint "Service installed but failed to start. It will start automatically on next boot."
+    ${EndIf}
+    
+    service_end:
+SectionEnd
+
+; Section Descriptions
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "Main Cloud Honeypot Client application with all required files"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SERVICE} "Windows Service Monitor provides automatic restart functionality. Highly recommended for production use."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; Uninstaller Section
 Section "Uninstall"
     SetShellVarContext all
     
     DetailPrint "Stopping service and processes..."
+    
+    ; Stop and remove the monitor service
     nsExec::ExecToLog 'net stop CloudHoneypotClient'
-    nsExec::ExecToLog '"$INSTDIR\honeypot-client.exe" remove'
+    nsExec::ExecToLog '"$SYSDIR\python.exe" "$INSTDIR\service_wrapper.py" uninstall'
+    
+    ; Stop client processes  
     nsExec::ExecToLog 'taskkill /f /im honeypot-client.exe'
     nsExec::ExecToLog 'taskkill /f /im cloud-client.exe'
+    nsExec::ExecToLog 'taskkill /f /im python.exe'
     
     ; Give processes time to terminate
     Sleep 2000

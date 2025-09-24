@@ -369,18 +369,37 @@ def service_status():
     """Servis durumunu kontrol et"""
     try:
         status = win32serviceutil.QueryServiceStatus(CloudHoneypotService._svc_name_)
-        status_text = {
-            1: "STOPPED",
-            2: "START_PENDING", 
-            3: "STOP_PENDING",
-            4: "RUNNING",
-            5: "CONTINUE_PENDING",
-            6: "PAUSE_PENDING", 
-            7: "PAUSED"
-        }.get(status[1], f"UNKNOWN({status[1]})")
+        status_code = status[1]
         
-        print(f"Service Status: {status_text}")
-        return status[1]
+        status_map = {
+            1: ("DURDURULDU", "STOPPED"),
+            2: "BAŞLATILIYOR...", 
+            3: "DURDURULUYOR...",
+            4: ("ÇALIŞIYOR", "RUNNING"),
+            5: "DEVAM ETTİRİLİYOR...",
+            6: "DURAKLATILIYOR...", 
+            7: ("DURAKLATILDI", "PAUSED")
+        }
+        
+        status_text = status_map.get(status_code, f"BİLİNMEYEN ({status_code})")
+        
+        # Turkish/English dual display for GUI
+        if isinstance(status_text, tuple):
+            tr_text, en_text = status_text
+            print(f"🔍 Servis Durumu: {tr_text}")
+            print(f"🔍 Service Status: {en_text}")
+            
+            # Additional info for running status
+            if status_code == 4:  # RUNNING
+                print("✅ Cloud Honeypot Monitor servisi aktif olarak çalışıyor")
+                print("🔧 Client uygulaması otomatik olarak korunuyor")
+            elif status_code == 1:  # STOPPED
+                print("❌ Cloud Honeypot Monitor servisi durdurulmuş")
+                print("⚠️  Client uygulaması korunmuyor - otomatik restart devre dışı")
+        else:
+            print(f"🔍 Servis Durumu: {status_text}")
+        
+        return status_code
         
     except Exception as e:
         print(f"Could not query service status: {e}")

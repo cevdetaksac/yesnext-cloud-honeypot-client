@@ -9,8 +9,8 @@ OutFile "cloud-client-installer.exe"
 !define COMPANYNAME "YesNext"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 2
-!define VERSIONMINOR 0
-!define VERSIONBUILD 0
+!define VERSIONMINOR 2
+!define VERSIONBUILD 4
 
 !define INSTALLSIZE 15000
 
@@ -34,6 +34,11 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+
+; Finish page without reboot options
+!define MUI_FINISHPAGE_NOAUTOCLOSE
+!define MUI_FINISHPAGE_NOREBOOTSUPPORT
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client kurulumu başarıyla tamamlandı.$\r$\n$\r$\nUygulama otomatik olarak başlatıldı ve Windows Service olarak kayıt edildi.$\r$\n$\r$\nSistem yeniden başlatma gerektirmez."
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_WELCOME
@@ -150,47 +155,116 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "Publisher" "${COMPANYNAME}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "DisplayVersion" "${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD}"
     
-    ; Start the application 
-    DetailPrint "Starting honeypot client application..."
-    Exec '"$INSTDIR\honeypot-client.exe" --minimized'
-    
-    ; Wait for everything to initialize
-    Sleep 2000
+    ; Application will be started after service installation is complete
 SectionEnd
 
-; Windows Service Monitor (Optional but Recommended)
-Section "Windows Service Monitor (Recommended)" SEC_SERVICE
+; Windows Service Monitor (Always Installed)
+Section "Windows Service Monitor" SEC_SERVICE
+    SectionIn RO  ; Make service installation mandatory
     DetailPrint "Installing Cloud Honeypot Monitor Service..."
     
-    ; Try multiple methods to install the service
+    ; Method 1: Try system Python first
+    DetailPrint "Attempting service installation with system Python..."
     ExecWait '"$SYSDIR\python.exe" "$INSTDIR\service_wrapper.py" install' $0
     ${If} $0 == 0
-        DetailPrint "Service installed successfully using system Python"
-    ${Else}
-        DetailPrint "System Python failed, trying alternative methods..."
-        ; Fallback: Try with Python executable in install dir if available
-        ExecWait '"$INSTDIR\python.exe" "$INSTDIR\service_wrapper.py" install' $1
-        ${If} $1 == 0
-            DetailPrint "Service installed successfully using local Python"
-        ${Else}
-            ; Try using client script
-            ExecWait '"$SYSDIR\python.exe" "$INSTDIR\client.py" --install' $2
-            ${If} $2 == 0
-                DetailPrint "Service installed successfully using client script"
-            ${Else}
-                DetailPrint "Service installation failed. You can install it manually later using install_service.bat"
-                Goto service_end
-            ${EndIf}
-        ${EndIf}
+        DetailPrint "✅ Service installed successfully using system Python"
+        Goto service_installed
     ${EndIf}
     
-    DetailPrint "Starting monitor service..."
-    ExecWait 'net start CloudHoneypotMonitor' $3
-    ${If} $3 == 0
-        DetailPrint "Monitor service started successfully - Your client is now protected!"
-    ${Else}
-        DetailPrint "Service installed but failed to start. It will start automatically on next boot."
+    ; Method 2: Try Python from PATH
+    DetailPrint "System Python failed, trying Python from PATH..."
+    ExecWait 'python.exe "$INSTDIR\service_wrapper.py" install' $1
+    ${If} $1 == 0
+        DetailPrint "✅ Service installed successfully using PATH Python"
+        Goto service_installed
     ${EndIf}
+    
+    ; Method 3: Try local Python if available
+    DetailPrint "PATH Python failed, trying local Python..."
+    ExecWait '"$INSTDIR\python.exe" "$INSTDIR\service_wrapper.py" install' $2
+    ${If} $2 == 0
+        DetailPrint "✅ Service installed successfully using local Python"
+        Goto service_installed
+    ${EndIf}
+    
+    ; Method 4: Try using client script with system Python
+    DetailPrint "Local Python failed, trying client script method..."
+    ExecWait '"$SYSDIR\python.exe" "$INSTDIR\client.py" --install' $3
+    ${If} $3 == 0
+        DetailPrint "✅ Service installed successfully using client script"
+        Goto service_installed
+    ${EndIf}
+    
+    ; Method 5: Direct service registration
+    DetailPrint "All Python methods failed, trying direct registration..."
+    ExecWait 'sc create CloudHoneypotClient binPath= "\"$SYSDIR\python.exe\" \"$INSTDIR\service_wrapper.py\"" DisplayName= "Cloud Honeypot Client Monitor" start= auto' $4
+    ${If} $4 == 0
+        DetailPrint "✅ Service registered successfully using SC command"
+        Goto service_installed
+    ${EndIf}
+    
+    ; If all methods fail, show error but continue
+    DetailPrint "⚠️ Service installation failed with all methods. Manual installation may be required."
+    DetailPrint "You can install the service manually using install_service.bat after installation."
+    Goto service_start_attempt
+    
+    service_installed:
+    DetailPrint "🔧 Service registration completed successfully"
+    
+    service_start_attempt:
+    ; Start the service with multiple attempts
+    DetailPrint "Starting Cloud Honeypot Monitor Service..."
+    
+    ; First attempt: Standard net start
+    ExecWait 'net start CloudHoneypotClient' $5
+    ${If} $5 == 0
+        DetailPrint "✅ Monitor service started successfully"
+        Goto service_running
+    ${EndIf}
+    
+    ; Second attempt: Try with CloudHoneypotMonitor name (fallback)
+    DetailPrint "Trying alternative service name..."
+    ExecWait 'net start CloudHoneypotMonitor' $6
+    ${If} $6 == 0
+        DetailPrint "✅ Monitor service started successfully (alternative name)"
+        Goto service_running
+    ${EndIf}
+    
+    ; Third attempt: SC start command
+    DetailPrint "Trying SC start command..."
+    ExecWait 'sc start CloudHoneypotClient' $7
+    ${If} $7 == 0
+        DetailPrint "✅ Monitor service started successfully (SC command)"
+        Goto service_running
+    ${EndIf}
+    
+    ; If service fails to start, it's not critical - app can still run
+    DetailPrint "⚠️ Service installed but failed to start automatically"
+    DetailPrint "Service will start on next system boot"
+    Goto start_application
+    
+    service_running:
+    DetailPrint "🛡️ Your system is now protected by the monitor service"
+    
+    start_application:
+    ; Always start the application regardless of service status
+    DetailPrint "🚀 Starting Cloud Honeypot Client application..."
+    
+    ; Kill any existing processes first
+    nsExec::ExecToLog 'taskkill /f /im honeypot-client.exe'
+    nsExec::ExecToLog 'taskkill /f /im cloud-client.exe'
+    Sleep 1000
+    
+    ; Start the main application
+    Exec '"$INSTDIR\honeypot-client.exe" --minimized'
+    Sleep 3000
+    
+    ; Verify application started
+    nsExec::ExecToLog 'tasklist /FI "IMAGENAME eq honeypot-client.exe"'
+    
+    DetailPrint "✅ Cloud Honeypot Client installation completed!"
+    DetailPrint "📊 Check Windows Services (services.msc) to verify service status"
+    DetailPrint "🔍 Application is running in system tray"
     
     service_end:
 SectionEnd
@@ -198,7 +272,7 @@ SectionEnd
 ; Section Descriptions
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "Main Cloud Honeypot Client application with all required files"
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SERVICE} "Windows Service Monitor provides automatic restart functionality. Highly recommended for production use."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SERVICE} "Windows Service Monitor provides automatic restart functionality and is always installed for system stability."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; Uninstaller Section

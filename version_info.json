@@ -1,12 +1,13 @@
-{
-  "CompanyName": "YesNext Technology",
-  "FileDescription": "Cloud Honeypot Client - Network Security Monitor",
-  "FileVersion": "2.2.3",
-  "InternalName": "honeypot-client",
-  "LegalCopyright": "Copyright \u00a9 2024-2025 YesNext Technology",
-  "OriginalFilename": "honeypot-client.exe",
+﻿{
+  "FileVersion": "2.2.4.0",
+  "ProductVersion": "2.2.4.0",
+  "InternalName": "Cloud Honeypot Client",
   "ProductName": "Cloud Honeypot Client",
-  "ProductVersion": "2.2.3",
-  "Purpose": "Network Security and Threat Detection",
-  "Category": "Security Software"
+  "FileDescription": "Cloud Honeypot Client with Enhanced Admin Privilege Management and Windows Defender Compatibility",
+  "CompanyName": "YesNext Security Solutions",
+  "LegalCopyright": "© 2024 YesNext",
+  "build_timestamp": "2025-09-24T16:35:56Z",
+  "installer_hash": "4FA847F06DFC9501F89E75275D2FA9929980E806F4BA562A58C77CC8FE121139",
+  "installer_size": "22823784",
+  "release_notes": "RELEASE_NOTES_v2.2.4.md"
 }

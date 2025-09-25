@@ -19,6 +19,54 @@ class WindowsServiceManager:
     def __init__(self, log_func=None):
         self.log = log_func if log_func else print
     
+    def install_monitor_service(self) -> bool:
+        """Install Honeypot Monitor Service"""
+        try:
+            if not self.is_admin():
+                self.log("[SERVICE] Admin yetkileri gerekli")
+                return False
+            
+            # Python service monitor kurulumu
+            success, output = self.run_command("python service_monitor.py install")
+            if success:
+                self.log("[SERVICE] Monitor service installed successfully")
+                # Start the service
+                success2, output2 = self.run_command("python service_monitor.py start")
+                if success2:
+                    self.log("[SERVICE] Monitor service started successfully")
+                    return True
+                else:
+                    self.log(f"[SERVICE] Failed to start monitor service: {output2}")
+            else:
+                self.log(f"[SERVICE] Failed to install monitor service: {output}")
+            
+            return False
+        except Exception as e:
+            self.log(f"[SERVICE] Monitor service installation error: {e}")
+            return False
+    
+    def uninstall_monitor_service(self) -> bool:
+        """Uninstall Honeypot Monitor Service"""
+        try:
+            if not self.is_admin():
+                self.log("[SERVICE] Admin yetkileri gerekli")
+                return False
+            
+            # Stop and remove service
+            self.run_command("python service_monitor.py stop")
+            success, output = self.run_command("python service_monitor.py remove")
+            
+            if success or "not installed" in output.lower():
+                self.log("[SERVICE] Monitor service removed successfully")
+                return True
+            else:
+                self.log(f"[SERVICE] Failed to remove monitor service: {output}")
+                return False
+                
+        except Exception as e:
+            self.log(f"[SERVICE] Monitor service removal error: {e}")
+            return False
+    
     def is_admin(self) -> bool:
         """Yönetici yetkisi kontrolü"""
         try:

@@ -37,6 +37,13 @@ from client_utils import (ConfigManager, LanguageManager, LoggerManager, Securit
 # Import all constants from central configuration
 from client_constants import *
 
+# Monitor service integration (optional)
+try:
+    from service_monitor_utils import notify_monitor_startup, check_monitor_health
+    MONITOR_AVAILABLE = True
+except ImportError:
+    MONITOR_AVAILABLE = False
+
 # ===================== LOGGING SETUP ===================== #
 # Purpose: Modern, efficient logging system with millisecond precision
 
@@ -3040,11 +3047,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--minimized", type=str, default="true", help="Start minimized")
+    parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
     parser.add_argument("--watchdog", type=int, default=None, help="Watchdog process ID")
     parser.add_argument("--install", action="store_true", help="Install the monitor service")
     parser.add_argument("--remove", action="store_true", help="Remove the monitor service")
     parser.add_argument("--service-status", action="store_true", dest="service_status", help="Show service status")
     args = parser.parse_args()
+    
+    # Set global silent mode if requested
+    if args.silent:
+        import client_constants
+        # Override config for silent deployment
+        client_constants.SILENT_ADMIN_ELEVATION = True
+        client_constants.SKIP_USER_DIALOGS = True
 
     # Handle special cases that don't need GUI
     if args.watchdog is not None:
@@ -3157,6 +3172,15 @@ if __name__ == "__main__":
         # Set the selected language in the app instance
         app.lang = selected_language
         log(f"Application initialized successfully with language: {selected_language}")
+        
+        # Notify monitor service if available
+        if MONITOR_AVAILABLE:
+            try:
+                notify_monitor_startup()
+                log("[MONITOR] PID registered with monitor service")
+            except Exception as e:
+                log(f"[MONITOR] Failed to register with monitor service: {e}")
+        
         loading_key = current_i18n.get("loading_checking_admin", "Checking admin privileges...")
         loading.update_progress(30, loading_key)
         
@@ -3175,22 +3199,31 @@ if __name__ == "__main__":
             loading.update_progress(40, loading_msg)
             print(f"[MAIN] Admin confirmed (40%) with message: {loading_msg}")
         else:
-            print("[MAIN] Not running as admin - showing admin dialog")
-            log("Admin yetkisi yok - kullanıcıya dialog gösteriliyor")
-            loading_msg = current_i18n.get("loading_waiting_privilege", "Waiting for privilege confirmation...")
-            loading.update_progress(38, loading_msg)
-            print(f"[MAIN] Waiting for privilege (38%) with message: {loading_msg}")
+            print("[MAIN] Not running as admin")
+            log("Admin yetkisi yok")
             
-            # Show admin privilege dialog using modular GUI
-            print("[MAIN] Creating AdminPrivilegeDialog...")
-            admin_dialog = AdminPrivilegeDialog(I18N)
-            print("[MAIN] Showing admin dialog...")
-            user_choice = admin_dialog.show()
+            # Check if silent elevation is enabled (production deployment)
+            if SILENT_ADMIN_ELEVATION:
+                print("[MAIN] Silent admin elevation enabled - auto-elevating")
+                log("Sessiz admin yükseltme aktif - otomatik yükseltiliyor")
+                user_choice = "yes"
+            else:
+                print("[MAIN] Showing admin dialog")
+                log("Admin dialog gösteriliyor")
+                loading_msg = current_i18n.get("loading_waiting_privilege", "Waiting for privilege confirmation...")
+                loading.update_progress(38, loading_msg)
+                print(f"[MAIN] Waiting for privilege (38%) with message: {loading_msg}")
+                
+                # Show admin privilege dialog using modular GUI
+                print("[MAIN] Creating AdminPrivilegeDialog...")
+                admin_dialog = AdminPrivilegeDialog(I18N)
+                print("[MAIN] Showing admin dialog...")
+                user_choice = admin_dialog.show()
+                
+                print(f"[MAIN] Admin dialog completed with choice: '{user_choice}'")
+                log(f"Admin dialog result: '{user_choice}'")  # Debug log
             
-            print(f"[MAIN] Admin dialog completed with choice: '{user_choice}'")
-            log(f"Admin dialog result: '{user_choice}'")  # Debug log
-            
-            # Update loading after dialog
+            # Update loading after decision
             loading_msg = current_i18n.get("loading_privilege_completed", "Privilege selection completed...")
             loading.update_progress(40, loading_msg)
             print(f"[MAIN] Privilege completed (40%) with message: {loading_msg}")

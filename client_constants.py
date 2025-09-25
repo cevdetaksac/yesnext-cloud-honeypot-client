@@ -224,6 +224,10 @@ ENABLE_ADMIN_ELEVATION = get_from_config("advanced.request_admin_privileges", Tr
 DEBUG_MODE = get_from_config("debug.enabled", False)
 VERBOSE_LOGGING = get_from_config("debug.verbose_logging", False)
 
+# Production deployment flags
+SILENT_ADMIN_ELEVATION = get_from_config("deployment.silent_admin", True)  # Auto-elevate without asking
+SKIP_USER_DIALOGS = get_from_config("deployment.skip_dialogs", False)  # Skip all user confirmations
+
 # ===================== EXPORT ALL CONSTANTS ===================== #
 
 # For easy importing: from client_constants import *
@@ -263,7 +267,7 @@ __all__ = [
     
     # Feature flags
     'ENABLE_AUTO_UPDATE', 'ENABLE_TRAY_ICON', 'ENABLE_STARTUP_NOTICE', 'ENABLE_ADMIN_ELEVATION',
-    'DEBUG_MODE', 'VERBOSE_LOGGING',
+    'DEBUG_MODE', 'VERBOSE_LOGGING', 'SILENT_ADMIN_ELEVATION', 'SKIP_USER_DIALOGS',
     
     # Helper functions
     'get_app_config', 'get_app_directory', 'get_window_dimensions', 'get_default_tunnels', 'get_port_table'

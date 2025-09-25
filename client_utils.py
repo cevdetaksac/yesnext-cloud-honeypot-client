@@ -324,7 +324,7 @@ class SystemUtils:
     
     @staticmethod
     def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False, log_func=None):
-        """Terminal komutu çalıştır"""
+        """Terminal komutu çalıştır - Unicode safe"""
         if log_func is None:
             log_func = print
             
@@ -335,7 +335,8 @@ class SystemUtils:
             creationflags = 0x08000000 if os.name == 'nt' else 0
             completed = subprocess.run(
                 cmd, shell=False, capture_output=True, text=True,
-                creationflags=creationflags, timeout=timeout
+                creationflags=creationflags, timeout=timeout,
+                encoding='utf-8', errors='replace'  # Unicode safe encoding
             )
             
             if not suppress_rc_log:
@@ -345,6 +346,20 @@ class SystemUtils:
         except subprocess.TimeoutExpired:
             log_func(f"Command timeout: {' '.join(cmd)}")
             return None
+        except UnicodeDecodeError as e:
+            log_func(f"Command encoding error: {e}")
+            # Fallback: try with different encoding
+            try:
+                creationflags = 0x08000000 if os.name == 'nt' else 0
+                completed = subprocess.run(
+                    cmd, shell=False, capture_output=True, text=True,
+                    creationflags=creationflags, timeout=timeout,
+                    encoding='cp1254', errors='replace'  # Windows Turkish encoding
+                )
+                return completed
+            except Exception as fallback_error:
+                log_func(f"Command fallback failed: {fallback_error}")
+                return None
         except Exception as e:
             log_func(f"Command error: {e}")
             return None
@@ -803,25 +818,50 @@ def firewall_allow_exists_tcp_port(port: int, log_func=None) -> bool:
         
     if os.name != 'nt':
         return False
+    # Primary method: Use netsh (faster and more reliable than PowerShell)
     try:
-        ps = (
-            f"$p={int(port)};"
-            "$r = Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow | "
-            "Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'TCP' -and $_.LocalPort -eq $p };"
-            "if ($r) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
-        )
-        res = SystemUtils.run_cmd(['powershell','-NoProfile','-Command', ps], timeout=10, suppress_rc_log=True, log_func=log_func)
-        if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', '') and 'FOUND' in res.stdout:
-            return True
-    except Exception:
-        pass
-    # Fallback best-effort using netsh output (may be localized; ignore failures)
-    try:
-        res = SystemUtils.run_cmd(['netsh','advfirewall','firewall','show','rule','name=all'], timeout=15, suppress_rc_log=True, log_func=log_func)
-        if res and hasattr(res, 'returncode') and res.returncode == 0 and getattr(res, 'stdout', ''):
-            txt = res.stdout.lower()
-            if ('localport' in txt) and (str(int(port)) in txt):
+        res = SystemUtils.run_cmd([
+            'netsh', 'advfirewall', 'firewall', 'show', 'rule', 
+            'name=all', 'dir=in', 'type=allow'
+        ], timeout=10, suppress_rc_log=True, log_func=log_func)
+        
+        if res and hasattr(res, 'returncode') and res.returncode == 0:
+            txt = str(res.stdout or "").lower()
+            port_str = str(int(port))
+            
+            # Look for patterns indicating the port is allowed
+            patterns = [
+                f'localport: {port_str}',
+                f'localport:{port_str}',
+                f'localport = {port_str}',
+                f'local port: {port_str}'
+            ]
+            
+            for pattern in patterns:
+                if pattern in txt:
+                    return True
+                    
+            # Also check if 'any' is specified for local port
+            if 'localport: any' in txt or 'localport:any' in txt:
                 return True
+                
+    except Exception as e:
+        if log_func:
+            log_func(f"Firewall check error: {e}")
+    
+    # Fallback: Quick PowerShell check (simplified)
+    try:
+        ps = f"if (Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow | Get-NetFirewallPortFilter | Where-Object LocalPort -eq {port}) {{ Write-Output 'FOUND' }}"
+        
+        res = SystemUtils.run_cmd([
+            'powershell', '-NoProfile', '-Command', ps
+        ], timeout=5, suppress_rc_log=True, log_func=log_func)
+        
+        if res and res.returncode == 0:
+            stdout = str(getattr(res, 'stdout', ''))
+            if 'FOUND' in stdout:
+                return True
+                
     except Exception:
         pass
     return False
@@ -1361,7 +1401,7 @@ class InstallerUpdateManager:
             self.log(f"[UPDATE] İndirme hatası: {e}")
             return None
     
-    def install_update(self, installer_path: str, silent: bool = False) -> bool:
+    def install_update(self, installer_path: str, silent: bool = False, progress_callback=None) -> bool:
         """Güncellemeyi yükle"""
         try:
             if not os.path.exists(installer_path):
@@ -1369,34 +1409,65 @@ class InstallerUpdateManager:
                 return False
             
             self.log("[UPDATE] Güncelleme yükleniyor...")
+            if progress_callback:
+                progress_callback(75, "Eski sürüm kapatılıyor...")
             
             # Mevcut process'leri sonlandır
             self._terminate_running_instances()
+            
+            if progress_callback:
+                progress_callback(80, "Installer başlatılıyor...")
             
             # Installer'ı çalıştır
             cmd = [installer_path]
             if silent:
                 cmd.extend(["/S", "/silent"])  # NSIS silent install
+            else:
+                # Interactive mod - kullanıcı installer'ı görecek
+                cmd.extend(["/NCRC"])  # CRC check'i atla, hızlandır
             
             self.log(f"[UPDATE] Installer komutu: {' '.join(cmd)}")
             
-            # Installer'ı başlat ve tamamlanmasını bekle
-            import subprocess
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if progress_callback:
+                progress_callback(85, "Yükleme başlatılıyor... (Installer penceresi açılacak)")
             
-            if result.returncode == 0:
+            # Installer'ı başlat
+            import subprocess
+            
+            if silent:
+                # Silent mode - subprocess.run ile bekle
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                success = result.returncode == 0
+                if not success:
+                    self.log(f"[UPDATE] Installer hatası: {result.stderr}")
+            else:
+                # Interactive mode - subprocess.Popen ile başlat, bekle
+                process = subprocess.Popen(cmd, shell=True)
+                
+                if progress_callback:
+                    progress_callback(90, "Yükleme devam ediyor... (Installer talimatlarını takip edin)")
+                
+                # Process'in tamamlanmasını bekle
+                process.wait()
+                success = process.returncode == 0
+            
+            if success:
                 self.log("[UPDATE] Güncelleme başarıyla yüklendi")
+                
+                if progress_callback:
+                    progress_callback(95, "Temizlik yapılıyor...")
                 
                 # Temp dosyayı temizle
                 try:
                     os.remove(installer_path)
-                    os.rmdir(os.path.dirname(installer_path))
+                    temp_dir = os.path.dirname(installer_path)
+                    if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                        os.rmdir(temp_dir)
                 except:
                     pass
                 
                 return True
             else:
-                self.log(f"[UPDATE] Installer hatası: {result.stderr}")
                 return False
                 
         except Exception as e:
@@ -1494,7 +1565,7 @@ class InstallerUpdateManager:
                 progress_callback(70, "Güncelleme yükleniyor...")
             
             # Güncellemeyi yükle
-            success = self.install_update(installer_path, silent)
+            success = self.install_update(installer_path, silent, progress_callback)
             
             if success:
                 if progress_callback:
@@ -1531,6 +1602,7 @@ class UpdateProgressDialog:
         self.dialog = None
         self.progress_var = None
         self.status_var = None
+        self.percent_var = None
         self.progress_bar = None
     
     def create_dialog(self):
@@ -1600,8 +1672,14 @@ class UpdateProgressDialog:
                 self.progress_var.set(percent)
                 if message:
                     self.status_var.set(message)
-                self.percent_var.set(f"{percent}%")
+                if self.percent_var:
+                    self.percent_var.set(f"{percent}%")
                 self.dialog.update()
+                
+                # %100'de dialog otomatik kapatma
+                if percent >= 100:
+                    self.dialog.after(2000, self.close_dialog)  # 2 saniye sonra kapat
+                    
         except Exception as e:
             print(f"Progress güncelleme hatası: {e}")
     

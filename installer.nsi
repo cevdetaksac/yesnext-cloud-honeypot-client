@@ -132,8 +132,8 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     ; Add files
     File /r "dist\honeypot-client\*.*"
     
-    ; Copy icon file for shortcuts
-    File "certs\honeypot.ico"
+    ; Copy complete high-resolution icon set for optimal Windows compatibility
+    File "certs\honeypot*.ico"
     
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -143,8 +143,8 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot.ico" 0
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
     
-    ; Desktop Shortcut
-    CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot.ico" 0
+    ; Desktop Shortcut with high-resolution icon
+    CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot_256.ico" 0
     
     ; Registry information for add/remove programs
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${COMPANYNAME} ${APPNAME}" "DisplayName" "${APPNAME}"

@@ -4,7 +4,7 @@
 a = Analysis(
     ['client.py'],
     pathex=[],
-    binaries=[(r'C:\Windows\System32\win32service.pyd', '.')],
+    binaries=[(r'C:\Users\caksac\AppData\Local\Programs\Python\Python312\Lib\site-packages\win32\win32service.pyd', '.')],
     datas=[('service_wrapper.py', '.'), ('client_config.json', '.'), ('client_lang.json', '.')],
     hiddenimports=['unicodedata', 'win32timezone', 'win32api', 'win32serviceutil', 'win32service', 'win32event', 'servicemanager', 'winerror', 'pywintypes', 'pythoncom'],
     hookspath=[],

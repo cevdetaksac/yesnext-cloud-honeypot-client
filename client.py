@@ -20,12 +20,13 @@ from client_firewall import FirewallAgent
 from client_helpers import log, run_cmd, ClientHelpers
 import client_helpers
 from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
-from client_api import HoneypotAPIClient, test_api_connection, AsyncAttackCounter
+from client_api import HoneypotAPIClient, test_api_connection, AsyncAttackCounter, api_request_with_token, update_client_ip_api, send_heartbeat_api, report_tunnel_action_api, register_client_api, report_open_ports_api
+from client_tokens import create_token_manager, get_token_file_paths
 from client_gui import LoadingScreen, LanguageDialog, AdminPrivilegeDialog, ConsentDialog
 from client_gui import show_startup_notice, show_error_message, show_info_message, show_warning_message
 from client_services import WindowsServiceManager, RDPManager, FirewallManager, TaskSchedulerManager
 from client_utils import (ConfigManager, LanguageManager, LoggerManager, SecurityUtils, 
-                         SystemUtils, TokenStore, ServiceController, load_i18n,
+                         SystemUtils, ServiceController, load_i18n,
                          firewall_allow_exists_tcp_port, ensure_firewall_allow_for_port,
                          is_process_running_windows, write_watchdog_token, read_watchdog_token,
                          start_watchdog_if_needed, is_admin, set_autostart, watchdog_main,
@@ -33,76 +34,8 @@ from client_utils import (ConfigManager, LanguageManager, LoggerManager, Securit
                          set_config_value, update_language_config, get_port_table, get_from_config,
                          get_rdp_secure_port)
 
-# ===================== APPLICATION CONFIGURATION ===================== #
-# Purpose: Central configuration management and file paths
-
-def appdata_dir() -> str:
-    """Get or create application data directory"""
-    return os.makedirs(os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), 
-                                   "YesNext", "CloudHoneypotClient"), exist_ok=True) or \
-           os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "YesNext", "CloudHoneypotClient")
-
-# ===================== WINDOWS DEFENDER COMPATIBILITY ===================== #
-# Purpose: Legitimate security software behavioral patterns
-
-def check_defender_compatibility() -> Dict[str, Any]:
-    """Create legitimate security software markers for Windows Defender compatibility"""
-    try:
-        markers = {
-            "software_category": "Network Security Monitoring",
-            "legitimate_purpose": "Intrusion Detection and Response",
-            "vendor": "YesNext Technology",
-            "certificate_subject": "YesNext Technology Corporation",
-            "installation_method": "Microsoft Signed Installer",
-            "behavioral_patterns": [
-                "Network monitoring and analysis",
-                "Security event logging",
-                "Remote security management",
-                "System integrity monitoring"
-            ]
-        }
-        log("🛡️ Windows Defender compatibility markers initialized")
-        return markers
-    except Exception as e:
-        log(f"Defender compatibility check error: {e}")
-        return {}
-
-def create_defender_trust_signals() -> bool:
-    """Create trust signals that indicate legitimate security software behavior"""
-    try:
-        # Create Windows Security Center compatible metadata
-        security_metadata = {
-            "product_name": "Cloud Honeypot Security Monitor",
-            "product_version": "2.2.4",
-            "vendor_name": "YesNext Technology",
-            "product_state": "Enabled and Up-to-date",
-            "signature_status": "Digital signature verified",
-            "installation_source": "Legitimate software distribution"
-        }
-        
-        # Write security metadata to appropriate location
-        metadata_path = os.path.join(APP_DIR, "security_metadata.json")
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(security_metadata, f, indent=2)
-        
-        log("✅ Windows Defender trust signals established")
-        return True
-    except Exception as e:
-        log(f"Trust signals setup error: {e}")
-        return False
-
-# Application file paths - Centralized configuration
-APP_DIR = appdata_dir()
-# CONFIG_FILE removed - now handled by client_utils.py single config system
-LOG_FILE, CONSENT_FILE, STATUS_FILE = [
-    os.path.join(APP_DIR, f) for f in ["client.log", "consent.json", "status.json"]
-]
-TOKEN_FILE_NEW, TOKEN_FILE_OLD, WATCHDOG_TOKEN_FILE = [
-    os.path.join(APP_DIR, "token.dat"), "token.txt", os.path.join(APP_DIR, "watchdog.token")
-]
-
-# Central config system - single config file next to executable
-# No CLIENT_CONFIG_FILE needed - handled by client_utils.py
+# Import all constants from central configuration
+from client_constants import *
 
 # ===================== LOGGING SETUP ===================== #
 # Purpose: Modern, efficient logging system with millisecond precision
@@ -111,7 +44,7 @@ class CustomFormatter(logging.Formatter):
     """High-precision timestamp formatter for detailed logging"""
     def formatTime(self, record, datefmt=None):
         return dt.datetime.fromtimestamp(record.created).strftime(
-            datefmt or '%Y-%m-%d %H:%M:%S.%f')[:-3]
+            datefmt or LOG_TIME_FORMAT)[:-3]
 
 def setup_logging() -> bool:
     """Initialize modern rotating file logger with console output"""
@@ -129,7 +62,7 @@ def setup_logging() -> bool:
         
         # Create handlers with optimized configuration
         handlers = [
-            RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'),
+            RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding=LOG_ENCODING),
             logging.StreamHandler()
         ]
         
@@ -154,91 +87,14 @@ LOGGER = None
 
 setup_logging()
 
-# ===================== APPLICATION CONFIGURATION ===================== #
-# Purpose: Centralized configuration system using client_config.json
-
-# Initialize configuration early (before other constants)
-_CONFIG = None
-
-def get_app_config():
-    """Get application configuration, loading it if needed"""
-    global _CONFIG
-    if _CONFIG is None:
-        _CONFIG = load_config()
-    return _CONFIG
-
-# Application metadata from config
-__version__ = get_from_config("application.version", "2.2.4")
-APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
-GITHUB_OWNER, GITHUB_REPO = "cevdetaksac", "yesnext-cloud-honeypot-client"
-
-# Service configuration from config
-API_URL = get_from_config("api.base_url", "https://honeypot.yesnext.com.tr/api")
-# Network configuration - loaded from config
-HONEYPOT_IP = get_from_config("honeypot.server_ip", "194.5.236.181") 
-HONEYPOT_TUNNEL_PORT = get_from_config("honeypot.tunnel_port", 4443)
-CONTROL_HOST, CONTROL_PORT = "127.0.0.1", 58632  # Single instance control
-
-# Network settings
-SERVER_NAME = socket.gethostname()
-RECV_SIZE, CONNECT_TIMEOUT = 65536, 8
-
-# RDP secure port from config
-RDP_SECURE_PORT = get_from_config("tunnels.rdp_port", 53389)
-
-# GUI configuration from config
-def get_window_dimensions():
-    """Get window dimensions from config"""
-    config = get_app_config()
-    width = config.get("ui", {}).get("window_width", 900)
-    height = config.get("ui", {}).get("window_height", 700)
-    return width, height
-
-WINDOW_WIDTH, WINDOW_HEIGHT = get_window_dimensions()
-WINDOW_TITLE = APP_NAME
-
-# Windows integration
-APP_STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-TASK_NAME_BOOT, TASK_NAME_LOGON = "CloudHoneypotClientBoot", "CloudHoneypotClientLogon"
-
-# Default tunnel configurations from config
-def get_default_tunnels():
-    """Get default tunnel configuration from config"""
-    config = get_app_config()
-    default_ports = config.get("tunnels", {}).get("default_ports", [])
-    tunnels = {}
-    for port_config in default_ports:
-        service = port_config["service"]
-        local_port = port_config["local"]
-        tunnels[service] = {"listen_port": local_port}
-    return tunnels
-
-DEFAULT_TUNNELS = get_default_tunnels()
-
-# Port mapping for GUI display from config
-def get_port_table():
-    """Get port table from config"""
-    config = get_app_config()
-    default_ports = config.get("tunnels", {}).get("default_ports", [])
-    port_table = []
-    for port_config in default_ports:
-        local_port = str(port_config["local"])
-        remote_port = str(port_config["remote"]) if port_config["remote"] > 0 else "-"
-        service = port_config["service"]
-        port_table.append((local_port, remote_port, service))
-    return port_table
-
-PORT_TABLOSU = get_port_table()
-
-# Optional tray support from config
-TRY_TRAY = get_from_config("advanced.minimize_to_tray", True)  # Default True
-try:
-    import pystray
-    from pystray import MenuItem as TrayItem
-    from PIL import Image, ImageDraw
-    # TRY_TRAY already set from config
-except ImportError:
-    TRY_TRAY = False
+# Optional tray support - import after constants are loaded
+if TRY_TRAY:
+    try:
+        import pystray
+        from pystray import MenuItem as TrayItem
+        from PIL import Image, ImageDraw
+    except ImportError:
+        TRY_TRAY = False
 
 # Suppress PIL logging noise
 try:
@@ -259,21 +115,18 @@ def check_defender_compatibility():
                 file_hash = hashlib.sha256(f.read()).hexdigest()
             log(f"App hash: {file_hash[:16]}...")
         
-        # 2. Meşru uygulama işaretleri
-        app_markers = {
-            "company": "YesNext Technology",
-            "product": "Cloud Honeypot Client", 
-            "version": "2.1.0",
-            "purpose": "Network Security Monitor",
+        # 2. Meşru uygulama işaretleri - constants'tan al
+        app_markers = DEFENDER_MARKERS.copy()
+        app_markers.update({
+            "version": __version__,
             "legitimate": True,
             "signed": os.path.exists("certs/dev-codesign.pfx")
-        }
+        })
         
         # 3. Registry girdileri (güven için)
         try:
             import winreg
-            key_path = r"SOFTWARE\YesNext\CloudHoneypotClient"
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY_PATH) as key:
                 winreg.SetValueEx(key, "InstallTime", 0, winreg.REG_SZ, str(int(time.time())))
                 winreg.SetValueEx(key, "Purpose", 0, winreg.REG_SZ, "Network Security Monitoring")
                 winreg.SetValueEx(key, "Legitimate", 0, winreg.REG_DWORD, 1)
@@ -304,25 +157,15 @@ def create_defender_trust_signals():
             except Exception:
                 pass
                 
-        # 3. Network behavior legitimacy
-        legitimate_domains = [
-            "honeypot.yesnext.com.tr",
-            "api.yesnext.com.tr", 
-            "github.com",
-            "raw.githubusercontent.com"
-        ]
-        
-        # 4. Dosya operasyon sınırları (şüpheli davranış önleme)
-        restricted_paths = [
-            os.environ.get("SYSTEMROOT", "C:\\Windows"),
-            os.environ.get("PROGRAMFILES", "C:\\Program Files"),
-            os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
-        ]
+        # 3. Security metadata oluştur
+        metadata_path = os.path.join(APP_DIR, "security_metadata.json")
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(SECURITY_METADATA, f, indent=2)
         
         log("Defender trust signals created")
         return {
-            "legitimate_domains": legitimate_domains,
-            "restricted_paths": restricted_paths,
+            "legitimate_domains": LEGITIMATE_DOMAINS,
+            "restricted_paths": RESTRICTED_PATHS,
             "process_verified": True
         }
         
@@ -453,29 +296,21 @@ class CloudHoneypotClient:
             self._port_table_cache = get_port_table()
         return self._port_table_cache
 
+    def log(self, message: str):
+        """Log message using global logger with class context"""
+        log(f"[CLIENT] {message}")
+
     def get_token(self) -> Optional[str]:
-        # Kaydedilmiş token'ı yükler
-        # Önce eski plain text token'ı kontrol et ve migrate et
-        TokenStore.migrate_from_plain(TOKEN_FILE_OLD, TOKEN_FILE_NEW)
-        # DPAPI ile şifrelenmiş token'ı yükle
-        return TokenStore.load(TOKEN_FILE_NEW)
+        """Kaydedilmiş token'ı yükler"""
+        return self.token_manager.get_token()
 
     def api_request(self, method: str, endpoint: str, data: Dict = None,
                     params: Dict = None, timeout: int = 8, json: Dict = None) -> Optional[Dict]:
         """API request wrapper using modular API client"""
-        try:
-            token = self.state.get("token")
-            if token:
-                params = params or {}
-                params['token'] = token
-            
-            return self.api_client.api_request(
-                method=method, endpoint=endpoint,
-                data=json if json else data, params=params, timeout=timeout
-            )
-        except Exception as e:
-            log(f"[API] Wrapper hatası: {e}")
-            return None
+        token = self.state.get("token")
+        return api_request_with_token(
+            self.api_client, token, method, endpoint, data, params, timeout, json
+        )
 
     def __init__(self):
         install_excepthook()
@@ -511,6 +346,10 @@ class CloudHoneypotClient:
         # Initialize core components
         self.api_client = HoneypotAPIClient(API_URL, log)
         
+        # Initialize token manager
+        token_file_new, token_file_old = get_token_file_paths(APP_DIR)
+        self.token_manager = create_token_manager(str(API_URL), SERVER_NAME, token_file_new, token_file_old)
+        
         # Set global logger for helper functions
         if LOGGER:
             client_helpers.set_logger(LOGGER)
@@ -527,7 +366,7 @@ class CloudHoneypotClient:
         
         # Load token early - before any API operations
         try:
-            token = self.load_token()
+            token = self.token_manager.load_token(self.root if hasattr(self, 'root') else None, self.t)
             self.state["token"] = token
             if token:
                 log(f"Token başarıyla yüklendi: {token[:8]}...")
@@ -573,13 +412,19 @@ class CloudHoneypotClient:
         # Önce RDP kontrolünü yap
         check_initial_rdp_state()
 
-        # Sonra API senkronizasyonunu 5 dakika geciktirerek başlat
+        # Sonra API senkronizasyonunu geciktirerek başlat
         def delayed_api_start():
-            log("API senkronizasyonu 5 dakika bekletiliyor (manuel işlemler için)...")
-            time.sleep(300)  # 5 dakika bekle
+            log(f"API senkronizasyonu {API_STARTUP_DELAY} saniye bekletiliyor (manuel işlemler için)...")
+            time.sleep(API_STARTUP_DELAY)
             log("API senkronizasyonu başlatılıyor...")
             # API retry thread'ini başlat
             threading.Thread(target=self.api_retry_loop, daemon=True).start()
+            
+            # Dashboard tunnel sync başlat
+            if not any(t.name == "tunnel_sync_loop" and t.is_alive() for t in threading.enumerate()):
+                from client_networking import TunnelManager
+                threading.Thread(target=TunnelManager.tunnel_sync_loop, args=(self,), name="tunnel_sync_loop", daemon=True).start()
+                log("Dashboard tunnel sync loop başlatıldı (8s interval, 3s check)")
 
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
@@ -787,44 +632,7 @@ class CloudHoneypotClient:
             log(f"setup_persistent_elevation error: {e}")
             return False
 
-    # ---------- Token Management ---------- #
-    def register_client(self) -> Optional[str]:
-        """Register client with API and get token"""
-        for attempt in range(3):
-            try:
-                ip = ClientHelpers.get_public_ip()
-                resp = requests.post(f"{API_URL}/register",
-                                   json={"server_name": f"{SERVER_NAME} ({ip})", "ip": ip},
-                                   timeout=8)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    tok = data.get("token")
-                    if tok:
-                        TokenStore.save(tok, TOKEN_FILE_NEW)
-                        return tok
-                
-                msg = f"API kaydı başarısız (HTTP {resp.status_code}). Tekrar deneniyor..."
-                if self.root:
-                    messagebox.showwarning("Uyarı", msg)
-                log(msg)
-                
-            except Exception as e:
-                msg = f"API kaydı başarısız: {e}. Tekrar deneniyor..."
-                if self.root:
-                    messagebox.showwarning("Uyarı", msg)
-                log(msg)
-            
-            time.sleep(5)
-        
-        if self.root:
-            messagebox.showwarning(self.t("warn"), self.t("api_registration_warning"))
-        return None
-
-    def load_token(self) -> Optional[str]:
-        """Load token from storage or register new client"""
-        TokenStore.migrate_from_plain(TOKEN_FILE_OLD, TOKEN_FILE_NEW)
-        return TokenStore.load(TOKEN_FILE_NEW) or self.register_client()
+    # ---------- Token Management (moved to client_tokens.py) ---------- #
 
     # ---------- API Connection ---------- #
     def try_api_connection(self, show_error: bool = True) -> bool:
@@ -853,7 +661,7 @@ class CloudHoneypotClient:
                 else:
                     # After max_quick_retries, slow down to avoid overwhelming the network/server
                     logging.warning(f"API connection still failing after {retry_count} attempts, will retry in 60 seconds...")
-                    time.sleep(60)
+                    time.sleep(API_SLOW_RETRY_DELAY)
                 continue
                 
             # Reset retry count on successful connection
@@ -861,44 +669,41 @@ class CloudHoneypotClient:
                 logging.info(f"API connection restored after {retry_count} retries")
                 retry_count = 0
                 
-            time.sleep(60)  # Check connection every minute when healthy
+            time.sleep(API_RETRY_INTERVAL)  # Check connection every minute when healthy
 
 # ---------- IP & Heartbeat Management ---------- #
     def update_client_ip(self, new_ip: str):
         """Update client IP address via API"""
-        try:
-            token = self.state.get("token")
-            if not token: 
-                return
-            
-            r = requests.post(f"{API_URL}/update-ip", 
-                            json={"token": token, "ip": new_ip}, timeout=6)
-            
-            if r.status_code == 200:
-                log(f"update-ip OK: {new_ip}")
-            else:
-                log(f"update-ip HTTP {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            log(f"update-ip error: {e}")
+        token = self.state.get("token")
+        if token:
+            update_client_ip_api(str(API_URL), token, new_ip, log)
+
+    def get_intelligent_status(self) -> str:
+        """Determine intelligent status based on program and tunnel state"""
+        # Program açık olduğu kesin (çünkü bu kod çalışıyor)
+        active_servers = self.state.get("servers", {})
+        
+        # En az bir tunnel aktifse → online
+        if active_servers:
+            return "online"
+        
+        # Program açık ama tunnel yok → idle
+        return "idle"
 
     def send_heartbeat_once(self, status_override: Optional[str] = None):
-        """Send single heartbeat to API"""
-        try:
-            token = self.state.get("token")
-            if not token:
-                return
-            
+        """Send single heartbeat to API with intelligent status detection"""
+        token = self.state.get("token")
+        if token:
             ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
-            status = status_override if status_override in ("online", "offline") else \
-                    ("online" if self.state.get("running") else "offline")
             
-            payload = {
-                "token": token, "ip": ip, "hostname": SERVER_NAME,
-                "running": self.state.get("running", False), "status": status
-            }
-            requests.post(f"{API_URL}/heartbeat", json=payload, timeout=6)
-        except Exception as e:
-            log(f"heartbeat send err: {e}")
+            # Status override yoksa akıllı status belirle
+            if status_override is None:
+                status_override = self.get_intelligent_status()
+            
+            send_heartbeat_api(
+                str(API_URL), token, ip, SERVER_NAME, 
+                self.state.get("running", False), status_override, log
+            )
 
     def heartbeat_loop(self):
         last_ip = None
@@ -917,10 +722,12 @@ class CloudHoneypotClient:
                             self.root.after(0, lambda: ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})"))
                         except:
                             ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({ip})")
+                    
+                    # Akıllı heartbeat gönder (online/idle/offline)
                     self.send_heartbeat_once()
             except Exception as e:
                 log(f"heartbeat error: {e}")
-            time.sleep(60)
+            time.sleep(HEARTBEAT_INTERVAL)
 
     # ---------- Attack Count ---------- #
     def fetch_attack_count_sync(self, token):
@@ -952,12 +759,17 @@ class CloudHoneypotClient:
                 try:
                     def update_entry():
                         ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-                        log(f"[GUI] Entry güncellendi: {self.attack_entry.get()}")
+                        # Sadece verbose modda detaylı log
+                        if VERBOSE_LOGGING:
+                            log(f"[GUI] Entry güncellendi: {self.attack_entry.get()}")
                     
                     # Check if main loop is running
                     try:
                         self.root.after(0, update_entry)
-                        log(f"[GUI] Saldırı sayacı güncelleme zamanlandı: {cnt}")
+                        # Sadece önemli durumlarda logla
+                        if not hasattr(self, '_last_attack_count') or self._last_attack_count != cnt:
+                            log(f"[GUI] Saldırı sayacı güncellendi: {cnt}")
+                            self._last_attack_count = cnt
                     except RuntimeError as e:
                         if "main thread is not in main loop" in str(e):
                             # Main loop not started yet, update directly
@@ -973,14 +785,16 @@ class CloudHoneypotClient:
                 
         if async_thread:
             threading.Thread(target=worker, daemon=True, name="AttackCountUpdater").start()
-            log("[GUI] Asenkron saldırı sayacı güncelleme başlatıldı")
+            # Bu log sadece verbose modunda gösterilecek
+            if VERBOSE_LOGGING:
+                log("[GUI] Asenkron saldırı sayacı güncelleme başlatıldı")
         else:
             worker()
 
     def poll_attack_count(self):
         self.refresh_attack_count(async_thread=True)
         try:
-            self.root.after(10_000, self.poll_attack_count)
+            self.root.after(ATTACK_COUNT_REFRESH * 1000, self.poll_attack_count)
         except:
             pass
 
@@ -1289,8 +1103,7 @@ class CloudHoneypotClient:
         prog_label = tk.Label(status_frame, text=self.t("processing"), font=("Arial", 10))
         prog_label.pack()
 
-        # RDP geçiş süresi 120 saniye
-        RDP_TRANSITION_TIMEOUT = 120
+        # RDP geçiş süresi constants'tan al
         countdown_label = tk.Label(status_frame, text=str(RDP_TRANSITION_TIMEOUT), font=("Arial", 20, "bold"), fg="red")
         countdown_label.pack()
 
@@ -1478,6 +1291,9 @@ class CloudHoneypotClient:
         self.state["running"] = True
         self.update_tray_icon()
         self.send_heartbeat_once("online")
+        
+        # GUI buton durumunu güncelle
+        self.sync_gui_with_tunnel_state()
         return True
 
     def remove_tunnels(self):
@@ -1491,6 +1307,38 @@ class CloudHoneypotClient:
             self.write_status(self.state.get("selected_rows", []), running=False)
         except: pass
         self.send_heartbeat_once("offline")
+        
+        # GUI buton durumunu güncelle
+        self.sync_gui_with_tunnel_state()
+
+    def sync_gui_with_tunnel_state(self):
+        """GUI buton durumunu gerçek tunnel durumu ile senkronize et"""
+        try:
+            active_tunnels = len(self.state.get("servers", {}))
+            
+            if active_tunnels > 0:
+                # Aktif tunnel var - Durdur butonu göster
+                if hasattr(self, 'btn_primary') and self.btn_primary:
+                    ClientHelpers.set_primary_button(
+                        self.btn_primary, 
+                        self.t('btn_stop'), 
+                        self.remove_tunnels, 
+                        "#E53935"
+                    )
+                log(f"[GUI_SYNC] {active_tunnels} aktif tunnel var - Durdur butonu aktif")
+            else:
+                # Hiç tunnel yok - Başlat butonu göster  
+                if hasattr(self, 'btn_primary') and self.btn_primary:
+                    ClientHelpers.set_primary_button(
+                        self.btn_primary, 
+                        self.t('btn_row_start'), 
+                        self.apply_tunnels, 
+                        "#4CAF50"
+                    )
+                log("[GUI_SYNC] Hiç tunnel yok - Başlat butonu aktif")
+                
+        except Exception as e:
+            log(f"[GUI_SYNC] Senkronizasyon hatası: {e}")
 
     # ---------- Tünel Durum Yönetimi ---------- #
     def get_tunnel_state(self) -> Dict[str, Any]:
@@ -1826,6 +1674,9 @@ class CloudHoneypotClient:
             self._update_row_ui(listen_port, service, True)
             self.state["remote_desired"][service_upper] = "started"
             
+            # GUI buton durumunu güncelle
+            self.sync_gui_with_tunnel_state()
+            
             # Report to API and wait for confirmation
             def notify_and_resume():
                 try:
@@ -1887,6 +1738,10 @@ class CloudHoneypotClient:
                 self.update_tray_icon()
                 self._update_row_ui('3389', service, False)
                 self.state["remote_desired"][service_upper] = "stopped"
+                
+                # GUI buton durumunu güncelle
+                self.sync_gui_with_tunnel_state()
+                
                 threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'stop', p2), daemon=True).start()
 
                 def _resume():
@@ -1912,6 +1767,9 @@ class CloudHoneypotClient:
         self.update_tray_icon()
         self._update_row_ui(listen_port, service, False)
         self.state["remote_desired"][service_upper] = "stopped"
+        
+        # GUI buton durumunu güncelle
+        self.sync_gui_with_tunnel_state()
         
         # Report to API and wait for confirmation
         def notify_and_resume():
@@ -1984,35 +1842,20 @@ class CloudHoneypotClient:
 
     def report_tunnel_action_to_api(self, service: str, action: str,
                                     new_port: Optional[Union[str, int]] = None) -> bool:
-        try:
-            token = self.state.get("token")
-            if not token:
-                log("Token yok; eylem bildirilemedi")
-                return False
-
-            payload = {
-                "token": token,
-                "service": str(service or "").upper(),
-                "action": action if action in ("start", "stop") else "stop",
-            }
-            if new_port and str(new_port) != '-':
-                payload["new_port"] = int(str(new_port))
-
-            resp = self.api_request("POST", "premium/tunnel-set", json=payload)
-            if isinstance(resp, dict) and resp.get("status") in ("queued", "ok", "success"):
-                # yerel önbellek güncelle
-                self.active_tunnels = getattr(self, "active_tunnels", {})
-                self.active_tunnels.setdefault(payload["service"], {})\
-                    .update({"running": payload["action"] == "start",
-                            "new_port": payload.get("new_port")})
-                log(f"Tünel eylemi bildirildi: {payload}")
-                return True
-
-            log(f"Tünel eylemi bildirimi başarısız: {resp}")
+        """Report tunnel action to API using modular API function"""
+        token = self.state.get("token")
+        if not token:
             return False
-        except Exception as e:
-            log(f"Tünel eylemi raporlanırken hata: {e}")
-            return False
+        
+        result = report_tunnel_action_api(self.api_request, token, service, action, new_port, log)
+        
+        # Update local cache on success
+        if result:
+            self.active_tunnels = getattr(self, "active_tunnels", {})
+            self.active_tunnels.setdefault(str(service or "").upper(), {})\
+                .update({"running": action == "start", "new_port": new_port})
+        
+        return result
 
     # --- helper: registry'yi restart etmeden yazmak için ---
     def _set_rdp_port_registry(self, new_port: int) -> bool:
@@ -2049,7 +1892,7 @@ class CloudHoneypotClient:
 
             target = RDP_SECURE_PORT if transition_mode == "secure" else 3389
             source = 3389  if transition_mode == "secure" else RDP_SECURE_PORT
-            deadline = time.time() + 120  # 120 saniye timeout
+            deadline = time.time() + RDP_TRANSITION_TIMEOUT
 
             # Zaten hedefte ve dinliyorsa kontrol et
             cur = ServiceController.get_rdp_port()
@@ -2234,17 +2077,10 @@ class CloudHoneypotClient:
         return out
 
     def report_open_ports_once(self):
-        try:
-            token = self.state.get("token")
-            if not token:
-                return
+        token = self.state.get("token")
+        if token:
             ports = self._collect_open_ports_windows() if os.name == 'nt' else []
-            payload = {"token": token, "ports": ports}
-            r = requests.post(f"{API_URL}/agent/open-ports", json=payload, timeout=8)
-            if r.status_code != 200:
-                log(f"open-ports HTTP {r.status_code}: {r.text[:120]}")
-        except Exception as e:
-            log(f"report_open_ports_once err: {e}")
+            report_open_ports_api(str(API_URL), token, ports, log)
 
     def report_open_ports_loop(self):
         while True:
@@ -2323,9 +2159,10 @@ class CloudHoneypotClient:
                                 ServiceController.switch_rdp_port(RDP_SECURE_PORT)
                             newp = entry.get('new_port') or (RDP_SECURE_PORT if svc_u=='RDP' else '-')
                             self.start_single_row(str(lp), str(newp), self._normalize_service(svc_u))
-                            # Update UI state and tray icon
-                            if str(lp) not in self.state["selected_rows"]:
-                                self.state["selected_rows"].append(str(lp))
+                            # Update UI state and tray icon - tuple formatında ekle
+                            port_tuple = (str(lp), str(newp), svc_u)
+                            if port_tuple not in self.state["selected_rows"]:
+                                self.state["selected_rows"].append(port_tuple)
                             self._update_row_ui(str(lp), svc_u, True)
                             self.update_tray_icon()
                         except Exception as e:
@@ -2336,9 +2173,14 @@ class CloudHoneypotClient:
                             self.stop_single_row(str(lp), str(entry.get('new_port') or '-'), self._normalize_service(svc_u))
                             if svc_u == 'RDP' and ServiceController.get_rdp_port() != 3389:
                                 ServiceController.switch_rdp_port(3389)
-                            # Update UI state and tray icon
-                            if str(lp) in self.state["selected_rows"]:
-                                self.state["selected_rows"].remove(str(lp))
+                            # Update UI state and tray icon - tuple formatında kaldır
+                            newp = str(entry.get('new_port') or '-')
+                            port_tuple = (str(lp), newp, svc_u)
+                            # Tuple'ı kaldırmak için listeyi filtrele
+                            self.state["selected_rows"] = [
+                                row for row in self.state["selected_rows"] 
+                                if not (isinstance(row, (list, tuple)) and len(row) >= 3 and row[0] == str(lp) and row[2].upper() == svc_u.upper())
+                            ]
                             self._update_row_ui(str(lp), svc_u, False)
                             self.update_tray_icon()
                         except Exception as e:
@@ -2351,7 +2193,7 @@ class CloudHoneypotClient:
                     pass
             except Exception as e:
                 log(f"reconcile_remote_tunnels err: {e}")
-            time.sleep(300)
+            time.sleep(RECONCILE_LOOP_INTERVAL)  # Yeni tunnel_sync_loop kullandığımız için seyrek çalışsın
 
     # ---------- Tray ---------- #
     def tray_make_image(self, active):
@@ -2457,6 +2299,13 @@ class CloudHoneypotClient:
             if self.state["running"]:
                 messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first"))
                 return
+            
+            # Son offline heartbeat gönder
+            try:
+                self.send_heartbeat_once("offline")
+                log("[EXIT] Offline heartbeat sent before exit")
+            except Exception as e:
+                log(f"[EXIT] Heartbeat error during exit: {e}")
                 
             # Watchdog'u durdur
             try:
@@ -2546,7 +2395,7 @@ class CloudHoneypotClient:
 
     # ---------- Daemon ---------- #
     def run_daemon(self):
-        self.state["token"] = self.load_token()
+        self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=TunnelManager.tunnel_watchdog_loop, args=(self,), daemon=True).start()
@@ -3012,7 +2861,7 @@ class CloudHoneypotClient:
                 log(f"copy_entry error: {e}")
 
         # Token'ı yükle
-        token = self.load_token()
+        token = self.token_manager.load_token(self.root, self.t)
         self.state["token"] = token
         self.state["public_ip"] = ClientHelpers.get_public_ip()
         

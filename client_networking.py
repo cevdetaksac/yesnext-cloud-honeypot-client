@@ -6,7 +6,6 @@ Tünel sunucusu ve network bağlantı yönetimi
 """
 
 import os
-import sys
 import ssl
 import json
 import time
@@ -14,21 +13,8 @@ import socket
 import threading
 import requests
 
-# Constants'ı import et
-try:
-    from client_constants import DEFAULT_TUNNELS, DASHBOARD_SYNC_INTERVAL, DASHBOARD_SYNC_CHECK, WATCHDOG_INTERVAL
-except ImportError:
-    # Fallback - constants import edemezse
-    DEFAULT_TUNNELS = {
-        "RDP": {"listen_port": 3389},
-        "MSSQL": {"listen_port": 1433},  
-        "MYSQL": {"listen_port": 3306},
-        "FTP": {"listen_port": 21},
-        "SSH": {"listen_port": 22}
-    }
-    DASHBOARD_SYNC_INTERVAL = 8
-    DASHBOARD_SYNC_CHECK = 3
-    WATCHDOG_INTERVAL = 10
+# Import constants directly
+from client_constants import DEFAULT_TUNNELS, DASHBOARD_SYNC_INTERVAL, DASHBOARD_SYNC_CHECK, WATCHDOG_INTERVAL
 from typing import Dict, Any, Optional
 from client_helpers import ClientHelpers, log
 

@@ -1,5 +1,0 @@
-2025-09-25 21:14:05,553 [INFO] Found client Python script: C:\honeypot-cloud\cloud-client\client.py
-2025-09-25 21:14:05,553 [INFO] Running in DEBUG mode (Ctrl+C to stop)
-2025-09-25 21:14:05,575 [INFO] Found running client: PID 11796
-2025-09-25 21:14:05,575 [INFO] Found existing client process: PID 11796
-2025-09-25 21:14:16,512 [INFO] Debug mode stopped by user

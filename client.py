@@ -1,48 +1,362 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Cloud Honeypot Client - Ana Uygulama
-Modern, modüler honeypot istemci uygulaması
+🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER ARCHITECTURE
+=====================================================
+
+📋 MODERN ARCHITECTURE OVERVIEW:
+┌─────────────────────────────────────────────────────────────────┐
+│                    TASK SCHEDULER BASED SYSTEM                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  🟢 BACKGROUND TASK (Boot Trigger)                             │
+│  ├─ Trigger: At system startup                                 │
+│  ├─ Mode: --mode=daemon (no GUI, background only)             │
+│  ├─ Context: SYSTEM (server environments)                      │
+│  └─ Auto-restart: 10s delay, 5 attempts                       │
+│                                                                 │
+│  🟡 TRAY TASK (Logon Trigger)                                  │
+│  ├─ Trigger: At user logon                                     │
+│  ├─ Mode: --mode=tray (GUI + system tray)                     │
+│  ├─ Context: User session (interactive)                        │
+│  └─ Auto-restart: 10s delay, 3 attempts                       │
+│                                                                 │
+│  🔒 SINGLETON PROTECTION                                        │
+│  ├─ Global Mutex: "Global\\CloudHoneypotClient_Singleton"      │
+│  ├─ Prevents conflicts between daemon/tray modes               │
+│  └─ Graceful shutdown of existing instances                    │
+│                                                                 │
+│  💓 HEARTBEAT MONITORING                                        │
+│  ├─ File: heartbeat.json (10s intervals)                      │
+│  ├─ Contains: PID, timestamps, status, mode                   │
+│  └─ Used for health checks and external monitoring            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ KEY BENEFITS vs Windows Service:                                │
+│ ✅ No SYSTEM context GUI issues                                │
+│ ✅ Built-in Windows restart reliability                        │
+│ ✅ Separate user/system execution contexts                     │
+│ ✅ Easier debugging and troubleshooting                        │
+│ ✅ Better Windows Update compatibility                          │
+│ ✅ User-friendly task scheduler management                      │
+└─────────────────────────────────────────────────────────────────┘
+
+🚀 EXECUTION MODES:
+┌─────────────────┬─────────────────────────────────────────────┐
+│ Mode            │ Description                                 │
+├─────────────────┼─────────────────────────────────────────────┤
+│ --mode=daemon   │ Background mode (no GUI)                   │
+│                 │ - Server/headless environments             │
+│                 │ - Logs to %PROGRAMDATA%                    │
+│                 │ - System context compatible                │
+├─────────────────┼─────────────────────────────────────────────┤
+│ --mode=tray     │ Interactive mode (GUI + tray)              │
+│                 │ - Desktop environments                     │
+│                 │ - User context with tray icon              │
+│                 │ - GUI dialogs and notifications            │
+├─────────────────┼─────────────────────────────────────────────┤
+│ --healthcheck   │ Health monitoring utility                  │
+│                 │ - Returns exit codes for monitoring       │
+│                 │ - Used by external tools                  │
+└─────────────────┴─────────────────────────────────────────────┘
+
+📦 EXIT CODES:
+┌──────────┬─────────────────────────────────────────────────────┐
+│ Code     │ Meaning                                             │
+├──────────┼─────────────────────────────────────────────────────┤
+│ 0        │ Normal exit                                         │
+│ 1        │ Unhandled exception / critical error               │
+│ 2        │ Mutex taken (another instance running)             │
+│ 3        │ Health check failed                                │
+└──────────┴─────────────────────────────────────────────────────┘
+
+🔧 INSTALLATION:
+1. Run installer → Automatically sets up Task Scheduler rules
+2. Background task starts at boot → Daemon mode
+3. Tray task starts at logon → GUI mode  
+4. Both respect singleton mutex → No conflicts
+
+📝 LEGACY NOTES:
+- Windows Service architecture removed (caused SYSTEM context issues)
+- All new deployments use Task Scheduler exclusively
+- Legacy service files completely removed from codebase
 """
 
 # Standard library imports
-import os, sys, socket, ssl, threading, time, json, subprocess, ctypes, tempfile, winreg, argparse
+import os, sys, socket, threading, time, json, subprocess, ctypes, argparse, tempfile, hashlib, winreg
 import tkinter as tk
 from tkinter import ttk, messagebox
 from logging.handlers import RotatingFileHandler
-from ctypes import wintypes
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Dict, Any, Union
 import datetime as dt
-import requests, webbrowser, logging, struct, hashlib
+import requests, logging, webbrowser
+import win32api, win32event, winerror, psutil
 
-# Local module imports - Modularized honeypot client components
+# Local module imports  
 from client_firewall import FirewallAgent
-from client_helpers import log, run_cmd, ClientHelpers
+from client_helpers import log, ClientHelpers, run_cmd
 import client_helpers
 from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
-from client_api import HoneypotAPIClient, test_api_connection, AsyncAttackCounter, api_request_with_token, update_client_ip_api, send_heartbeat_api, report_tunnel_action_api, register_client_api, report_open_ports_api
+from client_api import HoneypotAPIClient, api_request_with_token, register_client_api, update_client_ip_api, send_heartbeat_api, report_open_ports_api
 from client_tokens import create_token_manager, get_token_file_paths
-from client_gui import LoadingScreen, LanguageDialog, AdminPrivilegeDialog, ConsentDialog
-from client_gui import show_startup_notice, show_error_message, show_info_message, show_warning_message
-from client_services import WindowsServiceManager, RDPManager, FirewallManager, TaskSchedulerManager
-from client_utils import (ConfigManager, LanguageManager, LoggerManager, SecurityUtils, 
-                         SystemUtils, ServiceController, load_i18n,
-                         firewall_allow_exists_tcp_port, ensure_firewall_allow_for_port,
-                         is_process_running_windows, write_watchdog_token, read_watchdog_token,
-                         start_watchdog_if_needed, is_admin, set_autostart, watchdog_main,
-                         install_excepthook, load_config, save_config, get_config_value, 
-                         set_config_value, update_language_config, get_port_table, get_from_config,
-                         get_rdp_secure_port)
+from client_task_scheduler import install_tasks, uninstall_tasks, check_tasks_status
+from client_utils import (ServiceController, load_i18n, is_admin, install_excepthook, 
+                         load_config, save_config, get_config_value, set_config_value,
+                         get_from_config, start_watchdog_if_needed, get_port_table,
+                         update_language_config, watchdog_main, write_watchdog_token)
 
-# Import all constants from central configuration
-from client_constants import *
+# Import constants from central configuration
+from client_constants import (
+    GUI_MODE, DAEMON_MODE, TRAY_MODE, 
+    HEARTBEAT_FILE, HEARTBEAT_INTERVAL,
+    SINGLETON_MUTEX_NAME, API_URL, APP_DIR,
+    LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_ENCODING,
+    LOG_TIME_FORMAT, TRY_TRAY, DEFENDER_MARKERS, 
+    SECURITY_METADATA, LEGITIMATE_DOMAINS, RESTRICTED_PATHS,
+    REGISTRY_KEY_PATH, RDP_SECURE_PORT, HONEYPOT_IP, 
+    HONEYPOT_TUNNEL_PORT, SERVER_NAME, DEFAULT_TUNNELS,
+    API_STARTUP_DELAY, API_RETRY_INTERVAL, API_SLOW_RETRY_DELAY,
+    HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH, RDP_TRANSITION_TIMEOUT,
+    RECONCILE_LOOP_INTERVAL,
+    TASK_NAME_BOOT, TASK_NAME_LOGON, CONSENT_FILE, STATUS_FILE,
+    WATCHDOG_TOKEN_FILE, __version__, GITHUB_OWNER, GITHUB_REPO,
+    WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT
+)
 
-# Monitor service integration (optional)
-try:
-    from service_monitor_utils import notify_monitor_startup, check_monitor_health
-    MONITOR_AVAILABLE = True
-except ImportError:
-    MONITOR_AVAILABLE = False
+# ===================== SINGLETON & HEARTBEAT SYSTEM ===================== #
+
+def create_heartbeat_file(app_dir: str) -> str:
+    """Create initial heartbeat file and return path"""
+    heartbeat_path = os.path.join(app_dir, HEARTBEAT_FILE)
+    try:
+        heartbeat_data = {
+            "application": "Cloud Honeypot Client",
+            "version": __version__ if '__version__' in globals() else "1.0.0",
+            "pid": os.getpid(),
+            "executable": sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0]),
+            "working_directory": os.getcwd(),
+            "started_at": dt.datetime.now().isoformat(),
+            "last_heartbeat": dt.datetime.now().isoformat(),
+            "status": "initializing",
+            "admin_privileges": ctypes.windll.shell32.IsUserAnAdmin() if os.name == 'nt' else False,
+            "active_tunnels": 0,
+            "api_connected": False
+        }
+        
+        with open(heartbeat_path, 'w', encoding='utf-8') as f:
+            json.dump(heartbeat_data, f, indent=2, ensure_ascii=False)
+        
+        log(f"Heartbeat sistemi başlatıldı: {heartbeat_path}")
+        return heartbeat_path
+    except Exception as e:
+        log(f"Heartbeat dosyası oluşturulamadı: {e}")
+        return ""
+
+def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
+    """Update heartbeat file with current timestamp and status"""
+    if not heartbeat_path or not os.path.exists(heartbeat_path):
+        return False
+    
+    try:
+        # Read existing data
+        with open(heartbeat_path, 'r', encoding='utf-8') as f:
+            heartbeat_data = json.load(f)
+        
+        # Update timestamp and status
+        heartbeat_data["last_heartbeat"] = dt.datetime.now().isoformat()
+        
+        # Update status information if app instance is available
+        if app_instance:
+            heartbeat_data["status"] = "running"
+            heartbeat_data["active_tunnels"] = len(app_instance.state.get("servers", {}))
+            heartbeat_data["api_connected"] = bool(app_instance.state.get("token"))
+        else:
+            heartbeat_data["status"] = "running"
+        
+        # Write updated data
+        with open(heartbeat_path, 'w', encoding='utf-8') as f:
+            json.dump(heartbeat_data, f, indent=2, ensure_ascii=False)
+        
+        return True
+    except Exception as e:
+        log(f"Heartbeat güncelleme hatası: {e}")
+        return False
+
+def heartbeat_worker(heartbeat_path: str, app_instance=None):
+    """Background worker for heartbeat updates"""
+    log(f"Heartbeat worker başlatıldı (her {HEARTBEAT_INTERVAL} saniye)")
+    
+    while True:
+        try:
+            if update_heartbeat_file(heartbeat_path, app_instance):
+                pass  # Successful update, no logging needed to avoid spam
+            else:
+                log("Heartbeat güncellenemedi")
+            
+            time.sleep(HEARTBEAT_INTERVAL)
+        except Exception as e:
+            log(f"Heartbeat worker hatası: {e}")
+            time.sleep(HEARTBEAT_INTERVAL)
+
+def cleanup_heartbeat_file(heartbeat_path: str):
+    """Clean up heartbeat file on application exit"""
+    try:
+        if heartbeat_path and os.path.exists(heartbeat_path):
+            # Update final status
+            with open(heartbeat_path, 'r', encoding='utf-8') as f:
+                heartbeat_data = json.load(f)
+            
+            heartbeat_data["status"] = "stopped"
+            heartbeat_data["stopped_at"] = dt.datetime.now().isoformat()
+            
+            with open(heartbeat_path, 'w', encoding='utf-8') as f:
+                json.dump(heartbeat_data, f, indent=2, ensure_ascii=False)
+            
+            log("Heartbeat sistemi durduruldu")
+    except Exception as e:
+        log(f"Heartbeat temizlik hatası: {e}")
+
+# ===================== SINGLETON SYSTEM ===================== #
+def check_singleton(mode: str) -> bool:
+    """Check if another instance is running and handle accordingly"""
+    import win32event
+    import win32api
+    import winerror
+    
+    try:
+        # Try to create mutex
+        mutex = win32event.CreateMutex(None, True, SINGLETON_MUTEX_NAME)
+        last_error = win32api.GetLastError()
+        
+        if last_error == winerror.ERROR_ALREADY_EXISTS:
+            log(f"Another instance detected - attempting graceful shutdown")
+            
+            # Try to find and gracefully shutdown existing process
+            if shutdown_existing_instance():
+                log("Existing instance shutdown successfully - waiting before starting new instance")
+                time.sleep(3)
+                
+                # Try mutex again after shutdown
+                mutex = win32event.CreateMutex(None, True, SINGLETON_MUTEX_NAME)
+                last_error = win32api.GetLastError()
+                
+                if last_error == winerror.ERROR_ALREADY_EXISTS:
+                    log("ERROR: Could not acquire singleton mutex after shutdown attempt")
+                    return False
+            else:
+                log("ERROR: Failed to shutdown existing instance")
+                return False
+        
+        log(f"Singleton mutex acquired for mode: {mode}")
+        return True
+        
+    except Exception as e:
+        log(f"ERROR: Singleton check failed: {e}")
+        return False
+
+def shutdown_existing_instance() -> bool:
+    """Find and gracefully shutdown existing honeypot-client.exe processes"""
+    import psutil
+    
+    try:
+        current_pid = os.getpid()
+        processes_found = []
+        
+        # Find all honeypot-client.exe processes except current
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if (proc.info['name'].lower() in ['honeypot-client.exe', 'client.exe'] and
+                proc.info['pid'] != current_pid):
+                processes_found.append(proc)
+        
+        if not processes_found:
+            log("No existing instances found")
+            return True
+        
+        log(f"Found {len(processes_found)} existing processes to shutdown")
+        
+        # Try graceful shutdown first
+        for proc in processes_found:
+            try:
+                log(f"Gracefully terminating PID {proc.info['pid']}")
+                proc.terminate()
+                proc.wait(timeout=5)
+                log(f"Successfully terminated PID {proc.info['pid']}")
+            except psutil.TimeoutExpired:
+                try:
+                    log(f"Force killing PID {proc.info['pid']}")
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except:
+                    log(f"Failed to kill PID {proc.info['pid']}")
+            except psutil.NoSuchProcess:
+                log(f"Process PID {proc.info['pid']} already terminated")
+            except Exception as e:
+                log(f"Error shutting down PID {proc.info['pid']}: {e}")
+        
+        time.sleep(1)
+        return True
+        
+    except Exception as e:
+        log(f"Error during existing instance shutdown: {e}")
+        return False
+
+def get_operation_mode(args) -> str:
+    """Determine operation mode from arguments - SIMPLIFIED"""
+    if getattr(args, 'mode', None) == "daemon" or getattr(args, 'daemon', False):
+        return DAEMON_MODE
+    else:
+        # Both default and tray mode use GUI_MODE
+        # The difference is handled in the tray_mode flag
+        return GUI_MODE
+
+# ===================== SINGLETON SYSTEM END ===================== #
+
+def perform_health_check():
+    """Perform health check and return status"""
+    try:
+        log("=== HEALTH CHECK STARTED ===")
+        
+        # Check if process is running
+        pid = os.getpid()
+        log(f"Current PID: {pid}")
+        
+        # Check heartbeat file if exists
+        app_dir = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0]))
+        heartbeat_path = os.path.join(app_dir, HEARTBEAT_FILE)
+        
+        if os.path.exists(heartbeat_path):
+            try:
+                with open(heartbeat_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                last_heartbeat_str = data.get('last_heartbeat')
+                if last_heartbeat_str:
+                    last_heartbeat = dt.datetime.fromisoformat(last_heartbeat_str)
+                    now = dt.datetime.now()
+                    time_diff = (now - last_heartbeat).total_seconds()
+                    
+                    log(f"Heartbeat age: {time_diff:.1f} seconds")
+                    
+                    if time_diff > 60:  # More than 1 minute old
+                        log("WARNING: Heartbeat is stale")
+                        sys.exit(3)  # Exit code 3 = Health fail
+                else:
+                    log("WARNING: No heartbeat timestamp found")
+                    sys.exit(3)
+                    
+            except Exception as e:
+                log(f"WARNING: Could not read heartbeat file: {e}")
+                sys.exit(3)
+        else:
+            log("INFO: No heartbeat file found (normal for fresh start)")
+        
+        log("=== HEALTH CHECK PASSED ===")
+        
+    except Exception as e:
+        log(f"HEALTH CHECK ERROR: {e}")
+        sys.exit(3)
+
+# Legacy monitor service removed - Task Scheduler handles automation
 
 # ===================== LOGGING SETUP ===================== #
 # Purpose: Modern, efficient logging system with millisecond precision
@@ -86,7 +400,7 @@ def setup_logging() -> bool:
         return True
         
     except Exception as e:
-        print(f"Logging sistemi başlatılamadı: {e}")
+        # Logging başlatma hatası - sessizce devam et
         return False
 
 # Initialize global logger
@@ -132,7 +446,6 @@ def check_defender_compatibility():
         
         # 3. Registry girdileri (güven için)
         try:
-            import winreg
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY_PATH) as key:
                 winreg.SetValueEx(key, "InstallTime", 0, winreg.REG_SZ, str(int(time.time())))
                 winreg.SetValueEx(key, "Purpose", 0, winreg.REG_SZ, "Network Security Monitoring")
@@ -179,113 +492,6 @@ def create_defender_trust_signals():
     except Exception as e:
         log(f"Failed to create trust signals: {e}")
         return None
-
-# ===================== SERVICE MANAGEMENT ===================== #
-def handle_service_commands(args):
-    """Handle service management commands"""
-    import os
-    import sys
-    import subprocess
-    
-    # Service script path (same directory as main executable)
-    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
-    if not os.path.exists(service_script):
-        # Fallback: try current directory
-        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
-        
-    if not os.path.exists(service_script):
-        print("❌ Service script not found! Please ensure service_wrapper.py is in the application directory.")
-        return False
-    
-    try:
-        if args.install:
-            print("📦 Installing Cloud Honeypot Monitor Service...")
-            
-            # Check admin privileges for service installation
-            if os.name == "nt" and not ctypes.windll.shell32.IsUserAnAdmin():
-                print("⚠️ Admin privileges required for service installation.")
-                print("🔧 Requesting elevation...")
-                try:
-                    # Request elevation and restart with admin privileges
-                    exe = sys.executable
-                    params = f'"{__file__}" --install'
-                    
-                    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
-                    print("📋 Admin elevation requested. Please approve the UAC prompt.")
-                    print("🔄 Application will restart with admin privileges.")
-                    return True
-                except Exception as e:
-                    print(f"❌ Admin elevation failed: {e}")
-                    print("💡 Please run this command as Administrator.")
-                    return False
-            
-            result = subprocess.run([
-                sys.executable, service_script, 'install'
-            ], capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                print("✅ Service installed successfully!")
-                print("🔧 The service will automatically monitor and restart the client application.")
-                print("📊 You can check the service status in Windows Services (services.msc)")
-            else:
-                print("❌ Service installation failed:")
-                if result.stdout: print(result.stdout)
-                if result.stderr: print(result.stderr)
-            return result.returncode == 0
-            
-        elif args.remove:
-            print("🗑️ Removing Cloud Honeypot Monitor Service...")
-            
-            # Check admin privileges for service removal
-            if os.name == "nt" and not ctypes.windll.shell32.IsUserAnAdmin():
-                print("⚠️ Admin privileges required for service removal.")
-                print("🔧 Requesting elevation...")
-                try:
-                    # Request elevation and restart with admin privileges
-                    exe = sys.executable
-                    params = f'"{__file__}" --remove'
-                    
-                    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
-                    print("📋 Admin elevation requested. Please approve the UAC prompt.")
-                    print("🔄 Application will restart with admin privileges.")
-                    return True
-                except Exception as e:
-                    print(f"❌ Admin elevation failed: {e}")
-                    print("💡 Please run this command as Administrator.")
-                    return False
-            
-            result = subprocess.run([
-                sys.executable, service_script, 'uninstall'
-            ], capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                print("✅ Service removed successfully!")
-            else:
-                print("❌ Service removal failed:")
-                if result.stdout: print(result.stdout)
-                if result.stderr: print(result.stderr)
-            return result.returncode == 0
-            
-        elif getattr(args, 'service_status', False):
-            print("📊 Checking Cloud Honeypot Monitor Service status...")
-            result = subprocess.run([
-                sys.executable, service_script, 'status'
-            ], capture_output=True, text=True, timeout=30)
-            
-            if result.stdout: 
-                print(result.stdout)
-            if result.stderr: 
-                print(result.stderr)
-            return True
-            
-    except subprocess.TimeoutExpired:
-        print("❌ Service command timed out")
-        return False
-    except Exception as e:
-        print(f"❌ Service management error: {e}")
-        return False
-        
-    return True
 
 # ===================== INTERNATIONALIZATION ===================== #
 # Purpose: Load and manage multi-language support
@@ -345,9 +551,7 @@ class CloudHoneypotClient:
         try:
             lang = self.config["language"]["selected"]
             self.lang = "tr" if not isinstance(lang, str) else lang
-            print(f"[CONFIG] Language loaded from config: {self.lang}")
         except Exception as e:
-            print(f"[CONFIG] Language initialization error: {e}")
             self.lang = "tr"
 
         # Initialize core components
@@ -376,12 +580,23 @@ class CloudHoneypotClient:
             token = self.token_manager.load_token(self.root if hasattr(self, 'root') else None, self.t)
             self.state["token"] = token
             if token:
-                log(f"Token başarıyla yüklendi: {token[:8]}...")
-            else:
-                log("Token yüklenemedi - yeni token kaydı gerekebilir")
+                pass
         except Exception as e:
             log(f"Token yükleme hatası: {e}")
             self.state["token"] = None
+        
+        # Initialize heartbeat system
+        self.heartbeat_path = create_heartbeat_file(APP_DIR)
+        if self.heartbeat_path:
+            # Start heartbeat worker thread
+            heartbeat_thread = threading.Thread(
+                target=heartbeat_worker, 
+                args=(self.heartbeat_path, self),
+                daemon=True,
+                name="HeartbeatWorker"
+            )
+            heartbeat_thread.start()
+            self.state["threads"].append(heartbeat_thread)
         
         # Initialize GUI elements
         self.root = self.btn_primary = self.tree = None
@@ -401,25 +616,62 @@ class CloudHoneypotClient:
                         log("Terminal Servis durduğu tespit edildi, yeniden başlatılıyor...")
                         ServiceController.start("TermService")
                     
-                    # Start tunnel for port 3389
-                    st = TunnelServerThread(self, '3389', 'RDP')
-                    st.start()
-                    time.sleep(0.15)
-                    if st.is_alive():
-                        self.state["servers"][3389] = st
-                        log("3389 portu için tünel başlatıldı")
-                    else:
-                        log("3389 portu için tünel başlatılamadı!")
-                
-                time.sleep(5)  # Wait for tunnel-set completion
-                
+                # Start tunnel for port 3389
+                st = TunnelServerThread(self, '3389', 'RDP')
+                st.start()
+                time.sleep(0.15)
+                if st.is_alive():
+                    self.state["servers"][3389] = st
+                    log("3389 portu için tünel başlatıldı")
+                else:
+                    log("3389 portu için tünel başlatılamadı!")
+            
+                # Tunnel setup completion will be checked asynchronously
+                # No need to block GUI startup for this
             except Exception as e:
                 log(f"Başlangıç RDP kontrolü sırasında hata: {e}")
 
         # Önce RDP kontrolünü yap
         check_initial_rdp_state()
 
-        # Sonra API senkronizasyonunu geciktirerek başlat
+    def monitor_user_sessions(self):
+        """Monitor for user logon sessions in daemon mode"""
+        import subprocess
+        import time
+        
+        log("Daemon: User session monitoring started")
+        
+        while True:
+            try:
+                # Check for active user sessions
+                result = subprocess.run(['query', 'session'], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                # Look for Active sessions (interactive logon)
+                active_sessions = []
+                for line in result.stdout.split('\n')[1:]:  # Skip header
+                    if 'Active' in line and 'console' in line.lower():
+                        active_sessions.append(line.strip())
+                
+                if active_sessions:
+                    log(f"Daemon: Active user session detected, gracefully shutting down for tray handover...")
+                    log(f"Sessions: {len(active_sessions)} active")
+                    
+                    # Allow some time for tray task to start
+                    time.sleep(3)
+                    
+                    # Graceful shutdown - tray task will take over via StopExisting policy
+                    log("Daemon: Exiting for user session handover")
+                    os._exit(0)  # Clean exit for daemon
+                    
+            except Exception as e:
+                log(f"Session monitoring error: {e}")
+            
+            # Check every 30 seconds
+            time.sleep(30)
+
+    def start_delayed_api_sync(self):
+        """Start API synchronization with delay in background thread"""
         def delayed_api_start():
             log(f"API senkronizasyonu {API_STARTUP_DELAY} saniye bekletiliyor (manuel işlemler için)...")
             time.sleep(API_STARTUP_DELAY)
@@ -435,13 +687,12 @@ class CloudHoneypotClient:
 
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
-        
+
         # Setup persistent high-privilege operation for critical security monitoring
         try:
             if ctypes.windll.shell32.IsUserAnAdmin():
                 log("🛡️ Application running with administrative privileges - Security monitoring active")
-                # Setup automatic elevation persistence for future runs
-                threading.Thread(target=self.setup_persistent_elevation, daemon=True).start()
+                # Task Scheduler setup handled in main startup sequence
             else:
                 log("⚠️ Application running with limited privileges - Some security features may be restricted")
                 log("💡 For full security monitoring capabilities, restart as Administrator")
@@ -487,7 +738,6 @@ class CloudHoneypotClient:
             # Get language dictionary
             lang_dict = I18N.get(lang, I18N.get("tr", {}))
             if not isinstance(lang_dict, dict):
-                print(f"[TRANSLATION] ERROR: Language dict is not dict: {type(lang_dict)}")
                 lang_dict = I18N.get("tr", {})
                 
             result = lang_dict.get(key, key)
@@ -542,102 +792,7 @@ class CloudHoneypotClient:
             log(f"ensure_admin error: {e}")
             return False
 
-    def setup_persistent_elevation(self) -> bool:
-        """Setup persistent high privilege operation for critical security monitoring"""
-        try:
-            if not ctypes.windll.shell32.IsUserAnAdmin():
-                log("🔄 Requesting persistent elevation for continuous security monitoring...")
-                
-                # Create a legitimate looking scheduled task for persistence
-                task_name = "YesNext Security Monitor Service"
-                exe_path = sys.executable if getattr(sys, 'frozen', False) else __file__
-                
-                # Use Windows Task Scheduler for legitimate persistent elevation
-                task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>Network Security Monitoring Service - Cloud Honeypot Client</Description>
-    <URI>\\YesNext\\Security Monitor</URI>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger>
-      <StartBoundary>1999-01-01T00:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-    </BootTrigger>
-    <LogonTrigger>
-      <StartBoundary>1999-01-01T00:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>false</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>999</Count>
-    </RestartOnFailure>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{exe_path}</Command>
-      <Arguments>--daemon --minimized true</Arguments>
-    </Exec>
-  </Actions>
-</Task>'''
-                
-                # Save task XML to temp file
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
-                    f.write(task_xml)
-                    task_file = f.name
-                
-                try:
-                    # Register task with highest privileges
-                    result = subprocess.run([
-                        'schtasks', '/create', '/tn', task_name, '/xml', task_file, '/f'
-                    ], capture_output=True, text=True)
-                    
-                    if result.returncode == 0:
-                        log("✅ Security monitoring task registered with system privileges")
-                        
-                        # Start the task immediately
-                        subprocess.run(['schtasks', '/run', '/tn', task_name], 
-                                     capture_output=True, text=True)
-                        log("🚀 High-privilege security monitoring activated")
-                        return True
-                    else:
-                        log(f"⚠️ Task registration failed: {result.stderr}")
-                        
-                except Exception as e:
-                    log(f"❌ Scheduled task setup error: {e}")
-                finally:
-                    # Clean up temp file
-                    try:
-                        os.unlink(task_file)
-                    except:
-                        pass
-                        
-            return False
-        except Exception as e:
-            log(f"setup_persistent_elevation error: {e}")
-            return False
+    # Legacy setup_persistent_elevation removed - now using client_task_scheduler module
 
     # ---------- Token Management (moved to client_tokens.py) ---------- #
 
@@ -749,52 +904,40 @@ class CloudHoneypotClient:
         """GUI'deki saldırı sayacını günceller"""
         token = self.state.get("token")
         if not token:
-            log("[GUI] Token olmadığı için saldırı sayısı güncellenemiyor")
             return
         if not self.root or not self.attack_entry:
-            log("[GUI] GUI elemanları hazır değil, saldırı sayısı güncellenemiyor")
             return
             
         def worker():
             try:
                 cnt = self.fetch_attack_count_sync(token)
                 if cnt is None:
-                    log("[GUI] Saldırı sayısı alınamadı, sayaç güncellenmedi")
                     return
                     
                 # GUI thread-safe güncelleme
                 try:
                     def update_entry():
                         ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-                        # Sadece verbose modda detaylı log
-                        if VERBOSE_LOGGING:
-                            log(f"[GUI] Entry güncellendi: {self.attack_entry.get()}")
                     
                     # Check if main loop is running
                     try:
                         self.root.after(0, update_entry)
-                        # Sadece önemli durumlarda logla
+                        # Track last count to avoid redundant updates
                         if not hasattr(self, '_last_attack_count') or self._last_attack_count != cnt:
-                            log(f"[GUI] Saldırı sayacı güncellendi: {cnt}")
                             self._last_attack_count = cnt
                     except RuntimeError as e:
                         if "main thread is not in main loop" in str(e):
                             # Main loop not started yet, update directly
                             ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-                            log(f"[GUI] Saldırı sayacı direkt güncellendi: {cnt}")
                         else:
                             raise e
-                except Exception as e:
-                    log(f"[GUI] Saldırı sayacı güncellenirken hata: {e}")
+                except Exception:
                     ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-            except Exception as e:
-                log(f"[GUI] Saldırı sayısı güncelleme worker hatası: {e}")
+            except Exception:
+                pass
                 
         if async_thread:
             threading.Thread(target=worker, daemon=True, name="AttackCountUpdater").start()
-            # Bu log sadece verbose modunda gösterilecek
-            if VERBOSE_LOGGING:
-                log("[GUI] Asenkron saldırı sayacı güncelleme başlatıldı")
         else:
             worker()
 
@@ -1088,7 +1231,7 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"silent update error: {e}")
 
-    # Legacy onedir update methods removed - now using installer-based system
+
 
     # ---------- RDP Management UI ---------- #
     def rdp_move_popup(self, mode: str, on_confirm):
@@ -2313,6 +2456,12 @@ class CloudHoneypotClient:
                 log("[EXIT] Offline heartbeat sent before exit")
             except Exception as e:
                 log(f"[EXIT] Heartbeat error during exit: {e}")
+            
+            # Cleanup heartbeat file
+            try:
+                cleanup_heartbeat_file(self.heartbeat_path)
+            except Exception as e:
+                log(f"[EXIT] Heartbeat cleanup error: {e}")
                 
             # Watchdog'u durdur
             try:
@@ -2406,6 +2555,9 @@ class CloudHoneypotClient:
         self.state["public_ip"] = ClientHelpers.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=TunnelManager.tunnel_watchdog_loop, args=(self,), daemon=True).start()
+        
+        # Session monitoring for daemon-to-tray handover
+        threading.Thread(target=self.monitor_user_sessions, daemon=True).start()
         # Remote management: report open ports + reconcile desired tunnels
         try:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
@@ -2458,6 +2610,13 @@ class CloudHoneypotClient:
             self.remove_tunnels()
         except Exception as e:
             log(f"Exception: {e}")
+        
+        # Cleanup heartbeat file on daemon exit
+        try:
+            cleanup_heartbeat_file(self.heartbeat_path)
+        except Exception as e:
+            log(f"Daemon heartbeat cleanup error: {e}")
+            
         log("Daemon: durduruldu.")
 
 
@@ -2466,7 +2625,8 @@ class CloudHoneypotClient:
     def start_firewall_agent(self):
         """Start firewall agent with updated client_firewall module"""
         try:
-            from client_firewall import FirewallAgent
+            # FirewallAgent already imported at top level
+            pass
         except ImportError:
             log("client_firewall module not available; skipping.")
             return
@@ -2642,181 +2802,7 @@ class CloudHoneypotClient:
         menu_settings.add_cascade(label=self.t("menu_language"), menu=lang_menu)
         menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
 
-        # Windows Service Menu
-        menu_service = tk.Menu(menubar, tearoff=0)
-        
-        def check_service_status():
-            """Check and display current service status"""
-            try:
-                import subprocess
-                import sys
-                import os
-                
-                # Service script path
-                service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
-                if not os.path.exists(service_script):
-                    service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
-                
-                if not os.path.exists(service_script):
-                    messagebox.showerror(self.t("error"), "❌ Service wrapper not found!\n\nService system is not installed.")
-                    return
-                
-                # Run status check
-                result = subprocess.run([
-                    sys.executable, service_script, 'status'
-                ], capture_output=True, text=True, timeout=30)
-                
-                if result.returncode == 0:
-                    status_text = result.stdout if result.stdout else "Service status check completed"
-                    # Add service management buttons to status
-                    status_text += "\n\n💡 Tip: You can manage the service from this menu or Windows Services (services.msc)"
-                else:
-                    # Service not found or not installed
-                    status_text = "❌ Cloud Honeypot Monitor servisi bulunamadı\n\n"
-                    status_text += "Service is not installed or not accessible.\n\n"
-                    status_text += "💡 Use 'Install Service' to set up automatic client protection."
-                
-                messagebox.showinfo(
-                    self.t("service_status") if hasattr(self, 't') else "🔍 Service Status", 
-                    status_text
-                )
-                
-            except Exception as e:
-                messagebox.showerror(
-                    self.t("error"), 
-                    f"❌ Service status check failed:\n\n{str(e)}\n\nService may not be installed or accessible."
-                )
-        
-        def install_service():
-            """Install Windows service with admin elevation"""
-            try:
-                result = messagebox.askquestion(
-                    self.t("service_install") if hasattr(self, 't') else "Install Service", 
-                    self.t("service_install_confirm") if hasattr(self, 't') else "Install Cloud Honeypot Monitor Service?\n\nThis service will automatically restart the client if it crashes.\n\nAdmin privileges will be requested."
-                )
-                
-                if result == 'yes':
-                    import subprocess
-                    import sys
-                    import os
-                    import ctypes
-                    
-                    # Check if already running as admin
-                    if not ctypes.windll.shell32.IsUserAnAdmin():
-                        try:
-                            # Restart with admin privileges
-                            exe = sys.executable
-                            script_path = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
-                            params = f'"{script_path}" install'
-                            
-                            ctypes.windll.shell32.ShellExecuteW(
-                                None, "runas", exe, params, None, 1
-                            )
-                            
-                            # Wait a moment and check status
-                            self.root.after(3000, lambda: check_service_status())
-                            messagebox.showinfo(
-                                "Admin Request", 
-                                "Admin privileges requested.\nPlease approve the elevation prompt to install the service."
-                            )
-                            return
-                        except Exception as e:
-                            messagebox.showerror(self.t("error"), f"Admin elevation failed: {e}")
-                            return
-                    
-                    # Already admin, proceed with installation
-                    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
-                    if not os.path.exists(service_script):
-                        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
-                    
-                    if not os.path.exists(service_script):
-                        messagebox.showerror(self.t("error"), "Service wrapper not found!")
-                        return
-                    
-                    # Run installation
-                    result = subprocess.run([
-                        sys.executable, service_script, 'install'
-                    ], capture_output=True, text=True, timeout=60)
-                    
-                    if result.returncode == 0:
-                        # Try to start the service
-                        try:
-                            start_result = subprocess.run([
-                                sys.executable, service_script, 'start'
-                            ], capture_output=True, text=True, timeout=30)
-                            
-                            if start_result.returncode == 0:
-                                messagebox.showinfo(
-                                    self.t("success") if hasattr(self, 't') else "Success", 
-                                    "✅ Service installed and started successfully!\n\n🔧 The client is now protected by the monitor service.\n📊 You can see 'Cloud Honeypot Client Monitor' in Windows Services."
-                                )
-                            else:
-                                messagebox.showinfo(
-                                    self.t("success") if hasattr(self, 't') else "Success", 
-                                    "✅ Service installed successfully!\n\n⚠️ Service start will happen on next boot.\n📊 You can manually start it from Windows Services."
-                                )
-                        except:
-                            messagebox.showinfo(
-                                self.t("success") if hasattr(self, 't') else "Success", 
-                                "✅ Service installed successfully!\n\n📊 Check Windows Services to start it manually."
-                            )
-                    else:
-                        error_msg = result.stderr or result.stdout or "Unknown error"
-                        messagebox.showerror(
-                            self.t("error"), 
-                            f"❌ Service installation failed:\n\n{error_msg}\n\nPlease ensure you have Administrator privileges."
-                        )
-                        
-            except Exception as e:
-                messagebox.showerror(self.t("error"), f"Service installation error: {str(e)}")
-        
-        def remove_service():
-            """Remove Windows service"""
-            try:
-                result = messagebox.askquestion(
-                    self.t("service_remove") if hasattr(self, 't') else "Remove Service", 
-                    self.t("service_remove_confirm") if hasattr(self, 't') else "Remove Cloud Honeypot Monitor Service?\n\nThe client will continue working but won't auto-restart if it crashes.",
-                    icon='warning'
-                )
-                
-                if result == 'yes':
-                    import subprocess
-                    import sys
-                    import os
-                    
-                    service_script = os.path.join(os.path.dirname(sys.executable), 'service_wrapper.py')
-                    if not os.path.exists(service_script):
-                        service_script = os.path.join(os.path.dirname(__file__), 'service_wrapper.py')
-                    
-                    if not os.path.exists(service_script):
-                        messagebox.showerror(self.t("error"), "Service wrapper not found!")
-                        return
-                    
-                    # Run removal
-                    result = subprocess.run([
-                        sys.executable, service_script, 'uninstall'
-                    ], capture_output=True, text=True, timeout=60)
-                    
-                    if result.returncode == 0:
-                        messagebox.showinfo(
-                            self.t("success") if hasattr(self, 't') else "Success", 
-                            self.t("service_removed") if hasattr(self, 't') else "Service removed successfully!"
-                        )
-                    else:
-                        error_msg = result.stderr or result.stdout or "Unknown error"
-                        messagebox.showerror(
-                            self.t("error"), 
-                            f"Service removal failed:\n{error_msg}"
-                        )
-                        
-            except Exception as e:
-                messagebox.showerror(self.t("error"), f"Service removal error: {str(e)}")
-        
-        menu_service.add_command(label=self.t("service_status") if hasattr(self, 't') else "Service Status", command=check_service_status)
-        menu_service.add_separator()
-        menu_service.add_command(label=self.t("service_install") if hasattr(self, 't') else "Install Service", command=install_service)
-        menu_service.add_command(label=self.t("service_remove") if hasattr(self, 't') else "Remove Service", command=remove_service)
-        menubar.add_cascade(label=self.t("menu_service") if hasattr(self, 't') else "Win-Service", menu=menu_service)
+        # Legacy Windows Service menu removed - now using Task Scheduler
 
         menu_help = tk.Menu(menubar, tearoff=0)
         # Static version label as disabled entry at the top
@@ -2915,9 +2901,6 @@ class CloudHoneypotClient:
         # Now that token is loaded, refresh attack count
         if token:
             self.refresh_attack_count(async_thread=True)
-            log(f"[GUI] Token loaded, initial attack count refresh triggered")
-        else:
-            log(f"[GUI] No token available, attack count will remain 0")
 
         # Port Tünelleme
         frame2 = tk.LabelFrame(self.root, text=self.t("port_tunnel"), padx=10, pady=10, bg="#f5f5f5", font=("Arial", 11, "bold"))
@@ -3035,9 +3018,32 @@ class CloudHoneypotClient:
         # Otomatik saldırı sayacı
         self.root.after(0, self.poll_attack_count)
 
-        self.root.mainloop()
 
 
+    def show_gui_from_tray(self, icon=None, item=None):
+        """Show GUI from tray"""
+        try:
+            log("Restoring GUI from tray...")
+            
+            # Show the window
+            if hasattr(self, 'root') and self.root:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.focus_force()
+                log("GUI restored from tray successfully")
+            
+        except Exception as e:
+            log(f"Show GUI error: {e}")
+            
+    def quit_from_tray(self, icon=None, item=None):
+        """Quit from tray"""
+        try:
+            if hasattr(self, 'root') and self.root:
+                self.root.quit()
+            sys.exit(0)
+        except Exception as e:
+            log(f"Quit error: {e}")
+            sys.exit(0)
 
 
 
@@ -3045,13 +3051,16 @@ class CloudHoneypotClient:
 if __name__ == "__main__":
     # Parse arguments first to check for non-GUI modes
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
-    parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
-    parser.add_argument("--minimized", type=str, default="true", help="Start minimized")
+    
+    # Simplified mode system
+    parser.add_argument("--mode", choices=["daemon", "tray"], help="Operation mode: daemon (background service), tray (tray-only mode). Default is GUI mode.")
+    parser.add_argument("--minimized", action="store_true", help="Start GUI minimized to tray (legacy compatibility)")
+    
+    # Legacy compatibility
+    parser.add_argument("--daemon", action="store_true", help="Run as a daemon service (legacy)")
     parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
     parser.add_argument("--watchdog", type=int, default=None, help="Watchdog process ID")
-    parser.add_argument("--install", action="store_true", help="Install the monitor service")
-    parser.add_argument("--remove", action="store_true", help="Remove the monitor service")
-    parser.add_argument("--service-status", action="store_true", dest="service_status", help="Show service status")
+    parser.add_argument("--healthcheck", action="store_true", help="Perform health check and exit")
     args = parser.parse_args()
     
     # Set global silent mode if requested
@@ -3065,323 +3074,193 @@ if __name__ == "__main__":
     if args.watchdog is not None:
         watchdog_main(args.watchdog)
         sys.exit(0)
-        
-    # Handle service management commands
-    if args.install or args.remove or getattr(args, 'service_status', False):
-        handle_service_commands(args)
+    
+    # Health check mode (for monitoring)
+    if args.healthcheck:
+        perform_health_check()
         sys.exit(0)
 
-    # For daemon mode, skip GUI entirely
-    if args.daemon:
-        # Log directory setup
+    # Determine operation mode
+    operation_mode = get_operation_mode(args)
+    log(f"=== CLOUD HONEYPOT CLIENT STARTUP ===")
+    log(f"Operation mode: {operation_mode}")
+    log(f"Process PID: {os.getpid()}")
+    log(f"Command line: {' '.join(sys.argv)}")
+    
+    # Singleton check - ensure only one instance per mode
+    if not check_singleton(operation_mode):
+        log(f"ERROR: Cannot start - another instance is running or mutex failed")
+        sys.exit(2)  # Exit code 2 = Mutex taken
+
+    # ===== SIMPLIFIED MODE-BASED EXECUTION =====
+    
+    if operation_mode == GUI_MODE:
+        # ===== GUI MODE - Normal GUI application with tray functionality =====
+        
+        # Initialize basic logging FIRST
         log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
         os.makedirs(log_dir, exist_ok=True)
         setup_logging()
         
-        app = CloudHoneypotClient()
-        app.run_daemon()
-        sys.exit(0)
-
-    # ===== GUI MODE - COMPREHENSIVE LOADING FLOW =====
+        log("=== GUI MODE STARTUP - Normal interface startup ===")
+        
+        try:
+            # Load configuration
+            config = load_config()
+            selected_language = config["language"]["selected"]
+            
+            # Create app instance
+            app = CloudHoneypotClient()
+            app.lang = selected_language
+            log(f"Application initialized with language: {selected_language}")
+            
+            # Admin check and Task Scheduler setup
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                log("Admin yetkisi mevcut - Task Scheduler kontrol ediliyor")
+                try:
+                    tasks_status = check_tasks_status()
+                    if not tasks_status['both_installed']:
+                        if install_tasks():
+                            log("✓ Task Scheduler tasks installed")
+                        else:
+                            log("⚠ Task Scheduler installation failed")
+                    else:
+                        log("✓ Task Scheduler tasks already configured")
+                except Exception as task_error:
+                    log(f"Task Scheduler error: {task_error}")
+            else:
+                log("Normal user mode - Task Scheduler will be configured later")
+            
+            # Check if started with --mode=tray for tray-minimized startup
+            tray_mode = getattr(args, 'mode', None) == 'tray'
+            
+            # Build GUI in both cases
+            log("Building main GUI...")
+            app.build_gui(minimized=tray_mode)  # Pass tray_mode as minimized flag
+            log("GUI build completed successfully")
+            
+            # Start API synchronization in background after GUI is ready
+            app.start_delayed_api_sync()
+            
+            # If tray mode, immediately hide to tray after GUI is built
+            if tray_mode:
+                log("Tray mode: Minimizing to tray...")
+                if hasattr(app, 'root') and app.root:
+                    app.root.withdraw()  # Hide the window
+                    app.root.update()
+                    log("Tray mode: Window hidden successfully")
+            
+            # Run main loop
+            if hasattr(app, 'root') and app.root:
+                app.root.mainloop()
+            
+        except Exception as gui_error:
+            log(f"GUI Mode Error: {gui_error}")
+            import traceback
+            log(f"GUI Error traceback: {traceback.format_exc()}")
+            sys.exit(1)
     
-    # Initialize loading screen at the very beginning
-    loading = None
-    selected_language = "tr"  # Default language
+
+    elif operation_mode == DAEMON_MODE or args.daemon:
+        # DAEMON MODE - Background operation, no GUI
+        app = None
+        try:
+            log("=== DAEMON MODE STARTUP ===")
+            
+            # Log directory setup
+            log_dir = os.path.join(os.environ.get('PROGRAMDATA', ''), 'YesNext', 'CloudHoneypotClient', 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+            setup_logging()
+            
+            log("Setting up daemon mode application...")
+            
+            # Initialize app in daemon mode
+            app = CloudHoneypotClient()
+            app.operation_mode = DAEMON_MODE
+            
+            # Start daemon with proper error handling
+            log("Starting daemon mode...")
+            app.run_daemon()
+            
+        except KeyboardInterrupt:
+            log("Daemon interrupted by user signal")
+            sys.exit(0)
+        except Exception as daemon_error:
+            log(f"DAEMON CRITICAL ERROR: {daemon_error}")
+            import traceback
+            log(f"Daemon traceback: {traceback.format_exc()}")
+            
+            # Try to cleanup gracefully
+            try:
+                if app and hasattr(app, 'heartbeat_path'):
+                    cleanup_heartbeat_file(app.heartbeat_path)
+            except:
+                pass
+            sys.exit(1)  # Exit code 1 = Unhandled exception
+        
+        sys.exit(0)
+    
+    else:
+        # Fallback - should not happen with current logic
+        log(f"ERROR: Unknown operation mode: {operation_mode}")
+        sys.exit(1)
+
+    # ===== GUI MODE - SIMPLIFIED FOR DEBUGGING =====
+    
+    # Initialize basic logging FIRST
+    log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
+    os.makedirs(log_dir, exist_ok=True)
+    setup_logging()
+    
+    log("=== GUI MODE STARTUP - Simplified version ===")
     
     try:
-        print("[MAIN] === Starting GUI mode ===")
-        
-        # Step 1: Initialize Loading Screen (5%) - using modular GUI
-        print("[MAIN] Creating loading screen...")
-        loading = LoadingScreen(I18N, "dark")
-        loading.create()
-        loading.update_progress(5, I18N.get("loading_initializing", "Initializing..."))
-        print("[MAIN] Loading screen created and showing 5%")
-        
-        # Step 2: Language Selection (15%) - Using NEW CONFIG SYSTEM
-        print("[MAIN] Loading config for language selection...")
+        # Load configuration
         config = load_config()
         selected_language = config["language"]["selected"]
-        language_selected_by_user = config["language"]["selected_by_user"]
-        print(f"[MAIN] Config loaded, current language: {selected_language}, selected by user: {language_selected_by_user}")
         
-        # If language not selected by user yet, show language selector
-        if not language_selected_by_user:
-            print("[MAIN] Language not selected by user yet, showing language selection dialog...")
-            loading.update_progress(10, "Dil seçimi bekleniyor..." if selected_language == "tr" else "Waiting for language selection...")
-            
-            try:
-                print("[MAIN] Creating language dialog...")
-                
-                # Create new language dialog with proper cleanup
-                language_dialog = LanguageDialog()
-                print("[MAIN] Language dialog created, showing...")
-                selected_language = language_dialog.show()
-                
-                if not selected_language:
-                    print("[MAIN] ERROR: No language selected, exiting")
-                    loading.close()
-                    sys.exit(0)
-                print(f"[MAIN] Language dialog completed, selected: {selected_language}")
-                
-                # Save language selection using new config system
-                print(f"[MAIN] Saving language selection to config: {selected_language}")
-                success = update_language_config(selected_language, True)
-                if success:
-                    log(f"Dil seçildi ve kaydedildi: {selected_language}")
-                    print("[MAIN] Language saved successfully to config")
-                else:
-                    print("[MAIN] WARNING: Failed to save language to config")
-                
-                # Update loading screen with selected language
-                current_i18n = I18N.get(selected_language, I18N.get("tr", {}))
-                loading_msg = current_i18n.get("loading_language_saved", "Language saved, continuing...")
-                print(f"[MAIN] Updating loading with message: {loading_msg}")
-                loading.update_progress(12, loading_msg)
-                
-            except Exception as e:
-                print(f"[MAIN] ERROR in language selection: {e}")
-                selected_language = "tr"
-                # Save fallback language to config
-                update_language_config(selected_language, False)
-                current_i18n = I18N.get(selected_language, I18N.get("tr", {}))
-                loading_msg = current_i18n.get("loading_default_language", "Using default language...")
-                loading.update_progress(12, loading_msg)
-        else:
-            print(f"[MAIN] Language already selected by user: {selected_language}")
-            current_i18n = I18N.get(selected_language, I18N.get("tr", {}))
-        
-        # Update loading with correct language
-        print(f"[MAIN] Proceeding with selected language: {selected_language}")
-        
-        loading_init_msg = current_i18n.get("loading_initializing_system", "Initializing system...")
-        print(f"[MAIN] Updating loading progress to 15% with message: {loading_init_msg}")
-        loading.update_progress(15, loading_init_msg)
-        
-        # Step 3: Initialize logging (20%)
-        log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
-        os.makedirs(log_dir, exist_ok=True)
-        setup_logging()
-        
-        log(f"Uygulama başlatılıyor - dil: {selected_language}")
-        loading_key = current_i18n.get("loading_initializing", "Initializing...")
-        loading.update_progress(20, loading_key)
-
-        # Step 4: Initialize application with selected language (30%)
+        # Create app instance
         app = CloudHoneypotClient()
-        # Set the selected language in the app instance
         app.lang = selected_language
-        log(f"Application initialized successfully with language: {selected_language}")
+        log(f"Application initialized with language: {selected_language}")
         
-        # Notify monitor service if available
-        if MONITOR_AVAILABLE:
-            try:
-                notify_monitor_startup()
-                log("[MONITOR] PID registered with monitor service")
-            except Exception as e:
-                log(f"[MONITOR] Failed to register with monitor service: {e}")
-        
-        loading_key = current_i18n.get("loading_checking_admin", "Checking admin privileges...")
-        loading.update_progress(30, loading_key)
-        
-        # Step 5: Admin privilege check (40%)
-        print("[MAIN] Starting admin privilege check step...")
-        loading_msg = current_i18n.get("loading_checking_privileges", "Checking privileges...")
-        loading.update_progress(35, loading_msg)
-        print(f"[MAIN] Admin check progress (35%) with message: {loading_msg}")
-        
-        # Check if already running as admin
+        # Admin check and Task Scheduler setup
         if ctypes.windll.shell32.IsUserAnAdmin():
-            print("[MAIN] Already running as admin - proceeding")
-            log("Admin yetkisi mevcut - devam ediliyor")
-            has_admin = True
-            loading_msg = current_i18n.get("loading_admin_confirmed", "Admin privileges confirmed")
-            loading.update_progress(40, loading_msg)
-            print(f"[MAIN] Admin confirmed (40%) with message: {loading_msg}")
+            log("Admin yetkisi mevcut - Task Scheduler kontrol ediliyor")
+            try:
+                tasks_status = check_tasks_status()
+                if not tasks_status['both_installed']:
+                    if install_tasks():
+                        log("✓ Task Scheduler tasks installed")
+                    else:
+                        log("⚠ Task Scheduler installation failed")
+                else:
+                    log("✓ Task Scheduler tasks already configured")
+            except Exception as task_error:
+                log(f"Task Scheduler error: {task_error}")
         else:
-            print("[MAIN] Not running as admin")
-            log("Admin yetkisi yok")
-            
-            # Check if silent elevation is enabled (production deployment)
-            if SILENT_ADMIN_ELEVATION:
-                print("[MAIN] Silent admin elevation enabled - auto-elevating")
-                log("Sessiz admin yükseltme aktif - otomatik yükseltiliyor")
-                user_choice = "yes"
-            else:
-                print("[MAIN] Showing admin dialog")
-                log("Admin dialog gösteriliyor")
-                loading_msg = current_i18n.get("loading_waiting_privilege", "Waiting for privilege confirmation...")
-                loading.update_progress(38, loading_msg)
-                print(f"[MAIN] Waiting for privilege (38%) with message: {loading_msg}")
-                
-                # Show admin privilege dialog using modular GUI
-                print("[MAIN] Creating AdminPrivilegeDialog...")
-                admin_dialog = AdminPrivilegeDialog(I18N)
-                print("[MAIN] Showing admin dialog...")
-                user_choice = admin_dialog.show()
-                
-                print(f"[MAIN] Admin dialog completed with choice: '{user_choice}'")
-                log(f"Admin dialog result: '{user_choice}'")  # Debug log
-            
-            # Update loading after decision
-            loading_msg = current_i18n.get("loading_privilege_completed", "Privilege selection completed...")
-            loading.update_progress(40, loading_msg)
-            print(f"[MAIN] Privilege completed (40%) with message: {loading_msg}")
-            
-            if user_choice == "yes":
-                print("[MAIN] User chose YES - restarting with admin privileges")
-                log("Kullanıcı admin yetkileriyle yeniden başlatmayı seçti")
-                loading_msg = current_i18n.get("loading_checking_admin", "Checking admin privileges...")
-                loading.update_progress(40, loading_msg)
-                print(f"[MAIN] Restarting admin (40%) with message: {loading_msg}")
-                
-                # Restart with admin privileges
-                try:
-                    print("[MAIN] Attempting admin restart...")
-                    import subprocess
-                    import sys
-                    
-                    # Get current executable path
-                    if hasattr(sys, 'frozen') and sys.frozen:
-                        # If running as EXE
-                        current_exe = sys.executable
-                        args = sys.argv[1:]
-                        print(f"[MAIN] Running as EXE: {current_exe}")
-                    else:
-                        # If running as Python script
-                        current_exe = sys.executable
-                        args = [os.path.abspath(sys.argv[0])] + sys.argv[1:]
-                        print(f"[MAIN] Running as Python script: {current_exe}")
-                    
-                    # Build command properly for PowerShell
-                    if args:
-                        # Properly escape arguments for PowerShell
-                        args_list = ', '.join(f'"{str(arg)}"' for arg in args)
-                        cmd = f'Start-Process -FilePath "{current_exe}" -ArgumentList @({args_list}) -Verb RunAs'
-                        print(f"[MAIN] Restart command with args: {cmd}")
-                    else:
-                        cmd = f'Start-Process -FilePath "{current_exe}" -Verb RunAs'
-                        print(f"[MAIN] Restart command no args: {cmd}")
-                    
-                    # Restart with admin privileges
-                    print("[MAIN] Executing restart command...")
-                    subprocess.run(['powershell', '-Command', cmd], check=False)
-                    
-                    print("[MAIN] Admin restart initiated - closing application")
-                    log("Yönetici yetkilendirme penceresi açıldı - uygulama yeniden başlatılacak")
-                    if loading: loading.close()
-                    sys.exit(0)
-                    
-                except Exception as restart_error:
-                    print(f"[MAIN] ERROR in admin restart: {restart_error}")
-                    log(f"Admin restart error: {restart_error}")
-                    log("Admin yetkilendirme başarısız - sınırlı modda devam ediliyor")
-                    has_admin = False
-            elif user_choice == "cancel":
-                print("[MAIN] User chose CANCEL - exiting application")
-                log("Kullanıcı uygulamayı kapatmayı seçti")
-                if loading: loading.close()
-                sys.exit(0)
-            elif user_choice == "no":
-                print("[MAIN] User chose NO - continuing in limited mode")
-                log("Kullanıcı sınırlı modda devam etmeyi seçti")
-                has_admin = False
+            log("Normal user mode - Task Scheduler will be configured later")
         
-        # Step 6: API Connection Validation (50%)
-        loading_msg = current_i18n.get("loading_connecting_api", "Testing API connection...")
-        loading.update_progress(45, loading_msg)
-        
-        # Use modular API client for connection test
-        if not test_api_connection("https://honeypot.yesnext.com.tr", log):
-            # API connection failed - exit application
-            loading.close()
-            log("API bağlantısı başarısız - uygulama kapatılıyor")
-            sys.exit(1)
-        
-        loading_msg = current_i18n.get("loading_loading_config", "Loading configuration...")
-        loading.update_progress(55, loading_msg)
-        log("API bağlantısı doğrulandı - uygulama devam ediyor")
-        
-        # Step 7: Service management and installation (60%)
-        loading_msg = current_i18n.get("loading_checking_services", "Checking services...")
-        loading.update_progress(60, loading_msg)
-        
-        # Handle service management commands
-        if getattr(args, 'install', False):
-            loading.close()
-            log("Servis kurulum modunda çalışıyor")
-            success = handle_service_commands(args)
-            sys.exit(0 if success else 1)
-        elif getattr(args, 'remove', False):
-            loading.close()
-            log("Servis kaldırma modunda çalışıyor")
-            success = handle_service_commands(args)
-            sys.exit(0 if success else 1)
-        elif getattr(args, 'service_status', False):
-            loading.close()
-            log("Servis durumu kontrol ediliyor")
-            handle_service_commands(args)
-            sys.exit(0)
-
-        # Step 8: Show first run notice if needed (75%)
-        loading_msg = current_i18n.get("loading_first_run_check", "First run check...")
-        loading.update_progress(75, loading_msg)
-        try:
-            app.first_run_notice()
-        except Exception as e:
-            log(f"First run notice error: {str(e)}")
-
-        # Step 9: Prepare GUI (90%)
-        loading_msg = current_i18n.get("loading_preparing_gui", "Preparing interface...")
-        loading.update_progress(90, loading_msg)
-
-        # Step 10: Start main application GUI - CRITICAL PART
-        print("[MAIN] === STARTING GUI CREATION ===")
-        loading_msg = current_i18n.get("loading_completed", "Startup completed!")
-        loading.update_progress(95, loading_msg)
-        print(f"[MAIN] GUI startup (95%) with message: {loading_msg}")
-        log("GUI başlatılıyor...")
-        
-        # Ensure we don't have GUI conflicts
-        if hasattr(app, 'root') and app.root:
-            print("[MAIN] Destroying existing root window...")
-            app.root.destroy()
-            app.root = None
-            
-        # Build GUI properly
-        print(f"[MAIN] Building GUI components with language: {selected_language}")
-        log("Building GUI components...")
-        loading.update_progress(100, I18N.get("loading_completed", "Startup completed!"))
-        print("[MAIN] Loading progress complete (100%)")
-        
-        # Small delay to show completion
-        import time
-        time.sleep(0.5)
-        
-        print("[MAIN] Closing loading screen...")
-        loading.close()  # Close loading before showing main GUI
-        
-        print("[MAIN] Starting main GUI build...")
+        # Build GUI directly
+        log("Building main GUI...")
         app.build_gui(minimized=False)
-        print("[MAIN] GUI build completed successfully!")
         log("GUI build completed successfully")
         
-    except Exception as main_error:
-        print(f"[MAIN] === CRITICAL ERROR IN MAIN ===")
-        print(f"[MAIN] Error: {str(main_error)}")
-        if loading: 
-            print("[MAIN] Closing loading screen due to error...")
-            loading.close()
-        log(f"Critical initialization error: {str(main_error)}")
+        # Run main loop
+        if hasattr(app, 'root') and app.root:
+            app.root.mainloop()
+        
+    except Exception as gui_error:
+        log(f"GUI Mode Error: {gui_error}")
         import traceback
-        print(f"[MAIN] Full traceback: {traceback.format_exc()}")
-        log(f"Full traceback: {traceback.format_exc()}")
+        log(f"GUI Error traceback: {traceback.format_exc()}")
         sys.exit(1)
-    except KeyboardInterrupt:
-        print("[MAIN] Application interrupted by user (Ctrl+C)")
-        if loading: 
-            print("[MAIN] Closing loading screen due to interrupt...")
-            loading.close()
-        log("Application interrupted by user")
-        sys.exit(0)
+    
+    else:
+        # Fallback - should not happen with current logic
+        log(f"ERROR: Unknown operation mode: {operation_mode}")
+        sys.exit(1)
+
+
+
 

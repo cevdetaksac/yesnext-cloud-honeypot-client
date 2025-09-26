@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-__version__ = get_from_config("application.version", "2.2.4")
+__version__ = get_from_config("application.version", "2.5.8")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 
 # GitHub repository information
@@ -48,6 +48,11 @@ RECV_SIZE = 65536
 CONNECT_TIMEOUT = 8
 
 # ===================== SECURITY CONFIGURATION ===================== #
+
+# Admin elevation control - TEST MODE
+SKIP_ADMIN_ELEVATION = False  # Set to True to disable admin elevation for testing
+TEST_MODE = False  # Set to True for enhanced debugging and no admin requirements
+FORCE_NO_EXIT = True  # Prevent any early exits during testing
 
 # RDP secure port configuration
 RDP_SECURE_PORT = get_from_config("tunnels.rdp_port", 53389)
@@ -140,6 +145,21 @@ APP_STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 TASK_NAME_BOOT = "CloudHoneypotClientBoot"
 TASK_NAME_LOGON = "CloudHoneypotClientLogon"
 
+# ===================== APPLICATION MODES ===================== #
+
+# Operation modes
+GUI_MODE = "gui"        # Normal GUI application with tray functionality
+DAEMON_MODE = "daemon"  # Background-only mode for servers
+TRAY_MODE = GUI_MODE    # Tray mode is a variant of GUI mode
+
+# ===================== HEARTBEAT CONFIGURATION ===================== #
+
+HEARTBEAT_FILE = "heartbeat.json"
+HEARTBEAT_INTERVAL = 10  # seconds
+
+# Singleton mutex name
+SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
+
 # ===================== TIMING CONFIGURATION ===================== #
 
 # API and sync intervals (in seconds)
@@ -149,7 +169,7 @@ ATTACK_COUNT_REFRESH = 10        # Attack count refresh interval (in seconds, co
 DASHBOARD_SYNC_INTERVAL = 8      # Dashboard tunnel sync interval
 DASHBOARD_SYNC_CHECK = 3         # Dashboard sync check frequency
 RECONCILE_LOOP_INTERVAL = 600    # Old reconcile loop interval (10 minutes)
-API_STARTUP_DELAY = 60           # API startup delay (1 minute)
+API_STARTUP_DELAY = 5            # API startup delay (5 seconds)
 RDP_TRANSITION_TIMEOUT = 120     # RDP transition timeout
 WATCHDOG_INTERVAL = 10           # Tunnel watchdog check interval
 

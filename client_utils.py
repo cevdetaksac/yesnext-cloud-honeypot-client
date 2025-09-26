@@ -1734,7 +1734,6 @@ def migrate_from_zip_to_installer():
                 except:
                     pass
                     
-        print("Zip tabanlı sistemden installer sistemine geçiş tamamlandı")
         return True
         
     except Exception as e:

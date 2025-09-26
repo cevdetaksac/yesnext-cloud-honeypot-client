@@ -7,7 +7,16 @@ venv/
 # Build outputs
 build/
 dist/
+*.exe
 !client.spec
+!honeypot-client-service.spec
+
+# Generated files
+monitor.log
+monitor_status.json
+file_hashes.json
+version_info.json
+version_info.py
 
 # IDE
 .vscode/

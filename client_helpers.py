@@ -7,8 +7,6 @@ Yardımcı fonksiyonlar ve genel amaçlı utilities
 
 import os
 import sys
-import json
-import time
 import hashlib
 import requests
 import tkinter as tk

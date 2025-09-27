@@ -1,4 +1,4 @@
-# Cloud Honeypot Client v2.5.8 - Simple Build Script
+# Cloud Honeypot Client v2.5.9 - Simple Build Script
 # Single script to build complete installer
 
 param(
@@ -6,7 +6,7 @@ param(
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.5.8 Builder      " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.5.9 Builder      " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested

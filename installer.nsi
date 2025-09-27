@@ -1,4 +1,4 @@
-; Cloud Honeypot Client Installer Script - v2.5.8
+; Cloud Honeypot Client Installer Script - v2.5.9
 ; Auto-elevating installer
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -37,7 +37,7 @@ RequestExecutionLevel admin
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 !define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Cloud Honeypot Client now"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.5.8 installation completed successfully.$\r$\n$\r$\nThe application will configure auto-startup settings on first run.$\r$\n$\r$\nNo system restart required."
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.5.9 installation completed successfully.$\r$\n$\r$\nThe application will configure auto-startup settings on first run.$\r$\n$\r$\nNo system restart required."
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -62,9 +62,11 @@ FunctionEnd
 ; Main Section
 Section "Cloud Honeypot Client (Required)" SEC_MAIN
     SectionIn RO
+    ; Force compatibility flag so Windows runs the client elevated
+    WriteRegStr HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\honeypot-client.exe" "~ RUNASADMIN"
     
     DetailPrint "================================================================"
-    DetailPrint "CLOUD HONEYPOT CLIENT v2.5.8 INSTALLATION"
+    DetailPrint "CLOUD HONEYPOT CLIENT v2.5.9 INSTALLATION"
     DetailPrint "================================================================"
     
     ; Set output path to the installation directory
@@ -105,6 +107,8 @@ SectionEnd
 
 ; Uninstaller section
 Section "Uninstall"
+    ; Remove compatibility flag
+    DeleteRegValue HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\honeypot-client.exe"
     ; Stop the application if running
     DetailPrint "Stopping Cloud Honeypot Client..."
     nsExec::ExecToLog 'taskkill /f /im honeypot-client.exe'

@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-__version__ = get_from_config("application.version", "2.5.8")
+__version__ = get_from_config("application.version", "2.5.9")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 
 # GitHub repository information
@@ -92,6 +92,7 @@ LOG_FILE = os.path.join(APP_DIR, "client.log")
 CONSENT_FILE = os.path.join(APP_DIR, "consent.json")
 STATUS_FILE = os.path.join(APP_DIR, "status.json")
 WATCHDOG_TOKEN_FILE = os.path.join(APP_DIR, "watchdog.token")
+TASK_STATE_FILE = os.path.join(APP_DIR, "task_state.json")
 
 # ===================== GUI CONFIGURATION ===================== #
 
@@ -263,7 +264,7 @@ __all__ = [
     'RDP_SECURE_PORT', 'DEFENDER_MARKERS', 'SECURITY_METADATA', 'LEGITIMATE_DOMAINS', 'RESTRICTED_PATHS',
     
     # File paths
-    'APP_DIR', 'LOG_FILE', 'CONSENT_FILE', 'STATUS_FILE', 'WATCHDOG_TOKEN_FILE',
+    'APP_DIR', 'LOG_FILE', 'CONSENT_FILE', 'STATUS_FILE', 'WATCHDOG_TOKEN_FILE', 'TASK_STATE_FILE',
     
     # GUI configuration
     'WINDOW_WIDTH', 'WINDOW_HEIGHT', 'WINDOW_TITLE', 'TRY_TRAY',

@@ -65,14 +65,110 @@ import os
 import sys
 import subprocess
 import ctypes
+import json
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
+
+from client_constants import TASK_STATE_FILE
 
 # Configuration
 TASK_NAME_BACKGROUND = "CloudHoneypot-Background"
 TASK_NAME_TRAY = "CloudHoneypot-Tray"
-INSTALL_DIR = r"C:\Program Files\YesNext\Cloud Honeypot Client"
-CLIENT_EXE = os.path.join(INSTALL_DIR, "honeypot-client.exe")
+
+def get_client_exe_path():
+    """Get the current executable path dynamically"""
+    if hasattr(sys, '_MEIPASS'):
+        # Running as PyInstaller bundle
+        return sys.executable
+    else:
+        # Running as script, try to find honeypot-client.exe
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_path = os.path.join(script_dir, "honeypot-client.exe")
+        if os.path.exists(exe_path):
+            return exe_path
+        # Fallback to installed location
+        return os.path.join(r"C:\Program Files\YesNext\Cloud Honeypot Client", "honeypot-client.exe")
+
+CLIENT_EXE = get_client_exe_path()
+
+TASK_CACHE_MAX_AGE = 1800  # seconds
+
+
+"""Task state persistence helpers"""
+def _log_or_print(log_func, message):
+    if callable(log_func):
+        try:
+            log_func(message)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
+def load_task_state():
+    return _load_raw_task_state()
+
+
+def _load_raw_task_state():
+    try:
+        with open(TASK_STATE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        print(f"[TaskState] load error: {exc}")
+        return {}
+
+
+def save_task_state(state):
+    data = dict(state or {})
+    data['updated_at'] = int(time.time())
+    try:
+        os.makedirs(os.path.dirname(TASK_STATE_FILE), exist_ok=True)
+        with open(TASK_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        print(f"[TaskState] save error: {exc}")
+
+
+def _should_trust_cache(state, max_age):
+    if not state or not isinstance(state, dict):
+        return False
+    timestamp = state.get('updated_at') or state.get('last_verified')
+    if not timestamp:
+        return False
+    try:
+        timestamp = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    return (time.time() - timestamp) <= max_age
+
+
+def ensure_tasks_installed(log_func=None, force=False, max_age=TASK_CACHE_MAX_AGE):
+    state = load_task_state()
+    if not force and _should_trust_cache(state, max_age) and state.get('both_installed'):
+        cached_status = check_tasks_status(update_cache=True)
+        if cached_status.get('both_installed'):
+            _log_or_print(log_func, "Task Scheduler cache indicates tasks installed; skipping reinstall")
+            return {'success': True, 'action': 'cache', 'status': cached_status}
+
+    status = check_tasks_status(update_cache=True)
+    if status.get('both_installed') and not force:
+        _log_or_print(log_func, "Task Scheduler tasks already configured (verified)")
+        return {'success': True, 'action': 'verified', 'status': status}
+
+    _log_or_print(log_func, "Task Scheduler tasks missing or stale - attempting reinstall")
+    success = install_tasks()
+    if not success:
+        failure_status = check_tasks_status(update_cache=False)
+        return {'success': False, 'action': 'install_failed', 'status': failure_status}
+
+    status_after = check_tasks_status(update_cache=True)
+    if status_after.get('both_installed'):
+        return {'success': True, 'action': 'installed', 'status': status_after}
+    return {'success': False, 'action': 'verification_failed', 'status': status_after}
+
 
 def is_admin():
     """Check if script is running with admin privileges"""
@@ -129,7 +225,7 @@ def create_background_task_xml():
     <Exec>
       <Command>"{CLIENT_EXE}"</Command>
       <Arguments>--mode=daemon --silent</Arguments>
-      <WorkingDirectory>{INSTALL_DIR}</WorkingDirectory>
+      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>'''
@@ -183,7 +279,7 @@ def create_tray_task_xml():
     <Exec>
       <Command>"{CLIENT_EXE}"</Command>
       <Arguments>--mode=tray --silent</Arguments>
-      <WorkingDirectory>{INSTALL_DIR}</WorkingDirectory>
+      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>'''
@@ -329,17 +425,20 @@ def main():
     success &= install_task(TASK_NAME_TRAY, tray_xml)
     
     if success:
-        print("\n✓ All tasks installed successfully")
+        print("\n[OK] All tasks installed successfully")
         verify_tasks()
+        status_summary = check_tasks_status(update_cache=True)
         
         print("\nTask Scheduler setup completed!")
         print("- Background task will start honeypot at boot time")
         print("- Tray task will start GUI when user logs in")
         print("- Both tasks have automatic restart on failure")
+        print(f"- Verification summary: {status_summary}")
         
         return True
     else:
-        print("\n✗ Some tasks could not be installed")
+        print("\n[WARN] Some tasks could not be installed")
+        check_tasks_status(update_cache=True)
         return False
 
 def install_tasks():
@@ -365,16 +464,22 @@ def uninstall_tasks():
         print("✗ Some tasks could not be removed")
         return False
 
-def check_tasks_status():
+def check_tasks_status(update_cache=False):
     """Check if tasks are installed and running"""
     bg_status = verify_task_exists(TASK_NAME_BACKGROUND)
     tray_status = verify_task_exists(TASK_NAME_TRAY)
-    
-    return {
+
+    status = {
         'background_task': bg_status,
         'tray_task': tray_status,
-        'both_installed': bg_status and tray_status
+        'both_installed': bg_status and tray_status,
+        'last_verified': int(time.time())
     }
+
+    if update_cache:
+        save_task_state(status)
+
+    return status
 
 # For backwards compatibility when run as standalone script
 if __name__ == "__main__":

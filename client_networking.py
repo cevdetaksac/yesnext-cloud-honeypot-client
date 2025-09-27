@@ -11,7 +11,6 @@ import json
 import time
 import socket
 import threading
-import requests
 
 # Import constants directly
 from client_constants import DEFAULT_TUNNELS, DASHBOARD_SYNC_INTERVAL, DASHBOARD_SYNC_CHECK, WATCHDOG_INTERVAL

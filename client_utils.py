@@ -7,7 +7,6 @@ import os
 import sys
 import json
 import logging
-import configparser
 import hashlib
 import base64
 import uuid
@@ -18,8 +17,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import subprocess
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Union
-from pathlib import Path
+from typing import Dict, Any, Optional
 
 def get_resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller"""

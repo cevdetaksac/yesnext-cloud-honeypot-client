@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 import logging
 import os
 import platform
@@ -41,7 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter

@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-__version__ = get_from_config("application.version", "2.6.2")
+__version__ = get_from_config("application.version", "2.6.3")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 
 # GitHub repository information
@@ -197,6 +197,9 @@ SECURITY_METADATA = {
 }
 
 # Registry security markers
+# RDP registry key path (without HKEY_LOCAL_MACHINE prefix for reg add command)
+RDP_REGISTRY_KEY_PATH = r"HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+# App registry key path  
 REGISTRY_KEY_PATH = r"SOFTWARE\YesNext\CloudHoneypotClient"
 
 # Legitimate domains for network behavior

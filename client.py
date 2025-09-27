@@ -1181,7 +1181,15 @@ class CloudHoneypotClient:
             try:
                 success = update_mgr.update_with_progress(progress_callback, silent=False)
                 if success:
-                    messagebox.showinfo("Update", "Güncelleme tamamlandı! Yeni sürüm başlatılıyor...")
+                    messagebox.showinfo("Update", "Güncelleme tamamlandı! Yeni sürüm başlatılıyor...\n\nMevcut uygulama kapanacak ve yeni sürüm otomatik başlayacak.")
+                    
+                    # Progress dialog'u kapat
+                    progress_dialog.close_dialog()
+                    
+                    # Kısa bir delay ekle ki kullanıcı mesajı okuyabilsin
+                    import time
+                    time.sleep(2)
+                    
                     # Mevcut uygulamayı kapat
                     try: os._exit(0)
                     except: sys.exit(0)

@@ -1442,14 +1442,25 @@ class InstallerUpdateManager:
                     self.log(f"[UPDATE] Installer hatası: {result.stderr}")
             else:
                 # Interactive mode - subprocess.Popen ile başlat, bekle
-                process = subprocess.Popen(cmd, shell=True)
-                
-                if progress_callback:
-                    progress_callback(90, "Yükleme devam ediyor... (Installer talimatlarını takip edin)")
-                
-                # Process'in tamamlanmasını bekle
-                process.wait()
-                success = process.returncode == 0
+                try:
+                    # Windows'ta shell=False kullanarak doğru başlatma
+                    process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    
+                    if progress_callback:
+                        progress_callback(90, "Yükleme devam ediyor... (Installer talimatlarını takip edin)")
+                    
+                    # Process'in tamamlanmasını bekle
+                    process.wait()
+                    success = process.returncode == 0
+                    
+                    if success:
+                        self.log("[UPDATE] Installer başarıyla tamamlandı")
+                    else:
+                        self.log(f"[UPDATE] Installer return code: {process.returncode}")
+                        
+                except Exception as e:
+                    self.log(f"[UPDATE] Installer çalıştırma hatası: {e}")
+                    success = False
             
             if success:
                 self.log("[UPDATE] Güncelleme başarıyla yüklendi")
@@ -1510,13 +1521,24 @@ class InstallerUpdateManager:
                 if os.path.exists(exe_path):
                     self.log(f"[UPDATE] Yeni sürüm başlatılıyor: {exe_path}")
                     
-                    cmd = [exe_path]
-                    if silent:
-                        cmd.append("--minimized")
-                    
-                    import subprocess
-                    subprocess.Popen(cmd, creationflags=0x08000000)  # CREATE_NO_WINDOW
-                    return True
+                    try:
+                        cmd = [exe_path]
+                        if silent:
+                            cmd.append("--minimized")
+                        
+                        # Detached process olarak başlat
+                        subprocess.Popen(
+                            cmd, 
+                            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
+                            close_fds=True
+                        )
+                        
+                        self.log("[UPDATE] Yeni sürüm başarıyla başlatıldı")
+                        return True
+                        
+                    except Exception as e:
+                        self.log(f"[UPDATE] Başlatma hatası: {e}")
+                        continue
             
             self.log("[UPDATE] Yeni sürüm executable'ı bulunamadı")
             return False
@@ -1568,13 +1590,20 @@ class InstallerUpdateManager:
             success = self.install_update(installer_path, silent, progress_callback)
             
             if success:
+                self.log("[UPDATE] Installer başarıyla tamamlandı, yeni sürüm başlatılıyor...")
+                
                 if progress_callback:
                     progress_callback(90, "Yeni sürüm başlatılıyor...")
                 
                 # Kısa bekleme sonrası yeni sürümü başlat
                 import time
-                time.sleep(2)
-                self.start_new_version(silent)
+                time.sleep(3)  # Biraz daha uzun bekle
+                
+                start_success = self.start_new_version(silent)
+                if start_success:
+                    self.log("[UPDATE] Yeni sürüm başarıyla başlatıldı")
+                else:
+                    self.log("[UPDATE] UYARI: Yeni sürüm otomatik başlatılamadı, manuel başlatın")
                 
                 if progress_callback:
                     progress_callback(100, "Güncelleme tamamlandı")

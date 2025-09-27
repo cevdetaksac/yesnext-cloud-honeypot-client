@@ -216,10 +216,6 @@ def create_background_task_xml():
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartPolicy>
-      <Interval>PT10S</Interval>
-      <Count>5</Count>
-    </RestartPolicy>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -270,10 +266,6 @@ def create_tray_task_xml():
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartPolicy>
-      <Interval>PT10S</Interval>
-      <Count>3</Count>
-    </RestartPolicy>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -300,14 +292,14 @@ def install_task(task_name: str, xml_content: str) -> bool:
         try:
             subprocess.run([
                 'schtasks', '/Delete', '/TN', task_name, '/F'
-            ], capture_output=True, check=False)
+            ], capture_output=True, check=False, encoding='utf-8', errors='ignore')
         except:
             pass
         
         # Create new task
         result = subprocess.run([
             'schtasks', '/Create', '/TN', task_name, '/XML', temp_xml, '/F'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
         
         # Clean up temporary file
         try:
@@ -333,7 +325,7 @@ def uninstall_task(task_name: str) -> bool:
         
         result = subprocess.run([
             'schtasks', '/Delete', '/TN', task_name, '/F'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
         
         if result.returncode == 0:
             print(f"✓ Task {task_name} uninstalled successfully")
@@ -351,7 +343,7 @@ def verify_task_exists(task_name):
     try:
         result = subprocess.run([
             'schtasks', '/Query', '/TN', task_name
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
         return result.returncode == 0
     except Exception:
         return False
@@ -364,7 +356,7 @@ def verify_tasks():
         try:
             result = subprocess.run([
                 'schtasks', '/Query', '/TN', task_name, '/FO', 'LIST'
-            ], capture_output=True, text=True)
+            ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
             
             if result.returncode == 0:
                 print(f"✓ Task {task_name} found and configured")

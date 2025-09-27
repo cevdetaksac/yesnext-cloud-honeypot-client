@@ -21,6 +21,25 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
 
+def get_resource_path(relative_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # If not running from PyInstaller bundle, use current directory
+        base_path = os.path.abspath(".")
+    
+    full_path = os.path.join(base_path, relative_path)
+    
+    # If file doesn't exist in PyInstaller temp, try current directory
+    if not os.path.exists(full_path) and hasattr(sys, '_MEIPASS'):
+        fallback_path = os.path.join(os.path.abspath("."), relative_path)
+        if os.path.exists(fallback_path):
+            return fallback_path
+    
+    return full_path
+
 class ConfigManager:
     """Konfigürasyon yönetimi sınıfı"""
     

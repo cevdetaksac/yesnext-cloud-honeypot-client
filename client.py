@@ -2357,15 +2357,18 @@ class CloudHoneypotClient:
     def tray_make_image(self, active):
         """Load appropriate tray icon based on protection status"""
         try:
+            from client_utils import get_resource_path
+            
             # Determine icon file based on state
             if active:
-                icon_file = "certs/honeypot_active_16.ico"
+                icon_file = get_resource_path("certs/honeypot_active_16.ico")
             else:
-                icon_file = "certs/honeypot_inactive_16.ico"
+                icon_file = get_resource_path("certs/honeypot_inactive_16.ico")
             
             # Try to load from file system first
             if os.path.exists(icon_file):
                 from PIL import Image
+                log(f"Loading tray icon: {icon_file}")
                 return Image.open(icon_file)
             
             # Fallback to programmatic generation
@@ -2403,10 +2406,11 @@ class CloudHoneypotClient:
     
     def update_tray_icon(self):
         """Update tray icon to reflect current protection status"""
+        is_active = bool(self.state.get("selected_rows", []))
+        
+        # Update tray icon
         if TRY_TRAY and self.state.get("tray"):
             try:
-                # Update icon based on current state
-                is_active = bool(self.state.get("selected_rows", []))
                 new_icon = self.tray_make_image(is_active)
                 self.state["tray"].icon = new_icon
                 
@@ -2416,6 +2420,22 @@ class CloudHoneypotClient:
                 
             except Exception as e:
                 log(f"Tray icon update error: {e}")
+                
+        # Update window icon as well
+        if hasattr(self, 'root') and self.root:
+            try:
+                from client_utils import get_resource_path
+                
+                if is_active:
+                    window_icon_path = get_resource_path('certs/honeypot_active_32.ico')
+                else:
+                    window_icon_path = get_resource_path('certs/honeypot_inactive_32.ico')
+                
+                if os.path.exists(window_icon_path):
+                    self.root.iconbitmap(window_icon_path)
+                    
+            except Exception as e:
+                log(f"Window icon update error: {e}")
 
     def tray_loop(self):
         if not TRY_TRAY:
@@ -2765,17 +2785,26 @@ class CloudHoneypotClient:
         
         # Window icon ayarla
         try:
-            self.root.iconbitmap('certs/honeypot.ico')
-            # Taskbar icon için ayrıca PhotoImage ile ayarla
-            try:
-                from PIL import Image, ImageTk
-                img = Image.open('certs/honeypot.ico')
-                photo = ImageTk.PhotoImage(img)
-                self.root.iconphoto(True, photo)
-            except:
-                pass
-        except:
-            pass  # Icon yüklenemezse sessizce devam et
+            from client_utils import get_resource_path
+            
+            # Ana window icon
+            main_icon_path = get_resource_path('certs/honeypot.ico')
+            if os.path.exists(main_icon_path):
+                self.root.iconbitmap(main_icon_path)
+                
+                # Taskbar icon için ayrıca PhotoImage ile ayarla
+                try:
+                    from PIL import Image, ImageTk
+                    img = Image.open(main_icon_path)
+                    photo = ImageTk.PhotoImage(img)
+                    self.root.iconphoto(True, photo)
+                except Exception as e:
+                    log(f"PhotoImage icon error: {e}")
+            else:
+                log(f"Main icon not found: {main_icon_path}")
+                
+        except Exception as e:
+            log(f"Icon setup error: {e}")  # Log the error instead of silent pass
             
         self.root.geometry("820x620")
         self.root.configure(bg="#f5f5f5")

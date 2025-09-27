@@ -1,4 +1,4 @@
-# Cloud Honeypot Client v2.6.1 - Simple Build Script
+# Cloud Honeypot Client v2.6.2 - Simple Build Script
 # Single script to build complete installer
 
 param(
@@ -6,7 +6,7 @@ param(
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.6.1 Builder      " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.6.2 Builder      " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested
@@ -20,7 +20,7 @@ if ($Clean) {
 # Step 1: Build Python executable
 Write-Host "[1/4] Building Python executable..." -ForegroundColor Yellow
 try {
-    & python -m PyInstaller --onefile --noconsole --icon="certs/honeypot.ico" --name="honeypot-client" --distpath="dist" client.py
+    & python -m PyInstaller --onefile --noconsole --icon="certs/honeypot_256.ico" --name="honeypot-client" --distpath="dist" --add-data="certs/*.ico;certs" --add-data="certs/*.png;certs" --add-data="certs/*.bmp;certs" --add-data="client_config.json;." --add-data="client_lang.json;." client.py
     if ($LASTEXITCODE -eq 0) {
         Write-Host "   SUCCESS: Executable built successfully" -ForegroundColor Green
     } else {

@@ -178,19 +178,30 @@ def is_admin():
         return False
 
 def create_background_task_xml():
-    """Create XML for background task (runs at startup)"""
+    """Create XML for background task (runs at startup + every hour watchdog)"""
     xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Date>{datetime.now().isoformat()}</Date>
     <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Background Service</Description>
+    <Description>Cloud Honeypot Client - Background Service with Hourly Watchdog</Description>
   </RegistrationInfo>
   <Triggers>
     <BootTrigger>
       <Enabled>true</Enabled>
       <Delay>PT30S</Delay>
     </BootTrigger>
+    <CalendarTrigger>
+      <StartBoundary>2025-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+      <Repetition>
+        <Interval>PT1H</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </CalendarTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -220,7 +231,7 @@ def create_background_task_xml():
   <Actions Context="Author">
     <Exec>
       <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--mode=daemon --silent</Arguments>
+      <Arguments>--watchdog</Arguments>
       <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
     </Exec>
   </Actions>

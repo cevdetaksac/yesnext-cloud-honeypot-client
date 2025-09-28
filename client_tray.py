@@ -250,11 +250,21 @@ class TrayManager:
         self.minimize_callback = None
         
     def is_protection_active(self) -> bool:
-        """Check if any tunnel protection is currently active - SADECE TÜNELLER"""
-        # Check active tunnel servers (running tunnels)
-        has_active_tunnels = len(self.app_instance.state.get("servers", {})) > 0
+        """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU"""
+        # Gerçek çalışan tünel sunucularını kontrol et
+        active_tunnels_count = 0
+        try:
+            servers = self.app_instance.state.get("servers", {})
+            for port, server_thread in servers.items():
+                if hasattr(server_thread, 'is_running') and server_thread.is_running():
+                    active_tunnels_count += 1
+                elif hasattr(server_thread, 'server') and server_thread.server:
+                    active_tunnels_count += 1
+        except Exception as e:
+            log(f"Protection status check error: {e}")
         
-        log(f"Protection status: active_tunnels={has_active_tunnels}")
+        has_active_tunnels = active_tunnels_count > 0
+        log(f"Protection status: active_tunnels={has_active_tunnels} (count: {active_tunnels_count})")
         return has_active_tunnels
     
     def update_tray_icon(self):
@@ -311,7 +321,21 @@ class TrayManager:
                 
     def exit_app(self):
         """Exit application from tray"""
-        if self.app_instance.state.get("running", False):
+        # Gerçek tünel durumunu kontrol et, sadece state'e güvenme
+        active_tunnels_exist = False
+        try:
+            if hasattr(self.app_instance, 'state') and self.app_instance.state.get("servers"):
+                for port, server_thread in self.app_instance.state["servers"].items():
+                    if hasattr(server_thread, 'is_running') and server_thread.is_running():
+                        active_tunnels_exist = True
+                        break
+                    elif hasattr(server_thread, 'server') and server_thread.server:
+                        active_tunnels_exist = True
+                        break
+        except Exception as e:
+            log(f"[EXIT] Tünel durumu kontrol hatası: {e}")
+        
+        if active_tunnels_exist:
             try:
                 import tkinter.messagebox as messagebox
                 messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first"))

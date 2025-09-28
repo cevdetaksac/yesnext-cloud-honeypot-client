@@ -183,18 +183,36 @@ def check_updates_and_prompt(app_instance) -> bool:
         try:
             success = update_mgr.update_with_progress(progress_callback, silent=False)
             if success:
-                messagebox.showinfo("Update", "Update completed! New version is starting...\n\nCurrent app will close and new version will start automatically.")
-                
                 # Progress dialog'u kapat
                 progress_dialog.close_dialog()
                 
-                # Kısa bir delay ekle ki kullanıcı mesajı okuyabilsin
-                time.sleep(2)
+                messagebox.showinfo("Update", "Update installer is starting...\n\n• Follow installer instructions\n• Current app will close now\n• New version will be installed")
                 
-                # Mevcut uygulamayı kapat
-                try: 
+                # Uygulama kapanmadan önce installer'ın başladığından emin ol
+                import time
+                time.sleep(1)  # Installer'ın başlaması için kısa bekleme
+                
+                # Tray'i kapat (varsa)
+                if hasattr(app_instance, 'tray_manager') and app_instance.tray_manager:
+                    try:
+                        app_instance.tray_manager.cleanup()
+                    except:
+                        pass
+                
+                # GUI pencereyi kapat (varsa)
+                if hasattr(app_instance, 'root') and app_instance.root:
+                    try:
+                        app_instance.root.quit()
+                        app_instance.root.destroy()
+                    except:
+                        pass
+                
+                # Güvenli uygulama kapatma
+                try:
+                    import os
                     os._exit(0)
-                except: 
+                except:
+                    import sys
                     sys.exit(0)
             else:
                 messagebox.showerror("Update", "Update failed")

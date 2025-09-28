@@ -54,31 +54,19 @@ class RDPManager:
         return is_protected
     
     def check_initial_rdp_state(self):
-        """Uygulama başlatıldığında RDP durumunu kontrol et"""
+        """Uygulama başlatıldığında RDP durumunu kontrol et - SADECE DURUM BİLGİSİ"""
         try:
             current_rdp_port = ServiceController.get_rdp_port()
             log(f"🔍 Açılış RDP durumu: Mevcut port={current_rdp_port}, Güvenli port={RDP_SECURE_PORT}")
             
             if current_rdp_port == RDP_SECURE_PORT:
-                log(f"✅ RDP zaten güvenli konumda ({RDP_SECURE_PORT}), koruma aktif")
-                
-                # Güvenli portta ise tünel başlatmaya çalış
-                if self.main_app and hasattr(self.main_app, 'networking_helpers'):
-                    log("🔄 3389 portunda tünel başlatılıyor...")
-                    try:
-                        tunnel_started = self.main_app.networking_helpers.start_tunnel(
-                            3389, "RDP", port_override=RDP_SECURE_PORT, force_start=True
-                        )
-                        if tunnel_started:
-                            log("✅ RDP tüneli başarıyla başlatıldı!")
-                            if hasattr(self.main_app, 'report_tunnel_action_to_api'):
-                                self.main_app.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
-                        else:
-                            log("❌ RDP tüneli başlatılamadı!")
-                    except Exception as e:
-                        log(f"❌ RDP tüneli başlatma hatası: {e}")
+                log(f"📋 RDP güvenli portta ({RDP_SECURE_PORT}) - API kontrolü bekleniyor")
+                log(f"ℹ️  RDP tünel durumu API'den gelecek komutlar ile belirlenecek")
             else:
-                log(f"📍 RDP normal konumda ({current_rdp_port}), koruma pasif")
+                log(f"📋 RDP normal portta ({current_rdp_port}) - API kontrolü bekleniyor")
+                
+            # NOT: Artık otomatik tünel başlatmıyoruz, API reconcile loop işleyecek
+            log(f"� RDP durumu API reconcile döngüsü tarafından yönetilecek")
                 
         except Exception as e:
             log(f"❌ RDP durumu kontrol hatası: {e}")

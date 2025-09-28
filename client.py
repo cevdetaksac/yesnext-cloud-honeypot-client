@@ -2345,7 +2345,8 @@ if __name__ == "__main__":
     parser.add_argument("--minimized", action="store_true", help="Start GUI minimized to tray")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
-    parser.add_argument("--watchdog", type=int, default=None, help="Watchdog process ID")
+    parser.add_argument("--watchdog", action="store_true", help="Run watchdog mode - ensure app is running")
+    parser.add_argument("--watchdog-pid", type=int, default=None, help="Watchdog process ID")
     parser.add_argument("--healthcheck", action="store_true", help="Perform health check and exit")
     args = parser.parse_args()
     
@@ -2356,9 +2357,46 @@ if __name__ == "__main__":
         client_constants.SILENT_ADMIN_ELEVATION = True
         client_constants.SKIP_USER_DIALOGS = True
 
-    # Handle special cases that don't need GUI
-    if args.watchdog is not None:
-        watchdog_main(args.watchdog)
+    # Handle watchdog mode - check if app is running
+    if args.watchdog:
+        from client_helpers import ClientHelpers
+        helper = ClientHelpers()
+        
+        log("Watchdog mode activated - checking if app is running...")
+        
+        try:
+            # Check if main app is running
+            is_running = helper.is_app_running()
+            
+            if not is_running:
+                log("Main app not running, starting new instance...")
+                # Start main app without watchdog flag
+                import subprocess
+                import sys
+                
+                # Get executable path
+                exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
+                
+                # Start main app
+                if getattr(sys, 'frozen', False):
+                    subprocess.Popen([exe_path], 
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                else:
+                    subprocess.Popen([sys.executable, "client.py"], 
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                
+                log("New app instance started successfully")
+            else:
+                log("Main app is already running - no action needed")
+                
+        except Exception as e:
+            log(f"Watchdog error: {e}")
+        
+        sys.exit(0)
+    
+    # Handle special cases that don't need GUI (deprecated watchdog-pid)
+    if args.watchdog_pid is not None:
+        watchdog_main(args.watchdog_pid)
         sys.exit(0)
     
     # Health check mode (for monitoring)

@@ -1458,22 +1458,35 @@ class InstallerUpdateManager:
                 if not success:
                     self.log(f"[UPDATE] Installer hatası: {result.stderr}")
             else:
-                # Interactive mode - subprocess.Popen ile başlat, bekle
+                # Interactive mode - GUI installer'ı doğru şekilde başlat
                 try:
-                    # Windows'ta shell=False kullanarak doğru başlatma
-                    process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    # Windows'ta GUI uygulaması için doğru bayraklar
+                    # DETACHED_PROCESS: Console'dan bağımsız çalışır
+                    # CREATE_NEW_PROCESS_GROUP: Yeni process grubunda çalışır
+                    process = subprocess.Popen(
+                        cmd, 
+                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        shell=False
+                    )
                     
                     if progress_callback:
-                        progress_callback(90, "Yükleme devam ediyor... (Installer talimatlarını takip edin)")
+                        progress_callback(90, "Yükleme devam ediyor... (Installer penceresi açılacak)")
                     
-                    # Process'in tamamlanmasını bekle
-                    process.wait()
-                    success = process.returncode == 0
+                    # Installer'ın başlatıldığından emin olmak için kısa bekleme
+                    import time
+                    time.sleep(2)
                     
-                    if success:
-                        self.log("[UPDATE] Installer başarıyla tamamlandı")
+                    # Process'in çalışıp çalışmadığını kontrol et
+                    if process.poll() is None:
+                        self.log("[UPDATE] Installer başarıyla başlatıldı ve çalışıyor")
+                        success = True
+                        # Not: Installer'ın tamamlanmasını beklemiyoruz, 
+                        # çünkü bizim uygulamamız kapanacak
                     else:
-                        self.log(f"[UPDATE] Installer return code: {process.returncode}")
+                        # Installer hemen kapandı, hata olabilir
+                        return_code = process.returncode
+                        self.log(f"[UPDATE] Installer hemen kapandı, return code: {return_code}")
+                        success = (return_code == 0)
                         
                 except Exception as e:
                     self.log(f"[UPDATE] Installer çalıştırma hatası: {e}")

@@ -104,3 +104,46 @@ class ClientHelpers:
                 button.config(text=text, command=cmd, bg=color)
             except Exception as e:
                 log(f"Button update error: {e}")
+
+    @staticmethod
+    def is_app_running() -> bool:
+        """Check if main app is currently running"""
+        try:
+            import psutil
+            current_pid = os.getpid()
+            
+            # Check for other instances of this app
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['pid'] == current_pid:
+                        continue  # Skip current process
+                    
+                    # Check if it's our executable
+                    if proc.info['name'] and 'honeypot-client' in proc.info['name'].lower():
+                        return True
+                    
+                    # Check command line for python script
+                    if proc.info['cmdline']:
+                        cmdline = ' '.join(proc.info['cmdline'])
+                        if 'client.py' in cmdline and '--watchdog' not in cmdline:
+                            return True
+                            
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            return False
+            
+        except ImportError:
+            log("psutil not available, checking via process name")
+            # Fallback to simpler check
+            try:
+                import subprocess
+                result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq honeypot-client.exe'], 
+                                      capture_output=True, text=True, shell=True)
+                return 'honeypot-client.exe' in result.stdout
+            except Exception as e:
+                log(f"Process check error: {e}")
+                return False
+        except Exception as e:
+            log(f"is_app_running error: {e}")
+            return False

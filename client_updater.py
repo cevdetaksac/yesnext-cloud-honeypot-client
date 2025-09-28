@@ -181,16 +181,20 @@ def check_updates_and_prompt(app_instance) -> bool:
 
         # Güncellemeyi başlat
         try:
+            log("[UPDATER] Güncelleme işlemi başlatılıyor...")
             success = update_mgr.update_with_progress(progress_callback, silent=False)
+            
             if success:
+                log("[UPDATER] Update işlemi başarılı, installer başlatıldı")
                 # Progress dialog'u kapat
                 progress_dialog.close_dialog()
                 
-                messagebox.showinfo("Update", "Update installer is starting...\n\n• Follow installer instructions\n• Current app will close now\n• New version will be installed")
+                messagebox.showinfo("Update", "Update installer başlatıldı!\n\n• Installer penceresi açılacak\n• Kurulum talimatlarını takip edin\n• Mevcut uygulama şimdi kapanacak")
                 
-                # Uygulama kapanmadan önce installer'ın başladığından emin ol
+                # Installer'ın başladığından emin olmak için daha uzun bekleme
+                log("[UPDATER] Installer'ın çalışması için bekleme...")
                 import time
-                time.sleep(1)  # Installer'ın başlaması için kısa bekleme
+                time.sleep(3)  # Installer'ın tamamen başlaması için daha uzun bekleme
                 
                 # Tray'i kapat (varsa)
                 if hasattr(app_instance, 'tray_manager') and app_instance.tray_manager:

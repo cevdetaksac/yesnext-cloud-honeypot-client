@@ -1460,13 +1460,17 @@ class InstallerUpdateManager:
             else:
                 # Interactive mode - GUI installer'ı doğru şekilde başlat
                 try:
-                    # Windows'ta GUI uygulaması için doğru bayraklar
-                    # DETACHED_PROCESS: Console'dan bağımsız çalışır
-                    # CREATE_NEW_PROCESS_GROUP: Yeni process grubunda çalışır
+                    # Method 1: Explorer ile başlat (Windows'ta en güvenilir)
+                    explorer_cmd = ['explorer.exe', installer_path]
+                    self.log(f"[UPDATE] Explorer ile installer başlatılıyor: {' '.join(explorer_cmd)}")
+                    
                     process = subprocess.Popen(
-                        cmd, 
+                        explorer_cmd,
+                        shell=False,
                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                        shell=False
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
                     )
                     
                     if progress_callback:
@@ -1478,19 +1482,42 @@ class InstallerUpdateManager:
                     
                     # Process'in çalışıp çalışmadığını kontrol et
                     if process.poll() is None:
-                        self.log("[UPDATE] Installer başarıyla başlatıldı ve çalışıyor")
+                        self.log("[UPDATE] Explorer ile installer başarıyla başlatıldı")
                         success = True
-                        # Not: Installer'ın tamamlanmasını beklemiyoruz, 
-                        # çünkü bizim uygulamamız kapanacak
                     else:
-                        # Installer hemen kapandı, hata olabilir
-                        return_code = process.returncode
-                        self.log(f"[UPDATE] Installer hemen kapandı, return code: {return_code}")
-                        success = (return_code == 0)
+                        # Explorer hemen kapandı, alternatif yöntem dene
+                        self.log("[UPDATE] Explorer yöntemi başarısız, doğrudan başlatmayı deniyor...")
+                        
+                        # Method 2: Doğrudan başlat (fallback)
+                        direct_process = subprocess.Popen(
+                            cmd,
+                            shell=False,
+                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        
+                        time.sleep(1)
+                        if direct_process.poll() is None:
+                            self.log("[UPDATE] Doğrudan başlatma başarılı")
+                            success = True
+                        else:
+                            self.log(f"[UPDATE] Doğrudan başlatma da başarısız, return code: {direct_process.returncode}")
+                            success = False
                         
                 except Exception as e:
                     self.log(f"[UPDATE] Installer çalıştırma hatası: {e}")
-                    success = False
+                    # Son alternatif: os.startfile
+                    try:
+                        self.log("[UPDATE] Son alternatif: os.startfile ile başlatılıyor...")
+                        import os
+                        os.startfile(installer_path)
+                        success = True
+                        self.log("[UPDATE] os.startfile ile başarıyla başlatıldı")
+                    except Exception as e2:
+                        self.log(f"[UPDATE] os.startfile hatası: {e2}")
+                        success = False
             
             if success:
                 self.log("[UPDATE] Güncelleme başarıyla yüklendi")

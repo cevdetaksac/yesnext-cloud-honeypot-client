@@ -253,42 +253,55 @@ class TrayManager:
         """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU"""
         active_tunnels_count = 0
         
+        log("[TRAY] Protection status kontrol ediliyor...")
+        
         try:
             # 1. Normal tunnel sunucularını kontrol et
             servers = self.app_instance.state.get("servers", {})
+            log(f"[TRAY] Servers state: {list(servers.keys())}")
+            
             for port, server_thread in servers.items():
+                log(f"[TRAY] Port {port} kontrolü - thread: {type(server_thread).__name__}")
+                
                 if hasattr(server_thread, 'is_running') and server_thread.is_running():
                     active_tunnels_count += 1
+                    log(f"[TRAY] ✅ Port {port} - is_running() = True")
                 elif hasattr(server_thread, 'server') and server_thread.server:
                     active_tunnels_count += 1
+                    log(f"[TRAY] ✅ Port {port} - server object exists")
+                else:
+                    log(f"[TRAY] ❌ Port {port} - not active")
                     
             # 2. RDP tunnel durumunu kontrol et (port değil, tunnel aktif mi?)
-            # RDP için özel tunnel kontrolü - port 3389'da çalışan tunnel varsa koruma aktif
             rdp_tunnel_active = False
             if "3389" in servers:
                 server_thread = servers["3389"]
+                log(f"[TRAY] RDP tunnel (3389) thread: {type(server_thread).__name__}")
+                
                 if hasattr(server_thread, 'is_running') and server_thread.is_running():
                     rdp_tunnel_active = True
-                    active_tunnels_count += 1
-                    log(f"RDP tunnel active on port 3389")
+                    log(f"[TRAY] ✅ RDP tunnel ACTIVE (is_running=True)")
                 elif hasattr(server_thread, 'server') and server_thread.server:
                     rdp_tunnel_active = True
-                    active_tunnels_count += 1
-                    log(f"RDP tunnel server active on port 3389")
+                    log(f"[TRAY] ✅ RDP tunnel ACTIVE (server exists)")
+                else:
+                    log(f"[TRAY] ❌ RDP tunnel NOT active")
+            else:
+                log(f"[TRAY] ❌ No RDP tunnel in servers state")
             
             # RDP port durumunu da log'la (bilgi için)
             if hasattr(self.app_instance, 'rdp_manager'):
                 try:
                     is_rdp_on_secure_port, current_port = self.app_instance.rdp_manager.get_rdp_protection_status()
-                    log(f"RDP info: port={current_port}, tunnel_active={rdp_tunnel_active}, secure_port={is_rdp_on_secure_port}")
+                    log(f"[TRAY] RDP info: port={current_port}, tunnel_active={rdp_tunnel_active}, secure_port={is_rdp_on_secure_port}")
                 except Exception as rdp_error:
-                    log(f"RDP info check error: {rdp_error}")
+                    log(f"[TRAY] RDP info check error: {rdp_error}")
                     
         except Exception as e:
-            log(f"Protection status check error: {e}")
+            log(f"[TRAY] Protection status check error: {e}")
         
         has_active_tunnels = active_tunnels_count > 0
-        log(f"Protection status: active_tunnels={has_active_tunnels} (count: {active_tunnels_count})")
+        log(f"[TRAY] 🎯 Final result: active_tunnels={has_active_tunnels} (count: {active_tunnels_count})")
         return has_active_tunnels
     
     def update_tray_icon(self):

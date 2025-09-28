@@ -969,7 +969,10 @@ class CloudHoneypotClient:
             # RDP butonunu güncelle
             self.update_rdp_button()
             
-            log(f"[GUI_SYNC] GUI durumu güncellendi")
+            # Tray ikonunu güncelle
+            self.update_tray_icon()
+            
+            log(f"[GUI_SYNC] GUI ve tray durumu güncellendi")
                 
         except Exception as e:
             log(f"[GUI_SYNC] Senkronizasyon hatası: {e}")

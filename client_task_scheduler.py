@@ -146,19 +146,27 @@ def _should_trust_cache(state, max_age):
 
 
 def ensure_tasks_installed(log_func=None, force=False, max_age=TASK_CACHE_MAX_AGE):
+    # First check admin status
+    admin_rights = is_admin()
+    
     state = load_task_state()
     if not force and _should_trust_cache(state, max_age) and state.get('both_installed'):
         cached_status = check_tasks_status(update_cache=True)
         if cached_status.get('both_installed'):
-            _log_or_print(log_func, "Task Scheduler cache indicates tasks installed; skipping reinstall")
+            _log_or_print(log_func, "✅ Task Scheduler tasks verified (cached)")
             return {'success': True, 'action': 'cache', 'status': cached_status}
 
     status = check_tasks_status(update_cache=True)
     if status.get('both_installed') and not force:
-        _log_or_print(log_func, "Task Scheduler tasks already configured (verified)")
+        _log_or_print(log_func, "✅ Task Scheduler tasks verified (installed)")
         return {'success': True, 'action': 'verified', 'status': status}
 
-    _log_or_print(log_func, "Task Scheduler tasks missing or stale - attempting reinstall")
+    # Tasks missing - check admin rights
+    if not admin_rights:
+        _log_or_print(log_func, "⚠️ Task Scheduler tasks missing but no admin rights - will be installed when run as admin")
+        return {'success': False, 'action': 'needs_admin', 'status': status, 'admin_required': True}
+    
+    _log_or_print(log_func, "🔧 Installing missing Task Scheduler tasks...")
     success = install_tasks()
     if not success:
         failure_status = check_tasks_status(update_cache=False)
@@ -166,6 +174,7 @@ def ensure_tasks_installed(log_func=None, force=False, max_age=TASK_CACHE_MAX_AG
 
     status_after = check_tasks_status(update_cache=True)
     if status_after.get('both_installed'):
+        _log_or_print(log_func, "✅ Task Scheduler tasks successfully installed")
         return {'success': True, 'action': 'installed', 'status': status_after}
     return {'success': False, 'action': 'verification_failed', 'status': status_after}
 

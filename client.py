@@ -259,17 +259,17 @@ class CloudHoneypotClient:
         self.reconciliation_lock = threading.Lock()
         self.rdp_transition_complete = threading.Event()
         
-        # Initialize RDP Management modules
-        self.rdp_manager = RDPManager(main_app=self)
-        self.rdp_popup_manager = RDPPopupManager(main_app=self, translation_func=self.t)
-        
-        # Initialize application state
+        # Initialize application state FIRST
         self.state = {
             "running": False, "servers": {}, "threads": [], "token": None,
             "public_ip": None, "tray": None, "selected_rows": [],
             "selected_ports_map": None, "ctrl_sock": None,
             "reconciliation_paused": False, "remote_desired": {}
         }
+        
+        # Initialize RDP Management modules
+        self.rdp_manager = RDPManager(main_app=self)
+        self.rdp_popup_manager = RDPPopupManager(main_app=self, translation_func=self.t)
         
         # Load token early - before any API operations
         try:
@@ -294,6 +294,37 @@ class CloudHoneypotClient:
         # Check initial RDP state and report to API
         # RDP modülünü kullanarak başlangıç durumunu kontrol et
         self.rdp_manager.check_initial_rdp_state()
+        
+        # Ensure Task Scheduler tasks are installed (including hourly watchdog)
+        try:
+            log("🔧 Verifying Task Scheduler registrations...")
+            from client_task_scheduler import ensure_tasks_installed
+            result = ensure_tasks_installed(log_func=log, force=False)
+            
+            if result.get('success'):
+                log("✅ Task Scheduler verification successful")
+            elif result.get('admin_required'):
+                # Detaylı durum bilgisi ver
+                status = result.get('status', {})
+                tray_ok = status.get('tray_task', False)
+                bg_ok = status.get('background_task', False)
+                
+                missing_tasks = []
+                if not tray_ok:
+                    missing_tasks.append("Tray (startup)")
+                if not bg_ok:
+                    missing_tasks.append("Background (watchdog)")
+                
+                if missing_tasks:
+                    log(f"⚠️ Missing task(s): {', '.join(missing_tasks)} - requires admin installation")
+                    # Store for GUI notification
+                    self.state["missing_tasks"] = missing_tasks
+                else:
+                    log("✅ All Task Scheduler tasks present")
+            else:
+                log(f"⚠️ Task Scheduler setup issue: {result.get('action', 'unknown')}")
+        except Exception as e:
+            log(f"Task Scheduler check error: {e}")
 
     def monitor_user_sessions(self):
         """Monitor for user logon sessions in daemon mode"""

@@ -167,7 +167,7 @@ def check_updates_and_prompt(app_instance) -> bool:
         if not messagebox.askyesno("Update", f"New version {latest_ver} available. Update now?"):
             return False
 
-        # Progress dialog oluştur
+                # Progress dialog oluştur
         root = getattr(app_instance, 'root', None)
         progress_dialog = UpdateProgressDialog(root, "Güncelleme")
         if not progress_dialog.create_dialog():
@@ -185,18 +185,32 @@ def check_updates_and_prompt(app_instance) -> bool:
             success = update_mgr.update_with_progress(progress_callback, silent=False)
             
             if success:
-                log("[UPDATER] Update işlemi başarılı, installer başlatıldı")
+                log("[UPDATER] ✅ Update başarılı - installer Downloads klasöründe")
                 # Progress dialog'u kapat
                 progress_dialog.close_dialog()
                 
-                messagebox.showinfo("Update", "Update installer başlatıldı!\n\n• Installer penceresi açılacak\n• Kurulum talimatlarını takip edin\n• Mevcut uygulama şimdi kapanacak")
+                # Downloads klasörü yolunu göster
+                import os
+                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+                version = getattr(update_mgr, '_latest_version', latest_ver)
+                installer_name = f"cloud-client-installer-v{version}.exe"
                 
-                # Installer'ın başladığından emin olmak için daha uzun bekleme
-                log("[UPDATER] Installer'ın çalışması için bekleme...")
+                messagebox.showinfo(
+                    "Güncelleme Hazır", 
+                    f"✅ Installer başarıyla indirildi!\n\n"
+                    f"📁 Konum: {downloads_dir}\n"
+                    f"📄 Dosya: {installer_name}\n\n"
+                    f"🔧 Kurulum:\n"
+                    f"1. Installer otomatik açılacak (veya Downloads klasöründen çalıştırın)\n"
+                    f"2. 'Yönetici olarak çalıştır' seçin\n"  
+                    f"3. Kurulum açık uygulamaları otomatik kapatır\n"
+                    f"4. Mevcut uygulama şimdi kapanacak"
+                )
+                
+                # Installer'ın çalıştığından emin olmak için bekleme
+                log("[UPDATER] Installer için bekleme...")
                 import time
-                time.sleep(3)  # Installer'ın tamamen başlaması için daha uzun bekleme
-                
-                # Tray'i kapat (varsa)
+                time.sleep(2)                # Tray'i kapat (varsa)
                 if hasattr(app_instance, 'tray_manager') and app_instance.tray_manager:
                     try:
                         app_instance.tray_manager.cleanup()

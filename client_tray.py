@@ -251,15 +251,39 @@ class TrayManager:
         
     def is_protection_active(self) -> bool:
         """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU"""
-        # Gerçek çalışan tünel sunucularını kontrol et
         active_tunnels_count = 0
+        
         try:
+            # 1. Normal tunnel sunucularını kontrol et
             servers = self.app_instance.state.get("servers", {})
             for port, server_thread in servers.items():
                 if hasattr(server_thread, 'is_running') and server_thread.is_running():
                     active_tunnels_count += 1
                 elif hasattr(server_thread, 'server') and server_thread.server:
                     active_tunnels_count += 1
+                    
+            # 2. RDP tunnel durumunu kontrol et (port değil, tunnel aktif mi?)
+            # RDP için özel tunnel kontrolü - port 3389'da çalışan tunnel varsa koruma aktif
+            rdp_tunnel_active = False
+            if "3389" in servers:
+                server_thread = servers["3389"]
+                if hasattr(server_thread, 'is_running') and server_thread.is_running():
+                    rdp_tunnel_active = True
+                    active_tunnels_count += 1
+                    log(f"RDP tunnel active on port 3389")
+                elif hasattr(server_thread, 'server') and server_thread.server:
+                    rdp_tunnel_active = True
+                    active_tunnels_count += 1
+                    log(f"RDP tunnel server active on port 3389")
+            
+            # RDP port durumunu da log'la (bilgi için)
+            if hasattr(self.app_instance, 'rdp_manager'):
+                try:
+                    is_rdp_on_secure_port, current_port = self.app_instance.rdp_manager.get_rdp_protection_status()
+                    log(f"RDP info: port={current_port}, tunnel_active={rdp_tunnel_active}, secure_port={is_rdp_on_secure_port}")
+                except Exception as rdp_error:
+                    log(f"RDP info check error: {rdp_error}")
+                    
         except Exception as e:
             log(f"Protection status check error: {e}")
         
@@ -321,17 +345,23 @@ class TrayManager:
                 
     def exit_app(self):
         """Exit application from tray"""
-        # Gerçek tünel durumunu kontrol et, sadece state'e güvenme
+        # Gerçek tünel durumunu kontrol et - TÜNEL AKTIF Mİ, PORT DURUMU DEĞİL
         active_tunnels_exist = False
         try:
             if hasattr(self.app_instance, 'state') and self.app_instance.state.get("servers"):
-                for port, server_thread in self.app_instance.state["servers"].items():
+                servers = self.app_instance.state["servers"]
+                
+                # Tüm aktif tunnelleri kontrol et
+                for port, server_thread in servers.items():
                     if hasattr(server_thread, 'is_running') and server_thread.is_running():
                         active_tunnels_exist = True
+                        log(f"[EXIT] Aktif tunnel bulundu: port {port}")
                         break
                     elif hasattr(server_thread, 'server') and server_thread.server:
                         active_tunnels_exist = True
+                        log(f"[EXIT] Aktif tunnel server bulundu: port {port}")
                         break
+                        
         except Exception as e:
             log(f"[EXIT] Tünel durumu kontrol hatası: {e}")
         

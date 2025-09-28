@@ -956,6 +956,10 @@ class CloudHoneypotClient:
                     rdp_btn.config(text=new_text, bg="#2196F3", fg="white")
                 
                 log(f"🔄 RDP butonu güncellendi: {new_text}")
+                
+                # Tray ikonunu da güncelle
+                self.update_tray_icon()
+                
         except Exception as e:
             log(f"❌ RDP buton güncelleme hatası: {e}")
 
@@ -1188,35 +1192,33 @@ class CloudHoneypotClient:
                     log("⚠️ RDP Registry'de güvenli portta ama 3389 hala dolu")
                     log("📋 Muhtemel neden: Windows Terminal Services registry değişikliğini tanımadı")
                     log("🔍 Bilinen Windows bug'ı: Registry port değişse de Terminal Services eski portu bırakmaz")
-                    log(f"💡 Çözüm önerileri: 1) Agresif temizleme 2) Sistem yeniden başlatma 3) TermService zorla restart")
                     
                     if manual_action:
-                        # Manuel başlatma - kullanıcıya sistem yeniden başlatma önerisi
-                        log("🔄 Manuel başlatma tespit edildi - kullanıcıya yeniden başlatma önerisi")
+                        # Manuel başlatma - kullanıcıya uyarı göster
+                        log("🔄 Manuel RDP tünel başlatma - 3389 port çakışması uyarısı gösteriliyor")
                         
-                        # Agresif temizleme başarısızsa normal sistem yeniden başlatma önerisi
-                        log("🔄 Agresif yöntemler işe yaramadı - kullanıcıya yeniden başlatma önerisi")
-                        
-                        # Sistem yeniden başlatma popup'ı göster
-                        def show_reboot_suggestion():
+                        # Port çakışması uyarısı
+                        def show_port_conflict_warning():
                             import tkinter as tk
                             from tkinter import messagebox
                             
-                            # Ana pencereyi gizle
                             root = tk.Tk()
                             root.withdraw()
                             
                             message = (
-                                "RDP Güvenlik sistemi aktif ancak Windows sistem sorunu nedeniyle\\n"
-                                "3389 portu henüz boşalmadı.\\n\\n"
-                                "Sorunun çözümü için:\\n"
-                                "1. Bilgisayarı yeniden başlatın\\n"
-                                "2. Veya 'RDP: 3389 dönüş' butonunu kullanarak normal porta döndürün\\n\\n"
-                                "Sistem yeniden başlatmak istiyor musunuz?"
+                                "RDP Tünel Başlatma Sorunu\\n\\n"
+                                f"RDP portu güvenli porta ({RDP_SECURE_PORT}) taşınmış\\n"
+                                "ancak 3389 portunda hala bir uygulama dinliyor.\\n\\n"
+                                "Bu durum Windows Terminal Services bug'ından kaynaklanır.\\n\\n"
+                                "Çözüm seçenekleri:\\n"
+                                "1. 3389 portunu dinleyen uygulamaları kapatın\\n"
+                                "2. Cihazı yeniden başlatın (önerilen)\\n"
+                                "3. Terminal Services'ı yeniden başlatın\\n\\n"
+                                "Cihazı şimdi yeniden başlatmak istiyor musunuz?"
                             )
                             
                             result = messagebox.askyesno(
-                                "RDP Port Sorunu", 
+                                "Port Çakışması", 
                                 message,
                                 icon='warning'
                             )
@@ -1226,13 +1228,13 @@ class CloudHoneypotClient:
                             if result:  # Yes seçildiyse
                                 log("🔄 Kullanıcı sistem yeniden başlatmayı onayladı")
                                 import subprocess
-                                subprocess.run(['shutdown', '/r', '/t', '30', '/c', 'RDP port sorunu için sistem yeniden başlatılıyor...'])
+                                subprocess.run(['shutdown', '/r', '/t', '30', '/c', 'RDP port çakışması sorunu için sistem yeniden başlatılıyor...'])
                             else:
                                 log("👤 Kullanıcı sistem yeniden başlatmayı reddetti")
                         
                         # UI thread'de popup göster
                         import threading
-                        threading.Thread(target=show_reboot_suggestion, daemon=True).start()
+                        threading.Thread(target=show_port_conflict_warning, daemon=True).start()
                     else:
                         log("🤖 API başlatma - port çakışması nedeniyle başarısız")
                     
@@ -1245,8 +1247,49 @@ class CloudHoneypotClient:
                 if is_3389_in_use:
                     log(f"⚠️ RDP standart portta (3389) ve port dolu - tünel başlatma için port geçişi gerekli")
                     if manual_action:
-                        log(f"🔄 Kullanıcı onayı ile RDP port geçişi başlatılacak")
-                        # Manual action akışını devam ettir
+                        log(f"🔄 Kullanıcı RDP tünel başlatmak istiyor ama port 3389'da - kullanıcıya uyarı")
+                        
+                        # Kullanıcıya RDP port taşıma uyarısı göster
+                        import tkinter as tk
+                        from tkinter import messagebox
+                        
+                        def show_rdp_port_warning():
+                            root = tk.Tk()
+                            root.withdraw()
+                            
+                            message = (
+                                "RDP Tünel Başlatma Hatası\\n\\n"
+                                "RDP tüneli başlatmak için 3389 portu boş olmalıdır.\\n"
+                                "Şu anda RDP servisi 3389 portunda çalışıyor.\\n\\n"
+                                "Çözüm:\\n"
+                                "• 'RDP Taşı' butonunu kullanarak RDP portunu\\n"
+                                f"  güvenli porta ({RDP_SECURE_PORT}) taşıyın\\n"
+                                "• Ardından RDP tünelini tekrar başlatın\\n\\n"
+                                "RDP portunu şimdi taşımak istiyor musunuz?"
+                            )
+                            
+                            result = messagebox.askyesno(
+                                "RDP Port Uyarısı", 
+                                message,
+                                icon='warning'
+                            )
+                            
+                            root.destroy()
+                            
+                            if result:  # Yes seçildiyse
+                                log("👤 Kullanıcı RDP port taşımayı onayladı")
+                                # RDP port taşıma işlemini başlat
+                                self.toggle_rdp_protection()
+                            else:
+                                log("👤 Kullanıcı RDP port taşımayı reddetti")
+                        
+                        # UI thread'de popup göster
+                        import threading
+                        threading.Thread(target=show_rdp_port_warning, daemon=True).start()
+                        
+                        with self.reconciliation_lock:
+                            self.state["reconciliation_paused"] = False
+                        return False
                     else:
                         log(f"❌ Otomatik mod - port dolu olduğu için tünel başlatılamaz")
                         with self.reconciliation_lock:

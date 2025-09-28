@@ -211,7 +211,15 @@ class HoneypotAPIClient:
                         health_data = response.json()
                         if health_data.get("status") == "ok":
                             client_count = health_data.get("clients", 0)
-                            self.log(f"API connection successful - {client_count} clients registered")
+                            
+                            # OpenCanary servis durumunu da kontrol et
+                            canary_status = health_data.get("opencanary_status", "unknown")
+                            self.log(f"API connection successful - {client_count} clients registered, OpenCanary: {canary_status}")
+                            
+                            # Eğer OpenCanary çalışmıyorsa uyarı ver
+                            if canary_status != "running":
+                                self.log(f"⚠️ WARNING: OpenCanary service is not running! Status: {canary_status}")
+                                
                             return True
                     except ValueError:
                         self.log("API health check succeeded but returned invalid JSON")

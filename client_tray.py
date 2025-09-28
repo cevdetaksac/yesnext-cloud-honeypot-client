@@ -249,9 +249,30 @@ class TrayManager:
         self.show_callback = None
         self.minimize_callback = None
         
+    def check_opencanary_status(self) -> tuple[bool, str]:
+        """OpenCanary servis durumunu kontrol et"""
+        try:
+            # API üzerinden health check yap
+            if hasattr(self.app_instance, 'api_client'):
+                # Health check yaparken OpenCanary status'u da gelir
+                is_healthy = self.app_instance.api_client.check_connection(max_attempts=1, delay=1)
+                if is_healthy:
+                    # Şimdilik API bağlantısı varsa OpenCanary çalışıyor sayıyoruz
+                    # TODO: Gerçek OpenCanary status endpoint'i eklenmeli sunucu tarafında
+                    return True, "api_connected"
+                else:
+                    return False, "api_unreachable"
+            else:
+                return False, "no_api_client"
+                
+        except Exception as e:
+            log(f"[TRAY] OpenCanary status check error: {e}")
+            return False, f"error: {e}"
+
     def is_protection_active(self) -> bool:
-        """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU"""
+        """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU + OPENCANARY"""
         active_tunnels_count = 0
+        has_active_tunnels = False
         
         log("[TRAY] Protection status kontrol ediliyor...")
         
@@ -296,11 +317,37 @@ class TrayManager:
                     log(f"[TRAY] RDP info: port={current_port}, tunnel_active={rdp_tunnel_active}, secure_port={is_rdp_on_secure_port}")
                 except Exception as rdp_error:
                     log(f"[TRAY] RDP info check error: {rdp_error}")
+            
+            # 3. Temel tünel kontrolü
+            has_active_tunnels = active_tunnels_count > 0
+            
+            # 4. OpenCanary servis durumunu kontrol et (sadece tünel varsa)
+            if has_active_tunnels:
+                try:
+                    canary_ok, canary_status = self.check_opencanary_status()
+                    log(f"[TRAY] OpenCanary status: {canary_status}")
+                    
+                    if not canary_ok:
+                        log(f"[TRAY] ⚠️ WARNING: Tunnels active but OpenCanary check failed! Status: {canary_status}")
+                        # API erişilemiyor - güvenlik için korumalı değil say
+                        has_active_tunnels = False
+                    else:
+                        # API çalışıyor - OpenCanary büyük ihtimalle çalışıyor
+                        # Ancak status unknown ise warning ver
+                        if canary_status == "api_connected":
+                            log(f"[TRAY] ✅ Tunnels active and API accessible - Protection considered ACTIVE")
+                        else:
+                            log(f"[TRAY] ⚠️ WARNING: OpenCanary status unclear: {canary_status}")
+                            
+                except Exception as canary_error:
+                    log(f"[TRAY] OpenCanary check failed: {canary_error}")
+                    # OpenCanary check edilemediği için güvenli tarafta kal
+                    has_active_tunnels = False
                     
         except Exception as e:
             log(f"[TRAY] Protection status check error: {e}")
+            has_active_tunnels = False
         
-        has_active_tunnels = active_tunnels_count > 0
         log(f"[TRAY] 🎯 Final result: active_tunnels={has_active_tunnels} (count: {active_tunnels_count})")
         return has_active_tunnels
     

@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-__version__ = get_from_config("application.version", "2.6.6")
+__version__ = get_from_config("application.version", "2.6.7")
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 
 # GitHub repository information

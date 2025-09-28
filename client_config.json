@@ -1,7 +1,7 @@
 {
   "application": {
     "name": "Cloud Honeypot Client",
-    "version": "2.6.9",
+    "version": "2.7.1",
     "author": "YesNext Technology"
   },
   "language": {
@@ -74,9 +74,9 @@
       },
       {
         "local": 22,
-        "remote": 0,
+        "remote": 2222,
         "service": "SSH",
-        "enabled": false
+        "enabled": true
       }
     ]
   },

@@ -1140,7 +1140,7 @@ def load_config() -> dict:
                 {"local": 1433, "remote": 0, "service": "MSSQL", "enabled": False},
                 {"local": 3306, "remote": 0, "service": "MySQL", "enabled": False},
                 {"local": 21, "remote": 0, "service": "FTP", "enabled": False},
-                {"local": 22, "remote": 0, "service": "SSH", "enabled": False}
+                {"local": 22, "remote": 2222, "service": "SSH", "enabled": False}
             ]
         },
         "updates": {

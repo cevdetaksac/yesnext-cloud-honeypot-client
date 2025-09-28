@@ -183,6 +183,22 @@ class NetworkingHelpers:
                     pass
 
     @staticmethod
+    def get_honeypot_target_port(client_port: int, service_name: str) -> int:
+        """
+        Map client listen ports to honeypot target ports
+        SSH özel durumu: Client'ta port 22 → Honeypot'ta port 2222
+        Diğer servisler: Aynı port numarası kullanılır
+        """
+        service_upper = service_name.upper()
+        
+        # SSH özel durumu - Client port 22 → Honeypot port 2222
+        if service_upper == "SSH" and client_port == 22:
+            return 2222
+        
+        # Diğer servisler için mevcut port mapping mantığı
+        return client_port
+
+    @staticmethod
     def handle_incoming_connection(app, local_sock, listen_port: str, service_name: str):
         """Handle incoming connection and forward to honeypot"""
         try:
@@ -200,14 +216,24 @@ class NetworkingHelpers:
             return
 
         try:
+            # Port mapping - client listen port'u sunucudaki honeypot port'una map et
+            target_port = NetworkingHelpers.get_honeypot_target_port(int(listen_port), service_name)
+            
             handshake = {
                 "op": "open", "token": app.state.get("token"),
                 "client_ip": app.state.get("public_ip") or ClientHelpers.get_public_ip(),
                 "hostname": SERVER_NAME, "service": service_name,
-                "listen_port": int(listen_port), "attacker_ip": attacker_ip,
+                "listen_port": int(listen_port), 
+                "target_port": target_port,  # Sunucuda hangi honeypot portuna yönlendirilecek
+                "attacker_ip": attacker_ip,
                 "attacker_port": attacker_port
             }
-            log(f"[{service_name}:{listen_port}] Honeypot'a gönderilen handshake: {json.dumps(handshake, indent=2)}")
+            # Log port mapping bilgisi
+            if target_port != int(listen_port):
+                log(f"[{service_name}:{listen_port}] Port mapping: Client {listen_port} -> Honeypot {target_port}")
+            
+            log(f"[{service_name}:{listen_port}] Saldırgan bağlantısı: {attacker_ip}:{attacker_port}")
+            log(f"[{service_name}:{listen_port}] Handshake gönderiliyor: service={service_name}, target_port={target_port}")
             NetworkingHelpers.send_json(remote, handshake)
             log(f"[{service_name}:{listen_port}] Handshake başarıyla gönderildi - Hedef: {HONEYPOT_IP}:{HONEYPOT_TUNNEL_PORT}")
         except Exception as e:

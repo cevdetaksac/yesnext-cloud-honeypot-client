@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-CLIENT_VERSION = "2.7.1"
+CLIENT_VERSION = "2.7.2"
 __version__ = CLIENT_VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 
@@ -168,8 +168,8 @@ SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
 API_RETRY_INTERVAL = 60          # API connection retry interval
 HEARTBEAT_INTERVAL = 60          # Heartbeat send interval
 ATTACK_COUNT_REFRESH = 10        # Attack count refresh interval (in seconds, converted to ms)
-DASHBOARD_SYNC_INTERVAL = 8      # Dashboard tunnel sync interval
-DASHBOARD_SYNC_CHECK = 3         # Dashboard sync check frequency
+DASHBOARD_SYNC_INTERVAL = 30     # Dashboard tunnel sync interval (increased for stability)
+DASHBOARD_SYNC_CHECK = 5         # Dashboard sync check frequency
 RECONCILE_LOOP_INTERVAL = 600    # Old reconcile loop interval (10 minutes)
 API_STARTUP_DELAY = 5            # API startup delay (5 seconds)
 RDP_TRANSITION_TIMEOUT = 120     # RDP transition timeout

@@ -1436,6 +1436,12 @@ class CloudHoneypotClient:
             except Exception:
                 pass
         
+        # Tünel başlatma sırasında geçici olarak sync'i duraklat
+        if manual_action:
+            with self.reconciliation_lock:
+                self.state["reconciliation_paused"] = True
+                log(f"{service} tünel başlatma için API senkronizasyonu geçici olarak duraklatıldı.")
+        
         st = TunnelServerThread(self, listen_port, service)
         st.start(); time.sleep(0.15)
         if st.is_alive():
@@ -1461,6 +1467,12 @@ class CloudHoneypotClient:
             
             threading.Thread(target=notify_and_resume, daemon=True).start()
             return True
+        else:
+            # Tünel başlatılamadı - pause'i kaldır
+            if manual_action:
+                with self.reconciliation_lock:
+                    self.state["reconciliation_paused"] = False
+                log(f"❌ {service} tüneli başlatılamadı - API senkronizasyonu devam ediyor")
         
         try: messagebox.showerror(self.t("error"), self.t("port_busy_error"))
         except: pass

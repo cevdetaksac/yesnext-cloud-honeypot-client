@@ -84,6 +84,13 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     DetailPrint "Configuring Windows Defender exclusions..."
     nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "try { Add-MpPreference -ExclusionPath \"$INSTDIR\" -Force; Add-MpPreference -ExclusionProcess \"$INSTDIR\honeypot-client.exe\" -Force; Write-Host \"Defender exclusions added\" } catch { Write-Host \"Could not add defender exclusions\" }"'
     
+    ; Clean up any existing Task Scheduler tasks for fresh installation
+    DetailPrint "Cleaning up existing Task Scheduler tasks..."
+    nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask | Where-Object { $$_.TaskName -like \"CloudHoneypot*\" } | Unregister-ScheduledTask -Confirm:$$false -ErrorAction SilentlyContinue"'
+    ; Also clean legacy task names
+    nsExec::ExecToLog 'schtasks /delete /tn "Cloud Honeypot Client" /f'
+    nsExec::ExecToLog 'schtasks /delete /tn "HoneypotClientAutostart" /f'
+    
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     
@@ -100,8 +107,15 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoRepair" 1
     
+    ; Create Task Scheduler tasks for production deployment
+    DetailPrint "Setting up Task Scheduler tasks for auto-startup..."
+    nsExec::ExecToLog '"$INSTDIR\honeypot-client.exe" --create-tasks --silent'
+    
+    ; Wait for task creation
+    Sleep 2000
+    
     DetailPrint "Installation completed successfully!"
-    DetailPrint "Note: Auto-startup will be configured by the application on first run."
+    DetailPrint "Task Scheduler tasks configured for reliable auto-startup."
     
 SectionEnd
 
@@ -114,8 +128,9 @@ Section "Uninstall"
     nsExec::ExecToLog 'taskkill /f /im honeypot-client.exe'
     Sleep 2000
     
-    ; Remove scheduled tasks
+    ; Remove all scheduled tasks (current and legacy names)
     DetailPrint "Removing scheduled tasks..."
+    nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask | Where-Object { $$_.TaskName -like \"CloudHoneypot*\" } | Unregister-ScheduledTask -Confirm:$$false -ErrorAction SilentlyContinue"'
     nsExec::ExecToLog 'schtasks /delete /tn "Cloud Honeypot Client" /f'
     nsExec::ExecToLog 'schtasks /delete /tn "HoneypotClientAutostart" /f'
     

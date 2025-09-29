@@ -253,9 +253,15 @@ def check_updates_and_prompt(app_instance) -> bool:
     return True
 
 def check_updates_and_apply_silent() -> bool:
-    """Silent update with installer-based system"""
+    """Silent update with installer-based system - SERVER SAFE VERSION"""
     try:
         from client_utils import create_update_manager
+        import tempfile
+        import subprocess
+        import shutil
+        import time
+        
+        log("[SILENT UPDATE] Starting server-safe silent update process...")
         
         # Update manager oluştur
         update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
@@ -264,29 +270,154 @@ def check_updates_and_apply_silent() -> bool:
         update_info = update_mgr.check_for_updates()
         
         if update_info.get("error") or not update_info.get("has_update"):
+            log("[SILENT UPDATE] No updates available")
             return False
             
-        log(f"[SILENT UPDATE] Yeni sürüm bulundu: {update_info['latest_version']}")
+        log(f"[SILENT UPDATE] New version found: {update_info['latest_version']}")
         
-        # Sessiz güncellemeyi başlat
-        success = update_mgr.update_with_progress(silent=True)
-        if success:
-            log("[SILENT UPDATE] Güncelleme tamamlandı, uygulama yeniden başlatılıyor")
-            # Kısa süre bekle ve çık
-            time.sleep(1)
-            try: 
+        # Create temp directory for update files
+        temp_dir = tempfile.mkdtemp(prefix="honeypot_update_")
+        log(f"[SILENT UPDATE] Using temp directory: {temp_dir}")
+        
+        try:
+            # Download installer to temp directory
+            installer_path = os.path.join(temp_dir, "honeypot-installer.exe")
+            
+            # Get download URL
+            download_url = update_info.get('download_url')
+            if not download_url:
+                log("[SILENT UPDATE] No download URL found in update info")
+                return False
+            
+            # Download the installer
+            download_success = download_installer_file(download_url, installer_path)
+            if not download_success:
+                log("[SILENT UPDATE] Installer download failed")
+                return False
+                
+            log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
+            
+            # Create batch script for server-safe update process
+            batch_script = create_server_safe_update_script(installer_path, temp_dir)
+            
+            # Execute the update process
+            log("[SILENT UPDATE] Starting server-safe installer process...")
+            
+            # Run installer with SYSTEM privileges in silent mode
+            cmd = [
+                installer_path,
+                "/S",  # Silent install
+                "/NCRC"  # Skip CRC check for speed
+            ]
+            
+            result = subprocess.run(cmd, 
+                                  capture_output=True, 
+                                  text=True, 
+                                  timeout=300,  # 5 minute timeout
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            if result.returncode == 0:
+                log("[SILENT UPDATE] Installer completed successfully")
+                log("[SILENT UPDATE] New version installed - tasks will be recreated on startup")
+                
+                # Cleanup temp files
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                
+                # Exit - the new version will be started by task scheduler
+                log("[SILENT UPDATE] Update process completed - exiting for restart")
+                time.sleep(1)
                 os._exit(0)
-            except: 
-                sys.exit(0)
-        else:
-            log("[SILENT UPDATE] Güncelleme başarısız")
+                
+            else:
+                log(f"[SILENT UPDATE] Installer failed with code: {result.returncode}")
+                log(f"[SILENT UPDATE] Installer stdout: {result.stdout}")
+                log(f"[SILENT UPDATE] Installer stderr: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            log(f"[SILENT UPDATE] Update process error: {e}")
             return False
+            
+        finally:
+            # Cleanup temp directory
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except:
+                pass
             
     except Exception as e:
-        log(f"silent update error: {e}")
+        log(f"[SILENT UPDATE] Silent update error: {e}")
         return False
     
     return True
+
+def download_installer_file(url: str, local_path: str) -> bool:
+    """Download installer file from URL"""
+    try:
+        import requests
+        
+        log(f"[SILENT UPDATE] Downloading installer from: {url}")
+        
+        response = requests.get(url, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        with open(local_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                
+        file_size = os.path.getsize(local_path)
+        log(f"[SILENT UPDATE] Downloaded {file_size} bytes to {local_path}")
+        
+        return True
+        
+    except Exception as e:
+        log(f"[SILENT UPDATE] Download error: {e}")
+        return False
+
+def create_server_safe_update_script(installer_path: str, temp_dir: str) -> str:
+    """Create batch script for server-safe update process"""
+    try:
+        batch_content = f'''@echo off
+REM Cloud Honeypot Client - Server Safe Update Script
+REM This script handles task cleanup and reinstallation during updates
+
+echo [SILENT UPDATE] Starting server-safe update process...
+
+REM Stop all existing tasks (if running)
+echo [SILENT UPDATE] Stopping existing tasks...
+schtasks /end /tn "CloudHoneypot-Background" 2>nul
+schtasks /end /tn "CloudHoneypot-Tray" 2>nul  
+schtasks /end /tn "CloudHoneypot-Watchdog" 2>nul
+schtasks /end /tn "CloudHoneypot-Updater" 2>nul
+schtasks /end /tn "CloudHoneypot-SilentUpdater" 2>nul
+
+REM Wait a moment for tasks to stop
+timeout /t 3 /nobreak >nul
+
+REM Run installer silently
+echo [SILENT UPDATE] Running installer...
+"{installer_path}" /S /NCRC
+
+REM Wait for installer to complete
+timeout /t 10 /nobreak >nul
+
+echo [SILENT UPDATE] Update script completed
+'''
+        
+        batch_path = os.path.join(temp_dir, "update_script.bat")
+        with open(batch_path, 'w') as f:
+            f.write(batch_content)
+            
+        log(f"[SILENT UPDATE] Created update script: {batch_path}")
+        return batch_path
+        
+    except Exception as e:
+        log(f"[SILENT UPDATE] Script creation error: {e}")
+        return ""
 
 def update_watchdog_loop():
     """Hourly update checker loop"""

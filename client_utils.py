@@ -1495,14 +1495,38 @@ class InstallerUpdateManager:
                     # Method 1: os.startfile (Windows'ta en basit ve güvenilir)
                     try:
                         import os
+                        self.log(f"[UPDATE] os.startfile ile başlatılıyor: {installer_path}")
+                        self.log(f"[UPDATE] Dosya var mı? {os.path.exists(installer_path)}")
+                        self.log(f"[UPDATE] Dosya boyutu: {os.path.getsize(installer_path) if os.path.exists(installer_path) else 'N/A'}")
+                        
                         os.startfile(installer_path)
-                        self.log("[UPDATE] ✅ os.startfile ile installer başarıyla başlatıldı")
-                        success = True
+                        self.log("[UPDATE] ✅ os.startfile komutu çalıştırıldı")
+                        
+                        # Installer'ın gerçekten başlayıp başlamadığını kontrol et
+                        time.sleep(2)
+                        
+                        # Process listesinde installer var mı kontrol et
+                        installer_running = False
+                        try:
+                            import subprocess
+                            tasklist = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {os.path.basename(installer_path)}'], 
+                                                    capture_output=True, text=True, timeout=5)
+                            if os.path.basename(installer_path) in tasklist.stdout:
+                                installer_running = True
+                                self.log("[UPDATE] ✅ Installer process aktif olarak çalışıyor")
+                            else:
+                                self.log("[UPDATE] ⚠️ Installer process bulunamadı")
+                        except:
+                            self.log("[UPDATE] ⚠️ Process kontrolü yapılamadı")
                         
                         if progress_callback:
-                            progress_callback(95, "Installer başlatıldı! (Downloads klasöründe)")
+                            if installer_running:
+                                progress_callback(95, "Installer başlatıldı ve çalışıyor! (Downloads klasöründe)")
+                            else:
+                                progress_callback(90, "Installer başlatma denendi, Downloads klasörünü kontrol edin")
                         
-                        time.sleep(3)  # Installer'ın açılması için bekle
+                        success = True  # os.startfile başarılı oldu
+                        time.sleep(1)  # Ek bekleme
                         
                     except Exception as e:
                         self.log(f"[UPDATE] os.startfile hatası: {e}")
@@ -1531,19 +1555,42 @@ class InstallerUpdateManager:
                         except Exception as e2:
                             self.log(f"[UPDATE] subprocess hatası: {e2}")
                             
-                            # Method 3: Explorer ile klasörü aç (son çare)
+                            # Method 3: ShellExecute ile admin yetkileri (Windows API)
                             try:
-                                downloads_dir = os.path.dirname(installer_path)
-                                self.log(f"[UPDATE] Son alternatif: Downloads klasörü açılıyor: {downloads_dir}")
+                                self.log("[UPDATE] ShellExecute (Windows API) yöntemi deneniyor...")
+                                import subprocess
                                 
-                                os.startfile(downloads_dir)
-                                success = True  # En azından klasörü açtık
+                                # ShellExecute ile "runas" (yönetici yetkisi) kullan
+                                result = subprocess.run([
+                                    'powershell', '-Command', 
+                                    f'Start-Process -FilePath "{installer_path}" -Verb RunAs'
+                                ], capture_output=True, text=True, timeout=10)
                                 
-                                self.log("[UPDATE] ⚠️ Downloads klasörü açıldı, installer'ı manuel çalıştırın")
-                                
+                                if result.returncode == 0:
+                                    self.log("[UPDATE] ✅ ShellExecute ile installer başarıyla başlatıldı")
+                                    success = True
+                                else:
+                                    self.log(f"[UPDATE] ShellExecute hatası: {result.stderr}")
+                                    
                             except Exception as e3:
-                                self.log(f"[UPDATE] Klasör açma hatası: {e3}")
-                                success = False
+                                self.log(f"[UPDATE] ShellExecute hatası: {e3}")
+                                
+                                # Method 4: Explorer ile klasörü aç (son çare)
+                                try:
+                                    downloads_dir = os.path.dirname(installer_path)
+                                    self.log(f"[UPDATE] Son alternatif: Downloads klasörü açılıyor: {downloads_dir}")
+                                    
+                                    os.startfile(downloads_dir)
+                                    success = True  # En azından klasörü açtık
+                                    
+                                    if progress_callback:
+                                        progress_callback(85, f"Downloads klasörü açıldı - {os.path.basename(installer_path)} dosyasını manuel çalıştırın")
+                                    
+                                    self.log("[UPDATE] ⚠️ Downloads klasörü açıldı, installer'ı manuel çalıştırın")
+                                    
+                                except Exception as e4:
+                                    self.log(f"[UPDATE] Klasör açma hatası: {e4}")
+                                    success = False
                                 
                 except Exception as main_error:
                     self.log(f"[UPDATE] Ana installer başlatma hatası: {main_error}")
@@ -1553,16 +1600,21 @@ class InstallerUpdateManager:
                 self.log("[UPDATE] Güncelleme başarıyla yüklendi")
                 
                 if progress_callback:
-                    progress_callback(95, "Temizlik yapılıyor...")
+                    progress_callback(95, "Güncelleme tamamlandı")
                 
-                # Temp dosyayı temizle
-                try:
-                    os.remove(installer_path)
-                    temp_dir = os.path.dirname(installer_path)
-                    if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                        os.rmdir(temp_dir)
-                except:
-                    pass
+                # Downloads klasöründeki dosyayı silme - kullanıcı manuel çalıştırabilir
+                # Sadece temp klasördeyse sil
+                if "temp" in installer_path.lower() or "tmp" in installer_path.lower():
+                    try:
+                        os.remove(installer_path)
+                        temp_dir = os.path.dirname(installer_path)
+                        if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                            os.rmdir(temp_dir)
+                        self.log("[UPDATE] Temp dosyalar temizlendi")
+                    except:
+                        pass
+                else:
+                    self.log(f"[UPDATE] Installer Downloads klasöründe korundu: {installer_path}")
                 
                 return True
             else:
@@ -1677,17 +1729,22 @@ class InstallerUpdateManager:
             success = self.install_update(installer_path, silent, progress_callback)
             
             if success:
-                self.log("[UPDATE] ✅ Installer başarıyla başlatıldı!")
+                self.log("[UPDATE] ✅ Installer işlemi tamamlandı!")
                 
                 if progress_callback:
-                    progress_callback(100, "Installer başlatıldı! Downloads klasöründe bulabilirsiniz.")
+                    # Daha açık mesaj - kullanıcı ne yapması gerektiğini bilsin
+                    downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")  
+                    version = getattr(self, '_latest_version', 'latest')
+                    installer_name = f"cloud-client-installer-v{version}.exe"
+                    progress_callback(100, f"✅ {installer_name} Downloads klasörüne indirildi. Lütfen çalıştırın.")
                 
-                # Installer başlatıldıktan sonra eski sürümü kapatalım
-                self.log("[UPDATE] Installer çalışıyor, eski uygulama kapanacak...")
+                # Installer hakkında detaylı bilgi
+                self.log(f"[UPDATE] Kullanıcı Downloads klasöründeki installer'ı manuel çalıştırabilir")
                 return True
             else:
+                self.log("[UPDATE] ❌ Installer başlatılamadı, manuel müdahale gerekli")
                 if progress_callback:
-                    progress_callback(0, "Installer başlatılamadı - Downloads klasörünü kontrol edin")
+                    progress_callback(0, "❌ Installer otomatik başlatılamadı. Downloads klasöründeki .exe dosyasını manuel çalıştırın.")
                 return False
                 
         except Exception as e:

@@ -159,6 +159,8 @@ def get_operation_mode(args) -> str:
     """Determine operation mode from arguments - SIMPLIFIED"""
     if getattr(args, 'mode', None) == "daemon" or getattr(args, 'daemon', False):
         return DAEMON_MODE
+    elif getattr(args, 'mode', None) == "watchdog" or getattr(args, 'watchdog', False):
+        return "watchdog"
     else:
         # Both default and tray mode use GUI_MODE
         # The difference is handled in the tray_mode flag
@@ -694,13 +696,7 @@ class CloudHoneypotClient:
         self.state["ctrl_sock"] = s
         threading.Thread(target=self.control_server_loop, args=(s,), daemon=True).start()
 
-    # ---------- TLS & Tunnel Management ---------- #
-        # Network methods moved to NetworkingHelpers
-
-        # Tunnel sync loop moved to TunnelManager
-
-# ---------- Watchdog & Persistence ---------- #
-        # Tunnel watchdog moved to TunnelManager
+    # ---------- Watchdog & Persistence ---------- #
 
     def write_status(self, active_rows, running: bool = True):
         """Write current status to persistent storage"""
@@ -1084,6 +1080,11 @@ class CloudHoneypotClient:
             state[svc] = item
         return state
 
+    def get_active_tunnels(self) -> list:
+        """Get list of currently active tunnels for tray status detection"""
+        from client_networking import TunnelManager
+        return TunnelManager.get_active_tunnels(self)
+
         # Tunnel state sync moved to TunnelManager
 
 
@@ -1165,11 +1166,6 @@ class CloudHoneypotClient:
         #     service: Servis adı
         #     manual_action: Kullanıcı tarafından tetiklenip tetiklenmediği
         
-        # Critical operations require admin privileges
-        if service.upper() in ['RDP', 'SSH', 'MYSQL', 'MSSQL']:
-            if not self.require_admin_for_operation(f"{service} Tüneli Başlatma"):
-                return False
-            
         # RDP için her zaman 3389 tünellenir, koruma aktif olsa bile
         if service.upper() == 'RDP':
             listen_port = '3389'
@@ -1194,7 +1190,7 @@ class CloudHoneypotClient:
                 if not is_3389_in_use:
                     log(f"✅ RDP güvenli portta ({RDP_SECURE_PORT}), 3389 boş - tünel başlatılıyor...")
                     
-                    # 3389'da tünel başlat
+                    # 3389'da tünel başlat (REACTIVE APPROACH)
                     st = TunnelServerThread(self, listen_port, service)
                     st.start()
                     time.sleep(0.15)
@@ -1217,6 +1213,41 @@ class CloudHoneypotClient:
                             self.state["reconciliation_paused"] = False
                         return True
                     else:
+                        # RDP tüneli başarısız - admin yetki ile tekrar deneyelim
+                        log("❌ RDP tüneli normal yetki ile başlatılamadı")
+                        
+                        if manual_action:
+                            log("🔓 RDP için admin yetki ile tünel başlatma deneniyor")
+                            
+                            if self.require_admin_for_operation(f"RDP Tüneli Başlatma (Port 3389)"):
+                                log("✅ Admin yetki alındı - RDP tüneli yeniden deneniyor")
+                                
+                                st_admin = TunnelServerThread(self, listen_port, service)
+                                st_admin.start()
+                                time.sleep(0.15)
+                                
+                                if st_admin.is_alive():
+                                    log("✅ RDP tüneli admin yetki ile başarıyla başlatıldı")
+                                    self.state["servers"][int(listen_port)] = st_admin
+                                    self.write_status(self._active_rows_from_servers(), running=True)
+                                    self.state["running"] = True
+                                    self.update_tray_icon()
+                                    self.send_heartbeat_once("online")
+                                    self._update_row_ui(listen_port, service, True)
+                                    self.state["remote_desired"][service_upper] = "started"
+                                    
+                                    # API'ye koruma aktif bilgisini gönder
+                                    log("✅ RDP tüneli (admin) başarıyla başlatıldı - API'ye bildirim gönderiliyor")
+                                    self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
+                                    
+                                    with self.reconciliation_lock:
+                                        self.state["reconciliation_paused"] = False
+                                    return True
+                                else:
+                                    log("❌ RDP tüneli admin yetki ile de başlatılamadı!")
+                            else:
+                                log("👤 Kullanıcı RDP admin yetki vermeyi reddetti")
+                        
                         log("❌ RDP tüneli başlatılamadı!")
                         with self.reconciliation_lock:
                             self.state["reconciliation_paused"] = False
@@ -1442,9 +1473,11 @@ class CloudHoneypotClient:
                 self.state["reconciliation_paused"] = True
                 log(f"{service} tünel başlatma için API senkronizasyonu geçici olarak duraklatıldı.")
         
+        # REACTIVE APPROACH: Try to start tunnel first, request admin if fails
         st = TunnelServerThread(self, listen_port, service)
         st.start(); time.sleep(0.15)
         if st.is_alive():
+            # Tunnel started successfully
             self.state["servers"][int(listen_port)] = st
             self.write_status(self._active_rows_from_servers(), running=True)
             self.state["running"] = True
@@ -1468,6 +1501,56 @@ class CloudHoneypotClient:
             threading.Thread(target=notify_and_resume, daemon=True).start()
             return True
         else:
+            # Tunnel failed to start - check if admin privileges might help
+            log(f"❌ {service} tüneli normal yetki ile başlatılamadı")
+            
+            # Check if this might be a permission issue (port < 1024 or specific ports)
+            port_num = int(listen_port)
+            needs_admin_retry = (
+                port_num < 1024 or  # Well-known ports
+                port_num in [3389, 1433, 3306] or  # Common admin-required ports
+                service.upper() in ['RDP', 'SSH', 'MSSQL', 'MYSQL', 'FTP']  # Critical services
+            )
+            
+            if needs_admin_retry and manual_action:  # Only for manual user actions
+                log(f"🔓 Admin yetki ile tünel başlatma deneniyor: {service} port {listen_port}")
+                
+                # Request admin privileges for this specific operation
+                if self.require_admin_for_operation(f"{service} Tüneli Başlatma (Port {listen_port})"):
+                    log(f"✅ Admin yetki alındı - {service} tüneli yeniden deneniyor")
+                    
+                    # Retry tunnel start with admin privileges
+                    st_admin = TunnelServerThread(self, listen_port, service)
+                    st_admin.start(); time.sleep(0.15)
+                    
+                    if st_admin.is_alive():
+                        log(f"✅ {service} tüneli admin yetki ile başarıyla başlatıldı")
+                        self.state["servers"][int(listen_port)] = st_admin
+                        self.write_status(self._active_rows_from_servers(), running=True)
+                        self.state["running"] = True
+                        self.update_tray_icon(); self.send_heartbeat_once("online")
+                        self._update_row_ui(listen_port, service, True)
+                        self.state["remote_desired"][service_upper] = "started"
+                        
+                        # GUI buton durumunu güncelle
+                        self.sync_gui_with_tunnel_state()
+                        
+                        # Report to API and wait for confirmation
+                        def notify_and_resume_admin():
+                            try:
+                                self.report_tunnel_action_to_api(service, 'start', p2)
+                            finally:
+                                time.sleep(3)
+                                with self.reconciliation_lock:
+                                    self.state["reconciliation_paused"] = False
+                        
+                        threading.Thread(target=notify_and_resume_admin, daemon=True).start()
+                        return True
+                    else:
+                        log(f"❌ {service} tüneli admin yetki ile de başlatılamadı")
+                else:
+                    log(f"👤 Kullanıcı admin yetki vermeyi reddetti: {service}")
+            
             # Tünel başlatılamadı - pause'i kaldır
             if manual_action:
                 with self.reconciliation_lock:
@@ -1633,11 +1716,7 @@ class CloudHoneypotClient:
         
         result = report_tunnel_action_api(self.api_request, token, service, action, new_port, log)
         
-        # Update local cache on success
-        if result:
-            self.active_tunnels = getattr(self, "active_tunnels", {})
-            self.active_tunnels.setdefault(str(service or "").upper(), {})\
-                .update({"running": action == "start", "new_port": new_port})
+        # Local cache removed - TunnelManager handles state tracking
         
         return result
 
@@ -1745,103 +1824,14 @@ class CloudHoneypotClient:
         return s
 
     def _is_service_running(self, listen_port: int, service_name: str) -> bool:
-        try:
-            st = self.state["servers"].get(int(listen_port))
-            if not st:
-                return False
-            return str(st.service_name or '').upper() == str(service_name or '').upper()
-        except Exception:
-            return False
+        """Check if service is running on specific port - delegates to TunnelManager"""
+        from client_networking import TunnelManager
+        return TunnelManager.is_service_running_by_port(self, listen_port, service_name)
 
     def reconcile_remote_tunnels_loop(self):
-        # Uzaktan tünel yönetimi döngüsü - API ile senkronizasyonu sağlar
-        log("Uzaktan yönetim döngüsü başlatıldı.")
-        while True:
-            try:
-                with self.reconciliation_lock:
-                    if self.state.get("reconciliation_paused"):
-                        log("Senkronizasyon duraklatıldı, bekleniyor...")
-                        time.sleep(1)
-                        continue
-
-                token = self.state.get("token")
-                if not token:
-                    log("Token bulunamadı, bekleniyor...")
-                    time.sleep(15)
-                    continue
-
-                # Hedef durumu API'den al
-                response = self.api_request("GET", "premium/tunnel-status", params={"token": token})
-                if not response:
-                    log("Tünel durumları alınamadı - Sunucu yanıt vermedi")
-                    time.sleep(15)
-                    continue
-
-                if not isinstance(response, dict):
-                    log(f"Geçersiz API yanıt formatı: {response}")
-                    time.sleep(15)
-                    continue
-
-                data = response
-                if data:
-                    log(f"API'den hedef durum alındı: {data}")
-                if data:
-                    log(f"API'den hedef durum alındı: {data}")
-
-                # expected: { 'RDP': {listen_port:3389, desired:'started'|'stopped', new_port:53389}, ... }
-                order = [("RDP",3389), ("MSSQL",1433), ("MYSQL",3306), ("FTP",21), ("SSH",22)]
-                for svc_u, lp in order:
-                    entry = data.get(svc_u)
-                    if not isinstance(entry, dict):
-                        continue
-                    desired = (entry.get('desired') or 'stopped').lower()
-                    running = self._is_service_running(lp, svc_u)
-                    prev = self.state["remote_desired"].get(svc_u)
-                    if prev == desired and ((desired=='started' and running) or (desired=='stopped' and not running)):
-                        continue
-
-                    if desired == 'started' and not running:
-                        log(f"API komutu: '{svc_u}' servisi başlatılıyor.")
-                        try:
-                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != RDP_SECURE_PORT:
-                                ServiceController.switch_rdp_port(RDP_SECURE_PORT)
-                            newp = entry.get('new_port') or (RDP_SECURE_PORT if svc_u=='RDP' else '-')
-                            self.start_single_row(str(lp), str(newp), self._normalize_service(svc_u))
-                            # Update UI state and tray icon - tuple formatında ekle
-                            port_tuple = (str(lp), str(newp), svc_u)
-                            if port_tuple not in self.state["selected_rows"]:
-                                self.state["selected_rows"].append(port_tuple)
-                            self._update_row_ui(str(lp), svc_u, True)
-                            self.update_tray_icon()
-                        except Exception as e:
-                            log(f"remote start {svc_u} err: {e}")
-                    elif desired == 'stopped' and running:
-                        log(f"API komutu: '{svc_u}' servisi durduruluyor.")
-                        try:
-                            self.stop_single_row(str(lp), str(entry.get('new_port') or '-'), self._normalize_service(svc_u))
-                            if svc_u == 'RDP' and ServiceController.get_rdp_port() != 3389:
-                                ServiceController.switch_rdp_port(3389)
-                            # Update UI state and tray icon - tuple formatında kaldır
-                            newp = str(entry.get('new_port') or '-')
-                            port_tuple = (str(lp), newp, svc_u)
-                            # Tuple'ı kaldırmak için listeyi filtrele
-                            self.state["selected_rows"] = [
-                                row for row in self.state["selected_rows"] 
-                                if not (isinstance(row, (list, tuple)) and len(row) >= 3 and row[0] == str(lp) and row[2].upper() == svc_u.upper())
-                            ]
-                            self._update_row_ui(str(lp), svc_u, False)
-                            self.update_tray_icon()
-                        except Exception as e:
-                            log(f"remote stop {svc_u} err: {e}")
-                    self.state["remote_desired"][svc_u] = desired
-                # push current status back so dashboard sees up-to-date state
-                try:
-                    self.report_tunnel_status_once()
-                except Exception:
-                    pass
-            except Exception as e:
-                log(f"reconcile_remote_tunnels err: {e}")
-            time.sleep(RECONCILE_LOOP_INTERVAL)  # Yeni tunnel_sync_loop kullandığımız için seyrek çalışsın
+        """Remote tunnel reconciliation - delegates to TunnelManager"""
+        from client_networking import TunnelManager
+        TunnelManager.reconcile_remote_tunnels_loop(self)
 
     # ---------- Tray Management (Modularized) ---------- #
     def initialize_tray_manager(self):
@@ -2430,13 +2420,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     
     # Simplified mode system
-    parser.add_argument("--mode", choices=["daemon", "tray"], help="Operation mode: daemon (background service), tray (tray-only mode). Default is GUI mode.")
+    parser.add_argument("--mode", choices=["daemon", "tray", "watchdog"], help="Operation mode: daemon (background service), tray (tray-only mode), watchdog (hourly process check). Default is GUI mode.")
     parser.add_argument("--minimized", action="store_true", help="Start GUI minimized to tray")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
     parser.add_argument("--watchdog", action="store_true", help="Run watchdog mode - ensure app is running")
     parser.add_argument("--watchdog-pid", type=int, default=None, help="Watchdog process ID")
     parser.add_argument("--healthcheck", action="store_true", help="Perform health check and exit")
+    parser.add_argument("--silent-update-check", action="store_true", help="Silent update check mode - check for updates and install automatically")
+    parser.add_argument("--create-tasks", action="store_true", help="Create Task Scheduler tasks and exit (for installer)")
     args = parser.parse_args()
     
     # Set global silent mode if requested
@@ -2480,6 +2472,60 @@ if __name__ == "__main__":
                 
         except Exception as e:
             log(f"Watchdog error: {e}")
+        
+        sys.exit(0)
+    
+    # Handle silent update check mode
+    if args.silent_update_check:
+        log("Silent update check mode activated - checking for updates...")
+        try:
+            # Import update manager
+            from client_updater import UpdateManager
+            
+            # Set silent mode
+            import client_constants
+            client_constants.SILENT_ADMIN_ELEVATION = True
+            client_constants.SKIP_USER_DIALOGS = True
+            
+            # Initialize update manager
+            update_mgr = UpdateManager()
+            
+            # Perform silent update check and install
+            result = update_mgr.check_for_updates_silent()
+            
+            if result:
+                log("Silent update completed successfully - application will restart")
+                # Note: If update was installed, check_for_updates_silent() calls os._exit(0)
+            else:
+                log("No updates available or silent update failed")
+                
+        except Exception as e:
+            log(f"Silent update check error: {e}")
+        
+        sys.exit(0)
+    
+    # Handle task creation mode (for installer)
+    if args.create_tasks:
+        log("Task creation mode activated - setting up Task Scheduler tasks...")
+        try:
+            # Import task scheduler
+            from client_task_scheduler import install_all_tasks
+            
+            # Set silent mode
+            import client_constants
+            client_constants.SILENT_ADMIN_ELEVATION = True
+            client_constants.SKIP_USER_DIALOGS = True
+            
+            # Create all tasks including silent updater
+            result = install_all_tasks(include_silent_updater=True)
+            
+            if result:
+                log("Task Scheduler tasks created successfully")
+            else:
+                log("Task Scheduler task creation failed")
+                
+        except Exception as e:
+            log(f"Task creation error: {e}")
         
         sys.exit(0)
     
@@ -2625,6 +2671,42 @@ if __name__ == "__main__":
             except:
                 pass
             sys.exit(1)  # Exit code 1 = Unhandled exception
+        
+        sys.exit(0)
+    
+    elif operation_mode == "watchdog":
+        # ===== WATCHDOG MODE - Hourly process monitoring and restart =====
+        try:
+            log("=== WATCHDOG MODE STARTUP ===")
+            
+            from client_helpers import ClientHelpers
+            helper = ClientHelpers()
+            
+            log("Watchdog mode activated - checking if background daemon is running...")
+            
+            # Check if daemon is running
+            is_running = helper.is_daemon_running()
+            
+            if not is_running:
+                log("Background daemon not running, starting new daemon instance...")
+                
+                # Get executable path
+                exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
+                
+                # Start daemon mode
+                if getattr(sys, 'frozen', False):
+                    subprocess.Popen([exe_path, "--mode=daemon", "--silent"], 
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                else:
+                    subprocess.Popen([sys.executable, "client.py", "--mode=daemon", "--silent"], 
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                
+                log("New daemon instance started successfully")
+            else:
+                log("Background daemon is already running - watchdog check passed")
+                
+        except Exception as e:
+            log(f"Watchdog error: {e}")
         
         sys.exit(0)
     

@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-CLIENT_VERSION = "2.7.2"
+CLIENT_VERSION = "2.7.3"
 __version__ = CLIENT_VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
 

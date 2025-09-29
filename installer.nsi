@@ -1,5 +1,5 @@
-; Cloud Honeypot Client Installer Script - v2.7.5
-; Auto-elevating installer
+; Cloud Honeypot Client Installer Script - v2.7.8
+; Auto-elevating installer with auto-start capability
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
@@ -11,7 +11,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 2
 !define VERSIONMINOR 7
-!define VERSIONBUILD 5
+!define VERSIONBUILD 8
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 RequestExecutionLevel admin
@@ -32,12 +32,8 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
-; Finish page
-!define MUI_FINISHPAGE_NOAUTOCLOSE
-!define MUI_FINISHPAGE_NOREBOOTSUPPORT
-!define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Start Cloud Honeypot Client now"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.7.5 installation completed successfully.$\r$\n$\r$\nThe application will configure auto-startup settings on first run.$\r$\n$\r$\nNo system restart required."
+; Finish page - Auto-start configuration
+!define MUI_FINISHPAGE_TEXT "✅ Cloud Honeypot Client v2.7.8 installed successfully$\r$\n$\r$\n🚀 Application will start automatically$\r$\n📱 Desktop shortcut has been created$\r$\n⚡ System is ready for security monitoring$\r$\n$\r$\nInstaller will close automatically..."
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -131,8 +127,23 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoRepair" 1
     
+    ; Create shortcuts
+    DetailPrint "Creating desktop and start menu shortcuts..."
+    CreateShortCut "$DESKTOP\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot-client.exe" 0 SW_SHOWNORMAL "" "Cloud Honeypot Client - System Security Monitor"
+    CreateDirectory "$SMPROGRAMS\${COMPANYNAME}"
+    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "" "$INSTDIR\honeypot-client.exe" 0 SW_SHOWNORMAL "" "Cloud Honeypot Client"
+    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0 SW_SHOWNORMAL "" "Uninstall Cloud Honeypot Client"
+    
     DetailPrint "Installation completed successfully!"
-    DetailPrint "Tasks will be created and managed automatically when application starts."
+    DetailPrint "Starting Cloud Honeypot Client automatically..."
+    
+    ; Auto-start the application
+    ExecShell "" "$INSTDIR\honeypot-client.exe" "" SW_SHOWNORMAL
+    Sleep 2000  ; Give app time to start
+    
+    DetailPrint "✅ Cloud Honeypot Client started successfully"
+    DetailPrint "✅ Desktop shortcut created"
+    DetailPrint "Tasks will be configured automatically on first run."
     
 SectionEnd
 
@@ -154,6 +165,13 @@ Section "Uninstall"
     ; Remove Windows Defender exclusions
     DetailPrint "Removing Windows Defender exclusions..."
     nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "try { Remove-MpPreference -ExclusionPath \"$INSTDIR\" -Force; Remove-MpPreference -ExclusionProcess \"$INSTDIR\honeypot-client.exe\" -Force } catch { }"'
+    
+    ; Remove shortcuts
+    DetailPrint "Removing shortcuts..."
+    Delete "$DESKTOP\Cloud Honeypot Client.lnk"
+    Delete "$SMPROGRAMS\${COMPANYNAME}\Cloud Honeypot Client.lnk"
+    Delete "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk"
+    RMDir "$SMPROGRAMS\${COMPANYNAME}"
     
     ; Remove files
     DetailPrint "Removing application files..."

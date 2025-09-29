@@ -191,7 +191,8 @@ def show_completion_dialog(installer_path: str, version: str):
                 # PowerShell admin escalation ile başlat
                 # Installer kendi task management'ini yapacak
                 cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
-                subprocess.run(cmd, shell=True, check=False)
+                subprocess.run(cmd, shell=True, check=False,
+                              creationflags=subprocess.CREATE_NO_WINDOW)
                 
                 messagebox.showinfo(
                     "Installer Başlatıldı",
@@ -299,7 +300,8 @@ def show_completion_dialog(installer_path: str, version: str):
         if result:
             try:
                 cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
-                subprocess.run(cmd, shell=True, check=False)
+                subprocess.run(cmd, shell=True, check=False,
+                              creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception as e2:
                 messagebox.showerror("Hata", f"Installer başlatılamadı: {e2}")
 

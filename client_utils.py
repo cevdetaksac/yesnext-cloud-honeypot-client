@@ -461,7 +461,8 @@ class NetworkUtils:
                 f"ping -n 1 -w {timeout * 1000} {host}",
                 shell=True,
                 capture_output=True,
-                text=True
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             return result.returncode == 0
         except Exception:
@@ -914,7 +915,8 @@ def is_process_running_windows(pid: int) -> bool:
         try:
             # tasklist fallback
             result = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
             return str(pid) in result.stdout
         except:
             return False
@@ -1042,9 +1044,11 @@ def watchdog_main(parent_pid: int, log_func=None):
             try:
                 # Yeni instance başlat
                 if getattr(sys, 'frozen', False):
-                    subprocess.Popen([sys.executable], shell=False)
+                    subprocess.Popen([sys.executable], shell=False,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
                 else:
-                    subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])], shell=False)
+                    subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])], shell=False,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
                 time.sleep(10)  # Başlamasını bekle
             except Exception as e:
                 log_func(f"[watchdog] Restart error: {e}")
@@ -1527,7 +1531,8 @@ class InstallerUpdateManager:
                             
                             installer_name = os.path.basename(installer_path)
                             tasklist = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {installer_name}'], 
-                                                    capture_output=True, text=True, timeout=5)
+                                                    capture_output=True, text=True, timeout=5,
+                                                    creationflags=subprocess.CREATE_NO_WINDOW)
                             
                             if installer_name in tasklist.stdout:
                                 self.log("[UPDATE] ✅ Installer process aktif!")

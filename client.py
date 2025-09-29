@@ -312,7 +312,8 @@ class CloudHoneypotClient:
             try:
                 # Check for active user sessions
                 result = subprocess.run(['query', 'session'], 
-                                      capture_output=True, text=True, timeout=10)
+                                      capture_output=True, text=True, timeout=10,
+                                      creationflags=subprocess.CREATE_NO_WINDOW)
                 
                 # Look for Active sessions (interactive logon)
                 active_sessions = []
@@ -2099,7 +2100,8 @@ class CloudHoneypotClient:
             messagebox.showinfo(self.t("info"), self.t("restart_needed_lang"))
             exe = ClientHelpers.current_executable()
             try:
-                subprocess.Popen([exe] + sys.argv[1:], shell=False)
+                subprocess.Popen([exe] + sys.argv[1:], shell=False,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 pass
             os._exit(0)
@@ -2429,10 +2431,10 @@ if __name__ == "__main__":
                 # Start main app
                 if getattr(sys, 'frozen', False):
                     subprocess.Popen([exe_path], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
                 else:
                     subprocess.Popen([sys.executable, "client.py"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
                 
                 log("New app instance started successfully")
             else:
@@ -2653,10 +2655,10 @@ if __name__ == "__main__":
                 # Start daemon mode
                 if getattr(sys, 'frozen', False):
                     subprocess.Popen([exe_path, "--mode=daemon", "--silent"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
                 else:
                     subprocess.Popen([sys.executable, "client.py", "--mode=daemon", "--silent"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
                 
                 log("New daemon instance started successfully")
             else:

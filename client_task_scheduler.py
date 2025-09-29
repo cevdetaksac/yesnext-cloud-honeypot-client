@@ -511,14 +511,16 @@ def install_task(task_name: str, xml_content: str) -> bool:
         try:
             subprocess.run([
                 'schtasks', '/Delete', '/TN', task_name, '/F'
-            ], capture_output=True, check=False, encoding='utf-8', errors='ignore')
+            ], capture_output=True, check=False, encoding='utf-8', errors='ignore',
+            creationflags=subprocess.CREATE_NO_WINDOW)
         except:
             pass
         
         # Create new task
         result = subprocess.run([
             'schtasks', '/Create', '/TN', task_name, '/XML', temp_xml, '/F'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         # Clean up temporary file
         try:
@@ -544,7 +546,8 @@ def uninstall_task(task_name: str) -> bool:
         
         result = subprocess.run([
             'schtasks', '/Delete', '/TN', task_name, '/F'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         if result.returncode == 0:
             print(f"[OK] Task {task_name} uninstalled successfully")
@@ -562,7 +565,8 @@ def verify_task_exists(task_name):
     try:
         result = subprocess.run([
             'schtasks', '/Query', '/TN', task_name
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         return result.returncode == 0
     except Exception:
         return False
@@ -575,7 +579,8 @@ def verify_tasks():
         try:
             result = subprocess.run([
                 'schtasks', '/Query', '/TN', task_name, '/FO', 'LIST'
-            ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+            creationflags=subprocess.CREATE_NO_WINDOW)
             
             if result.returncode == 0:
                 print(f"[OK] Task {task_name} found and configured")
@@ -712,7 +717,8 @@ def uninstall_tasks():
             'Get-ScheduledTask | Where-Object { $_.TaskName -like "CloudHoneypot*" } | ForEach-Object { Write-Host "Removing task: $($_.TaskName)"; Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue }'
         ]
         
-        result = subprocess.run(powershell_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        result = subprocess.run(powershell_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore',
+                                creationflags=subprocess.CREATE_NO_WINDOW)
         
         if result.returncode == 0:
             print("[OK] All CloudHoneypot tasks removed successfully")
@@ -754,7 +760,8 @@ def check_remaining_tasks():
         result = subprocess.run([
             'powershell', '-ExecutionPolicy', 'Bypass', '-Command',
             'Get-ScheduledTask | Where-Object { $_.TaskName -like "CloudHoneypot*" } | Select-Object -ExpandProperty TaskName'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         if result.returncode == 0 and result.stdout.strip():
             remaining_tasks = [task.strip() for task in result.stdout.strip().split('\n') if task.strip()]
@@ -790,7 +797,8 @@ def get_task_status(task_name: str) -> dict:
         # Check if task exists and get basic info
         result = subprocess.run([
             'schtasks', '/Query', '/TN', task_name, '/FO', 'LIST'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         if result.returncode != 0:
             return {'exists': False, 'enabled': False, 'status': 'Not Found'}
@@ -818,7 +826,8 @@ def enable_task(task_name: str) -> bool:
         # Use schtasks /Change to enable the task
         result = subprocess.run([
             'schtasks', '/Change', '/TN', task_name, '/ENABLE'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         return result.returncode == 0
         
@@ -832,7 +841,8 @@ def disable_task(task_name: str) -> bool:
         # Use schtasks /Change to disable the task  
         result = subprocess.run([
             'schtasks', '/Change', '/TN', task_name, '/DISABLE'
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         return result.returncode == 0
         
@@ -846,7 +856,8 @@ def run_task(task_name: str) -> bool:
         # Use schtasks /Run to start the task immediately
         result = subprocess.run([
             'schtasks', '/Run', '/TN', task_name
-        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore',
+        creationflags=subprocess.CREATE_NO_WINDOW)
         
         return result.returncode == 0
         

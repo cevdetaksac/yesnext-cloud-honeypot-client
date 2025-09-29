@@ -1452,12 +1452,9 @@ class InstallerUpdateManager:
                 self.log("[UPDATE] Installer dosyası bulunamadı")
                 return False
             
-            self.log("[UPDATE] Güncelleme yükleniyor...")
+            self.log("[UPDATE] Installer başlatma hazırlanıyor...")
             if progress_callback:
-                progress_callback(75, "Eski sürüm kapatılıyor...")
-            
-            # Mevcut process'leri sonlandır
-            self._terminate_running_instances()
+                progress_callback(75, "Installer hazırlanıyor...")
             
             if progress_callback:
                 progress_callback(80, "Installer başlatılıyor...")
@@ -1490,107 +1487,127 @@ class InstallerUpdateManager:
                 import time
                 
                 try:
-                    self.log(f"[UPDATE] Downloads klasöründeki installer başlatılıyor: {installer_path}")
+                    self.log(f"[UPDATE] Interactive installer başlatma - dosya: {installer_path}")
                     
-                    # Method 1: os.startfile (Windows'ta en basit ve güvenilir)
+                    # Dosya kontrolü - kritik!
+                    if not os.path.exists(installer_path):
+                        self.log(f"[UPDATE] ❌ HATA: Installer dosyası bulunamadı: {installer_path}")
+                        success = False
+                        return success
+                    
+                    file_size = os.path.getsize(installer_path)
+                    if file_size < 1000000:  # 1MB'den küçükse problem var
+                        self.log(f"[UPDATE] ❌ HATA: Installer dosyası çok küçük: {file_size} bytes")
+                        success = False  
+                        return success
+                    
+                    self.log(f"[UPDATE] ✅ Installer dosyası OK: {file_size} bytes")
+                    
+                    # Method 1: PowerShell ile admin yetki ile başlat (En güvenilir)
                     try:
-                        import os
-                        self.log(f"[UPDATE] os.startfile ile başlatılıyor: {installer_path}")
-                        self.log(f"[UPDATE] Dosya var mı? {os.path.exists(installer_path)}")
-                        self.log(f"[UPDATE] Dosya boyutu: {os.path.getsize(installer_path) if os.path.exists(installer_path) else 'N/A'}")
-                        
-                        os.startfile(installer_path)
-                        self.log("[UPDATE] ✅ os.startfile komutu çalıştırıldı")
-                        
-                        # Installer'ın gerçekten başlayıp başlamadığını kontrol et
-                        time.sleep(2)
-                        
-                        # Process listesinde installer var mı kontrol et
-                        installer_running = False
-                        try:
-                            import subprocess
-                            tasklist = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {os.path.basename(installer_path)}'], 
-                                                    capture_output=True, text=True, timeout=5)
-                            if os.path.basename(installer_path) in tasklist.stdout:
-                                installer_running = True
-                                self.log("[UPDATE] ✅ Installer process aktif olarak çalışıyor")
-                            else:
-                                self.log("[UPDATE] ⚠️ Installer process bulunamadı")
-                        except:
-                            self.log("[UPDATE] ⚠️ Process kontrolü yapılamadı")
+                        self.log(f"[UPDATE] PowerShell ile admin yetki ile başlatılıyor...")
                         
                         if progress_callback:
-                            if installer_running:
-                                progress_callback(95, "Installer başlatıldı ve çalışıyor! (Downloads klasöründe)")
-                            else:
-                                progress_callback(90, "Installer başlatma denendi, Downloads klasörünü kontrol edin")
+                            progress_callback(85, "Installer admin yetkisi ile başlatılıyor...")
                         
-                        success = True  # os.startfile başarılı oldu
-                        time.sleep(1)  # Ek bekleme
+                        import subprocess
+                        
+                        # PowerShell komutu - installer'ı admin olarak çalıştır
+                        ps_command = f'Start-Process -FilePath "{installer_path}" -Verb RunAs -PassThru'
+                        
+                        result = subprocess.run([
+                            'powershell', '-WindowStyle', 'Hidden', '-Command', ps_command
+                        ], capture_output=True, text=True, timeout=15)
+                        
+                        if result.returncode == 0:
+                            self.log("[UPDATE] ✅ PowerShell admin start başarılı")
+                            
+                            # Process kontrolü - installer gerçekten çalışıyor mu?
+                            time.sleep(3)  # Installer'ın başlaması için bekle
+                            
+                            installer_name = os.path.basename(installer_path)
+                            tasklist = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {installer_name}'], 
+                                                    capture_output=True, text=True, timeout=5)
+                            
+                            if installer_name in tasklist.stdout:
+                                self.log("[UPDATE] ✅ Installer process aktif!")
+                                success = True
+                                if progress_callback:
+                                    progress_callback(95, "✅ Installer başlatıldı! UAC onayından sonra kurulum başlayacak.")
+                            else:
+                                # Kullanıcı UAC'yi reddetti veya başka bir problem
+                                self.log("[UPDATE] ⚠️ Installer process bulunamadı - UAC reddedilmiş olabilir")
+                                success = True  # Yine de başarılı say, kullanıcı belki daha sonra çalıştırır
+                                if progress_callback:
+                                    progress_callback(90, "⚠️ UAC onayı gerekiyor - Installer Downloads klasöründe hazır")
+                        else:
+                            self.log(f"[UPDATE] PowerShell hatası: {result.stderr}")
+                            raise Exception("PowerShell admin start failed")
                         
                     except Exception as e:
-                        self.log(f"[UPDATE] os.startfile hatası: {e}")
+                        self.log(f"[UPDATE] PowerShell admin start hatası: {e}")
                         
-                        # Method 2: subprocess.Popen ile doğrudan başlat
+                        # Method 2: Normal os.startfile deneme (fallback)
                         try:
-                            self.log("[UPDATE] Alternatif yöntem: subprocess ile başlatılıyor...")
+                            self.log("[UPDATE] Fallback: os.startfile ile normal başlatma deneniyor...")
                             
-                            process = subprocess.Popen(
-                                [installer_path],
-                                shell=False,
-                                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                                stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
+                            if progress_callback:
+                                progress_callback(80, "Installer normal mod ile başlatılıyor...")
                             
+                            os.startfile(installer_path)
                             time.sleep(2)
                             
-                            if process.poll() is None:
-                                self.log("[UPDATE] ✅ subprocess ile installer başarıyla başlatıldı")
-                                success = True
-                            else:
-                                self.log(f"[UPDATE] subprocess başarısız, return code: {process.returncode}")
+                            self.log("[UPDATE] ⚠️ os.startfile çalıştırıldı ama admin yetki gerekebilir")
+                            success = True
+                            
+                            if progress_callback:
+                                progress_callback(85, "⚠️ Installer başlatıldı - Manuel admin onayı gerekebilir")
                                 
                         except Exception as e2:
-                            self.log(f"[UPDATE] subprocess hatası: {e2}")
+                            self.log(f"[UPDATE] os.startfile hatası: {e2}")
                             
-                            # Method 3: ShellExecute ile admin yetkileri (Windows API)
+                            # Method 3: Explorer ile Downloads klasörünü aç (son çare)
                             try:
-                                self.log("[UPDATE] ShellExecute (Windows API) yöntemi deneniyor...")
-                                import subprocess
+                                downloads_dir = os.path.dirname(installer_path)
+                                installer_name = os.path.basename(installer_path)
                                 
-                                # ShellExecute ile "runas" (yönetici yetkisi) kullan
-                                result = subprocess.run([
-                                    'powershell', '-Command', 
-                                    f'Start-Process -FilePath "{installer_path}" -Verb RunAs'
-                                ], capture_output=True, text=True, timeout=10)
+                                self.log(f"[UPDATE] Son çare: Downloads klasörü açılıyor...")
                                 
-                                if result.returncode == 0:
-                                    self.log("[UPDATE] ✅ ShellExecute ile installer başarıyla başlatıldı")
-                                    success = True
-                                else:
-                                    self.log(f"[UPDATE] ShellExecute hatası: {result.stderr}")
+                                if progress_callback:
+                                    progress_callback(75, "Downloads klasörü açılıyor...")
+                                
+                                # Downloads klasörünü aç
+                                os.startfile(downloads_dir)
+                                
+                                success = True  # Klasörü açtık, kullanıcı manuel çalıştırabilir
+                                
+                                if progress_callback:
+                                    progress_callback(80, f"📁 Downloads klasörü açıldı - {installer_name} dosyasını çift tıklayın")
+                                
+                                self.log(f"[UPDATE] ✅ Downloads klasörü açıldı - kullanıcı {installer_name} dosyasını manuel çalıştırabilir")
+                                
+                                # Ek bilgi mesajı
+                                try:
+                                    import tkinter.messagebox as messagebox
+                                    messagebox.showwarning(
+                                        "Manuel Kurulum Gerekli",
+                                        f"Downloads klasörü açıldı!\n\n"
+                                        f"📁 Dosya: {installer_name}\n\n"
+                                        f"🔧 Kurulum için:\n"
+                                        f"1. Dosyaya çift tıklayın\n"
+                                        f"2. 'Yönetici olarak çalıştır' seçin\n"
+                                        f"3. UAC onayını verin\n\n"
+                                        f"Mevcut uygulama şimdi kapanacak."
+                                    )
+                                except:
+                                    pass  # GUI yoksa messagebox çalışmaz
                                     
                             except Exception as e3:
-                                self.log(f"[UPDATE] ShellExecute hatası: {e3}")
+                                self.log(f"[UPDATE] Downloads klasörü açma hatası: {e3}")
+                                success = False
                                 
-                                # Method 4: Explorer ile klasörü aç (son çare)
-                                try:
-                                    downloads_dir = os.path.dirname(installer_path)
-                                    self.log(f"[UPDATE] Son alternatif: Downloads klasörü açılıyor: {downloads_dir}")
-                                    
-                                    os.startfile(downloads_dir)
-                                    success = True  # En azından klasörü açtık
-                                    
-                                    if progress_callback:
-                                        progress_callback(85, f"Downloads klasörü açıldı - {os.path.basename(installer_path)} dosyasını manuel çalıştırın")
-                                    
-                                    self.log("[UPDATE] ⚠️ Downloads klasörü açıldı, installer'ı manuel çalıştırın")
-                                    
-                                except Exception as e4:
-                                    self.log(f"[UPDATE] Klasör açma hatası: {e4}")
-                                    success = False
+                                if progress_callback:
+                                    progress_callback(0, f"❌ Installer başlatılamadı - Manuel olarak {installer_path} dosyasını çalıştırın")
                                 
                 except Exception as main_error:
                     self.log(f"[UPDATE] Ana installer başlatma hatası: {main_error}")
@@ -1624,67 +1641,9 @@ class InstallerUpdateManager:
             self.log(f"[UPDATE] Yükleme hatası: {e}")
             return False
     
-    def _terminate_running_instances(self):
-        """Çalışan honeypot instance'larını sonlandır"""
-        try:
-            import subprocess
-            
-            # Honeypot process'lerini bul ve sonlandır
-            process_names = ["honeypot-client.exe", "client.exe", "python.exe"]
-            
-            for proc_name in process_names:
-                try:
-                    result = subprocess.run(
-                        ["taskkill", "/F", "/IM", proc_name],
-                        capture_output=True, text=True, timeout=10
-                    )
-                    if result.returncode == 0:
-                        self.log(f"[UPDATE] Process sonlandırıldı: {proc_name}")
-                except:
-                    pass
-                    
-        except Exception as e:
-            self.log(f"[UPDATE] Process sonlandırma hatası: {e}")
+
     
-    def start_new_version(self, silent: bool = False):
-        """Yeni sürümü başlat"""
-        try:
-            # Varsayılan kurulum dizininden başlat
-            possible_paths = [
-                r"C:\Program Files\YesNext\Cloud Honeypot Client\honeypot-client.exe",
-                r"C:\Program Files (x86)\YesNext\Cloud Honeypot Client\honeypot-client.exe",
-                os.path.join(os.path.dirname(sys.executable), "honeypot-client.exe")
-            ]
-            
-            for exe_path in possible_paths:
-                if os.path.exists(exe_path):
-                    self.log(f"[UPDATE] Yeni sürüm başlatılıyor: {exe_path}")
-                    
-                    try:
-                        cmd = [exe_path]
-                        if silent:
-                            cmd.append("--minimized")
-                        
-                        # Detached process olarak başlat
-                        subprocess.Popen(
-                            cmd, 
-                            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
-                            close_fds=True
-                        )
-                        
-                        self.log("[UPDATE] Yeni sürüm başarıyla başlatıldı")
-                        return True
-                        
-                    except Exception as e:
-                        self.log(f"[UPDATE] Başlatma hatası: {e}")
-                        continue
-            
-            self.log("[UPDATE] Yeni sürüm executable'ı bulunamadı")
-            return False
-            
-        except Exception as e:
-            self.log(f"[UPDATE] Yeni sürüm başlatma hatası: {e}")
-            return False
+
     
     def update_with_progress(self, progress_callback=None, silent: bool = False) -> bool:
         """Progress callback ile güncelleme yap"""
@@ -1863,57 +1822,8 @@ def create_update_manager(github_owner: str = "cevdetaksac",
     return InstallerUpdateManager(github_owner, github_repo, log_func)
 
 
-# ===================== LEGACY COMPATIBILITY ===================== #
 
-def migrate_from_zip_to_installer():
-    """Eski zip tabanlı sistemden installer tabanlı sisteme geçiş"""
-    try:
-        # Eski zip güncellemesi dosyalarını temizle
-        temp_dirs = []
-        import tempfile
-        temp_root = tempfile.gettempdir()
-        
-        for item in os.listdir(temp_root):
-            if item.startswith("chpupd-") or item.startswith("chpzip-"):
-                old_path = os.path.join(temp_root, item)
-                if os.path.isdir(old_path):
-                    temp_dirs.append(old_path)
-        
-        for temp_dir in temp_dirs:
-            try:
-                import shutil
-                shutil.rmtree(temp_dir)
-                print(f"Eski temp dizin temizlendi: {temp_dir}")
-            except:
-                pass
-                
-        # Eski güncelleme betikleri
-        old_scripts = ["update_onedir.bat", "update_run.bat"]
-        for script in old_scripts:
-            if os.path.exists(script):
-                try:
-                    os.remove(script)
-                    print(f"Eski güncelleme betiği temizlendi: {script}")
-                except:
-                    pass
-                    
-        return True
-        
-    except Exception as e:
-        print(f"Geçiş sırasında hata: {e}")
-        return False
-
-
-# Initialization
+# Module test
 if __name__ == "__main__":
-    # Test update manager
-    print("Testing InstallerUpdateManager...")
-    
-    def test_log(msg):
-        print(f"[TEST] {msg}")
-    
-    update_mgr = create_update_manager(log_func=test_log)
-    update_info = update_mgr.check_for_updates()
-    
-    print(f"Update check result: {update_info}")
-    print("InstallerUpdateManager test completed ✅")
+    print("Cloud Honeypot Client - Utils Module v2.7.5")
+    print("All utility classes and functions loaded successfully ✅")

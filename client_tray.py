@@ -270,87 +270,95 @@ class TrayManager:
             return False, f"error: {e}"
 
     def is_protection_active(self) -> bool:
-        """Check if any tunnel protection is currently active - GERÇEK TÜNEL DURUMU + OPENCANARY"""
-        active_tunnels_count = 0
-        has_active_tunnels = False
+        """Check if any enabled tunnel service is currently active"""
+        active_enabled_services = 0
+        total_enabled_services = 0
         
         log("[TRAY] Protection status kontrol ediliyor...")
         
         try:
-            # 1. Normal tunnel sunucularını kontrol et
-            servers = self.app_instance.state.get("servers", {})
-            log(f"[TRAY] Servers state: {list(servers.keys())}")
+            # Config'den enabled servisleri al
+            from client_constants import get_app_config
+            config = get_app_config()
+            default_ports = config.get("tunnels", {}).get("default_ports", [])
             
-            for port, server_thread in servers.items():
-                log(f"[TRAY] Port {port} kontrolü - thread: {type(server_thread).__name__}")
-                
-                if hasattr(server_thread, 'is_running') and server_thread.is_running():
-                    active_tunnels_count += 1
-                    log(f"[TRAY] ✅ Port {port} - is_running() = True")
-                elif hasattr(server_thread, 'server') and server_thread.server:
-                    active_tunnels_count += 1
-                    log(f"[TRAY] ✅ Port {port} - server object exists")
-                else:
-                    log(f"[TRAY] ❌ Port {port} - not active")
+            # Aktif tunnels'ları al  
+            active_tunnels = self.app_instance.get_active_tunnels()
+            # Port mapping dictionary'si oluştur (local_port -> tunnel object)
+            tunnel_ports = {}
+            if active_tunnels:
+                for tunnel in active_tunnels:
+                    if 'local_port' in tunnel:
+                        tunnel_ports[tunnel['local_port']] = tunnel
+            log(f"[TRAY] Active tunnel ports: {list(tunnel_ports.keys())}")
+            
+            # Her enabled servis için kontrol
+            for port_config in default_ports:
+                if not port_config.get("enabled", False):
+                    continue  # Disabled servis - atla
                     
-            # 2. RDP tunnel durumunu kontrol et (port değil, tunnel aktif mi?)
-            rdp_tunnel_active = False
-            if "3389" in servers:
-                server_thread = servers["3389"]
-                log(f"[TRAY] RDP tunnel (3389) thread: {type(server_thread).__name__}")
+                service_name = port_config["service"]
+                local_port = port_config["local"]
+                total_enabled_services += 1
                 
-                if hasattr(server_thread, 'is_running') and server_thread.is_running():
-                    rdp_tunnel_active = True
-                    log(f"[TRAY] ✅ RDP tunnel ACTIVE (is_running=True)")
-                elif hasattr(server_thread, 'server') and server_thread.server:
-                    rdp_tunnel_active = True
-                    log(f"[TRAY] ✅ RDP tunnel ACTIVE (server exists)")
+                log(f"[TRAY] {service_name} (port {local_port}) kontrolü - enabled=true")
+                
+                # Bu servis için aktif tünel var mı?
+                tunnel = tunnel_ports.get(local_port)
+                if tunnel:
+                    # Tunnel aktif mi kontrol et
+                    status = tunnel.get('status', 'unknown')
+                    if status == 'active':
+                        active_enabled_services += 1
+                        log(f"[TRAY] ✅ {service_name}:{local_port} - ACTIVE (status=active)")
+                    else:
+                        log(f"[TRAY] ❌ {service_name}:{local_port} - NOT active (status={status})")
                 else:
-                    log(f"[TRAY] ❌ RDP tunnel NOT active")
-            else:
-                log(f"[TRAY] ❌ No RDP tunnel in servers state")
+                    log(f"[TRAY] ❌ {service_name}:{local_port} - NO TUNNEL (not in active tunnels)")
+            
+            # Sonuçları logla
+            log(f"[TRAY] Enabled services: {total_enabled_services}, Active: {active_enabled_services}")
+            
+            # En az bir enabled service aktifse protection aktif
+            has_active_protection = active_enabled_services > 0
             
             # RDP port durumunu da log'la (bilgi için)
             if hasattr(self.app_instance, 'rdp_manager'):
                 try:
                     is_rdp_on_secure_port, current_port = self.app_instance.rdp_manager.get_rdp_protection_status()
-                    log(f"[TRAY] RDP info: port={current_port}, tunnel_active={rdp_tunnel_active}, secure_port={is_rdp_on_secure_port}")
+                    log(f"[TRAY] RDP info: port={current_port}, secure_port={is_rdp_on_secure_port}")
                 except Exception as rdp_error:
                     log(f"[TRAY] RDP info check error: {rdp_error}")
             
-            # 3. Temel tünel kontrolü
-            has_active_tunnels = active_tunnels_count > 0
-            
-            # 4. OpenCanary servis durumunu kontrol et (sadece tünel varsa)
-            if has_active_tunnels:
+            # OpenCanary servis durumunu kontrol et (sadece aktif protection varsa)
+            if has_active_protection:
                 try:
                     canary_ok, canary_status = self.check_opencanary_status()
                     log(f"[TRAY] OpenCanary status: {canary_status}")
                     
                     if not canary_ok:
-                        log(f"[TRAY] ⚠️ WARNING: Tunnels active but OpenCanary check failed! Status: {canary_status}")
+                        log(f"[TRAY] ⚠️ WARNING: Active services but OpenCanary check failed! Status: {canary_status}")
                         # API erişilemiyor - güvenlik için korumalı değil say
-                        has_active_tunnels = False
+                        has_active_protection = False
                     else:
                         # API çalışıyor - OpenCanary büyük ihtimalle çalışıyor
-                        # Ancak status unknown ise warning ver
                         if canary_status == "api_connected":
-                            log(f"[TRAY] ✅ Tunnels active and API accessible - Protection considered ACTIVE")
+                            log(f"[TRAY] ✅ Active protection with API accessible")
                         else:
                             log(f"[TRAY] ⚠️ WARNING: OpenCanary status unclear: {canary_status}")
-                            
+                        
                 except Exception as canary_error:
                     log(f"[TRAY] OpenCanary check failed: {canary_error}")
                     # OpenCanary check edilemediği için güvenli tarafta kal
-                    has_active_tunnels = False
+                    has_active_protection = False
                     
         except Exception as e:
             log(f"[TRAY] Protection status check error: {e}")
-            has_active_tunnels = False
+            has_active_protection = False
         
-        log(f"[TRAY] 🎯 Final result: active_tunnels={has_active_tunnels} (count: {active_tunnels_count})")
-        return has_active_tunnels
-    
+        log(f"[TRAY] 🎯 Final result: has_active_protection={has_active_protection}")
+        return has_active_protection
+
     def update_tray_icon(self):
         """Update tray icon to reflect current protection status"""
         is_active = self.is_protection_active()

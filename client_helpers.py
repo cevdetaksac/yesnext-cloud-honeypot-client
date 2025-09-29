@@ -147,3 +147,41 @@ class ClientHelpers:
         except Exception as e:
             log(f"is_app_running error: {e}")
             return False
+
+    @staticmethod
+    def is_daemon_running() -> bool:
+        """Check if daemon mode is currently running"""
+        try:
+            import psutil
+            current_pid = os.getpid()
+            
+            # Check for daemon instances of this app
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['pid'] == current_pid:
+                        continue  # Skip current process
+                    
+                    # Check command line for daemon mode
+                    if proc.info['cmdline']:
+                        cmdline = ' '.join(proc.info['cmdline'])
+                        if ('client.py' in cmdline or 'honeypot-client' in cmdline.lower()) and '--mode=daemon' in cmdline:
+                            return True
+                            
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            return False
+            
+        except ImportError:
+            log("psutil not available, using mutex check for daemon")
+            # Check if daemon mutex exists
+            try:
+                import tempfile
+                daemon_mutex_file = os.path.join(tempfile.gettempdir(), "CloudHoneypotClient_daemon.lock")
+                return os.path.exists(daemon_mutex_file)
+            except Exception as e:
+                log(f"Daemon check error: {e}")
+                return False
+        except Exception as e:
+            log(f"is_daemon_running error: {e}")
+            return False

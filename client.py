@@ -123,7 +123,7 @@ import client_helpers
 from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
 from client_api import HoneypotAPIClient, api_request_with_token, update_client_ip_api, send_heartbeat_api, report_open_ports_api, report_tunnel_action_api
 from client_tokens import create_token_manager, get_token_file_paths
-from client_task_scheduler import install_tasks, check_tasks_status
+from client_task_scheduler import perform_comprehensive_task_management
 from client_utils import (ServiceController, load_i18n, install_excepthook, 
                          load_config, get_config_value, set_config_value,
                          get_from_config, start_watchdog_if_needed, get_port_table,
@@ -297,36 +297,9 @@ class CloudHoneypotClient:
         # RDP modülünü kullanarak başlangıç durumunu kontrol et
         self.rdp_manager.check_initial_rdp_state()
         
-        # Ensure Task Scheduler tasks are installed (including hourly watchdog)
-        try:
-            log("🔧 Verifying Task Scheduler registrations...")
-            from client_task_scheduler import ensure_tasks_installed
-            result = ensure_tasks_installed(log_func=log, force=False)
-            
-            if result.get('success'):
-                log("✅ Task Scheduler verification successful")
-            elif result.get('admin_required'):
-                # Detaylı durum bilgisi ver
-                status = result.get('status', {})
-                tray_ok = status.get('tray_task', False)
-                bg_ok = status.get('background_task', False)
-                
-                missing_tasks = []
-                if not tray_ok:
-                    missing_tasks.append("Tray (startup)")
-                if not bg_ok:
-                    missing_tasks.append("Background (watchdog)")
-                
-                if missing_tasks:
-                    log(f"⚠️ Missing task(s): {', '.join(missing_tasks)} - requires admin installation")
-                    # Store for GUI notification
-                    self.state["missing_tasks"] = missing_tasks
-                else:
-                    log("✅ All Task Scheduler tasks present")
-            else:
-                log(f"⚠️ Task Scheduler setup issue: {result.get('action', 'unknown')}")
-        except Exception as e:
-            log(f"Task Scheduler check error: {e}")
+        # Comprehensive Task Scheduler management - delegated to modular system
+        from client_task_scheduler import perform_comprehensive_task_management
+        task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
 
     def monitor_user_sessions(self):
         """Monitor for user logon sessions in daemon mode"""
@@ -2344,12 +2317,7 @@ class CloudHoneypotClient:
 
 
 
-        # Migration: Eski zip tabanlı güncelleme sisteminden installer sistemine geçiş
-        try:
-            from client_utils import migrate_from_zip_to_installer
-            migrate_from_zip_to_installer()
-        except Exception as e:
-            log(f"migration error: {e}")
+        # Legacy migration code removed - now using installer-based system
 
         # Optional silent auto-update on startup if configured and no active tunnels
         try:
@@ -2573,20 +2541,9 @@ if __name__ == "__main__":
             app.lang = selected_language
             log(f"Application initialized with language: {selected_language}")
             
-            # Admin check and Task Scheduler setup
+            # Task Scheduler management handled by modular system in __init__
             if ctypes.windll.shell32.IsUserAnAdmin():
-                log("Admin yetkisi mevcut - Task Scheduler kontrol ediliyor")
-                try:
-                    tasks_status = check_tasks_status()
-                    if not tasks_status['both_installed']:
-                        if install_tasks():
-                            log("✓ Task Scheduler tasks installed")
-                        else:
-                            log("⚠ Task Scheduler installation failed")
-                    else:
-                        log("✓ Task Scheduler tasks already configured")
-                except Exception as task_error:
-                    log(f"Task Scheduler error: {task_error}")
+                log("Admin yetkisi mevcut - Task Scheduler yönetimi __init__ tarafından halledildi")
             else:
                 log("Normal user mode - Task Scheduler will be configured later")
             
@@ -2734,20 +2691,9 @@ if __name__ == "__main__":
         app.lang = selected_language
         log(f"Application initialized with language: {selected_language}")
         
-        # Admin check and Task Scheduler setup
+        # Task Scheduler management handled by modular system in __init__
         if ctypes.windll.shell32.IsUserAnAdmin():
-            log("Admin yetkisi mevcut - Task Scheduler kontrol ediliyor")
-            try:
-                tasks_status = check_tasks_status()
-                if not tasks_status['both_installed']:
-                    if install_tasks():
-                        log("✓ Task Scheduler tasks installed")
-                    else:
-                        log("⚠ Task Scheduler installation failed")
-                else:
-                    log("✓ Task Scheduler tasks already configured")
-            except Exception as task_error:
-                log(f"Task Scheduler error: {task_error}")
+            log("Admin yetkisi mevcut - Task Scheduler yönetimi __init__ tarafından halledildi")
         else:
             log("Normal user mode - Task Scheduler will be configured later")
         

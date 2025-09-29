@@ -142,6 +142,167 @@ from client_helpers import log
 
 # ===================== UPDATE MANAGEMENT ===================== #
 
+def show_completion_dialog(installer_path: str, version: str):
+    """İndirme tamamlandığında özel dialog göster"""
+    import tkinter as tk
+    import tkinter.ttk as ttk
+    from tkinter import messagebox
+    import os
+    import subprocess
+    import webbrowser
+    
+    try:
+        # Ana dialog penceresi
+        dialog = tk.Toplevel()
+        dialog.title("Güncelleme Tamamlandı")
+        dialog.resizable(False, False)
+        dialog.grab_set()  # Modal yap
+        
+        # Ana frame - önce oluştur
+        main_frame = ttk.Frame(dialog, padding="15")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Dialog grid konfigürasyonu
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        
+        # Başlık
+        title_label = ttk.Label(main_frame, text="✅ İndirme Tamamlandı!", 
+                               font=("Arial", 16, "bold"))
+        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        
+        # Bilgi metni - daha kompakt
+        info_text = f"""📥 Yeni sürüm başarıyla indirildi: v{version}
+📁 Konum: Downloads klasörü
+📄 Dosya: {os.path.basename(installer_path)}
+
+🔧 İlerlemek için aşağıdaki seçeneklerden birini kullanın:"""
+        
+        info_label = ttk.Label(main_frame, text=info_text, justify="left", wraplength=420)
+        info_label.grid(row=1, column=0, columnspan=2, pady=(0, 15), sticky="ew")
+        
+        # Butonlar frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(5, 0), sticky="ew")
+        
+        def run_installer():
+            """Installer'ı çalıştır"""
+            try:
+                # PowerShell admin escalation ile başlat
+                # Installer kendi task management'ini yapacak
+                cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
+                subprocess.run(cmd, shell=True, check=False)
+                
+                messagebox.showinfo(
+                    "Installer Başlatıldı",
+                    "✅ Installer başlatıldı!\n\n"
+                    "UAC onayını verin ve kurulum sürecini takip edin.\n"
+                    "Kurulum tamamlandıktan sonra bu uygulama otomatik kapatılacak."
+                )
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Hata", f"Installer başlatılamadı:\n{str(e)}")
+        
+        def open_downloads():
+            """Downloads klasörünü aç"""
+            try:
+                os.startfile(os.path.dirname(installer_path))
+                messagebox.showinfo(
+                    "Klasör Açıldı", 
+                    f"📁 Downloads klasörü açıldı!\n\n"
+                    f"🔧 Manuel kurulum:\n"
+                    f"1. {os.path.basename(installer_path)} dosyasına sağ tıklayın\n"
+                    f"2. 'Yönetici olarak çalıştır' seçin\n"
+                    f"3. UAC onayını verin"
+                )
+            except Exception as e:
+                messagebox.showerror("Hata", f"Klasör açılamadı:\n{str(e)}")
+        
+        def open_github():
+            """GitHub releases sayfasını aç"""
+            try:
+                github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
+                webbrowser.open(github_url)
+                messagebox.showinfo(
+                    "GitHub Açıldı", 
+                    f"🌐 GitHub releases sayfası açıldı!\n\n"
+                    f"Alternatif olarak oradan da indirebilirsiniz:\n"
+                    f"{github_url}"
+                )
+            except Exception as e:
+                messagebox.showerror("Hata", f"GitHub açılamadı:\n{str(e)}")
+        
+        def close_dialog():
+            """Dialog'u kapat"""
+            dialog.destroy()
+        
+        # Ana installer butonu
+        install_btn = ttk.Button(button_frame, text="🚀 Installer'ı Çalıştır", 
+                                command=run_installer, width=25)
+        install_btn.grid(row=0, column=0, columnspan=2, pady=(5, 3), sticky="ew")
+        
+        # Alternatif butonlar
+        downloads_btn = ttk.Button(button_frame, text="📁 Downloads Klasörü", 
+                                  command=open_downloads, width=20)
+        downloads_btn.grid(row=1, column=0, padx=(0, 3), pady=3, sticky="ew")
+        
+        github_btn = ttk.Button(button_frame, text="🌐 GitHub Alternatif", 
+                               command=open_github, width=20)
+        github_btn.grid(row=1, column=1, padx=(3, 0), pady=3, sticky="ew")
+        
+        # Kapat butonu
+        close_btn = ttk.Button(button_frame, text="❌ Şimdi Değil", 
+                              command=close_dialog, width=25)
+        close_btn.grid(row=2, column=0, columnspan=2, pady=(8, 5), sticky="ew")
+        
+        # Grid weights
+        main_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        
+        # İçerik yüklendikten sonra boyutu ayarla
+        dialog.update_idletasks()
+        
+        # Gereken minimum boyutu hesapla
+        req_width = main_frame.winfo_reqwidth() + 30
+        req_height = main_frame.winfo_reqheight() + 30
+        
+        # Minimum ve maksimum boyutları belirle
+        min_width = max(req_width, 450)
+        min_height = max(req_height, 300)
+        max_width = min(min_width, 600)
+        max_height = min(min_height, 500)
+        
+        # Dialog boyutunu ayarla
+        dialog.geometry(f"{max_width}x{max_height}")
+        
+        # Pencereyi ortala
+        x = (dialog.winfo_screenwidth() // 2) - (max_width // 2)
+        y = (dialog.winfo_screenheight() // 2) - (max_height // 2)
+        dialog.geometry(f"{max_width}x{max_height}+{x}+{y}")
+        
+        # Ana installer butonuna focus ver
+        install_btn.focus()
+        
+        # Dialog'u çalıştır
+        dialog.wait_window()
+        
+    except Exception as e:
+        # Fallback - basit messagebox
+        log(f"[UPDATE] Dialog error: {e}")
+        result = messagebox.askyesno(
+            "Güncelleme Hazır",
+            f"✅ v{version} indirildi!\n\n"
+            f"📁 {installer_path}\n\n"
+            f"Installer'ı şimdi çalıştırmak ister misiniz?"
+        )
+        if result:
+            try:
+                cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
+                subprocess.run(cmd, shell=True, check=False)
+            except Exception as e2:
+                messagebox.showerror("Hata", f"Installer başlatılamadı: {e2}")
+
 def check_updates_and_prompt(app_instance) -> bool:
     """Check for updates and prompt user with installer-based system"""
     try:
@@ -189,53 +350,107 @@ def check_updates_and_prompt(app_instance) -> bool:
                 # Progress dialog'u kapat
                 progress_dialog.close_dialog()
                 
-                # Downloads klasörü yolunu göster
+                # Downloads klasörü yolunu al
                 import os
                 downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
                 version = getattr(update_mgr, '_latest_version', latest_ver)
                 installer_name = f"cloud-client-installer-v{version}.exe"
+                installer_path = os.path.join(downloads_dir, installer_name)
                 
-                messagebox.showinfo(
-                    "Güncelleme Hazır", 
-                    f"✅ Installer başarıyla indirildi!\n\n"
-                    f"📁 Konum: {downloads_dir}\n"
-                    f"📄 Dosya: {installer_name}\n\n"
-                    f"🔧 Kurulum:\n"
-                    f"1. Installer otomatik açılacak (veya Downloads klasöründen çalıştırın)\n"
-                    f"2. 'Yönetici olarak çalıştır' seçin\n"  
-                    f"3. Kurulum açık uygulamaları otomatik kapatır\n"
-                    f"4. Mevcut uygulama şimdi kapanacak"
-                )
+                # Özel tamamlanma dialog'u göster
+                show_completion_dialog(installer_path, version)
                 
-                # Installer'ın çalıştığından emin olmak için bekleme
-                log("[UPDATER] Installer için bekleme...")
-                import time
-                time.sleep(2)                # Tray'i kapat (varsa)
-                if hasattr(app_instance, 'tray_manager') and app_instance.tray_manager:
-                    try:
-                        app_instance.tray_manager.cleanup()
-                    except:
-                        pass
-                
-                # GUI pencereyi kapat (varsa)
-                if hasattr(app_instance, 'root') and app_instance.root:
-                    try:
-                        app_instance.root.quit()
-                        app_instance.root.destroy()
-                    except:
-                        pass
-                
-                # Güvenli uygulama kapatma
-                try:
-                    import os
-                    os._exit(0)
-                except:
-                    import sys
-                    sys.exit(0)
+                # Installer başlatıldı - uygulama açık kalacak
+                log("[UPDATER] ✅ Interactive update tamamlandı - kullanıcı installer'ı çalıştırabilir")
+                return True
             else:
-                messagebox.showerror("Update", "Update failed")
                 progress_dialog.close_dialog()
-                return False
+                
+                # Update başarısız - kullanıcıya alternatif sunalım
+                log("[UPDATER] ⚠️ Installer otomatik başlatılamadı - manuel seçenekler sunuluyor")
+                
+                # Downloads klasöründeki dosya var mı kontrol et
+                import os
+                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+                version = getattr(update_mgr, '_latest_version', latest_ver)
+                installer_name = f"cloud-client-installer-v{version}.exe"
+                installer_path = os.path.join(downloads_dir, installer_name)
+                
+                if os.path.exists(installer_path):
+                    # Dosya var - manuel çalıştırma seçenekleri sun
+                    result = messagebox.askyesnocancel(
+                        "Manuel Kurulum Gerekli",
+                        f"⚠️ Installer otomatik başlatılamadı\n\n"
+                        f"📁 Ancak dosya başarıyla indirildi:\n"
+                        f"{installer_path}\n\n"
+                        f"📋 Seçenekleriniz:\n"
+                        f"• EVET: Downloads klasörünü aç (manuel çalıştırma)\n"
+                        f"• HAYIR: GitHub'dan direkt indir\n"
+                        f"• İPTAL: Güncellemeyi ertele\n\n"
+                        f"Downloads klasörünü açmak istiyor musunuz?"
+                    )
+                    
+                    if result is True:  # YES - Downloads klasörünü aç
+                        try:
+                            os.startfile(downloads_dir)
+                            messagebox.showinfo(
+                                "Manuel Kurulum",
+                                f"📁 Downloads klasörü açıldı!\n\n"
+                                f"🔧 Kurulum adımları:\n"
+                                f"1. {installer_name} dosyasına çift tıklayın\n"
+                                f"2. 'Yönetici olarak çalıştır' seçin\n"
+                                f"3. UAC onayını verin\n"
+                                f"4. Kurulum otomatik tamamlanacak"
+                            )
+                            return True
+                        except Exception as e:
+                            log(f"[UPDATER] Downloads klasörü açma hatası: {e}")
+                            
+                    elif result is False:  # NO - GitHub'a yönlendir
+                        github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
+                        
+                        try:
+                            import webbrowser
+                            webbrowser.open(github_url)
+                            messagebox.showinfo(
+                                "GitHub İndirme",
+                                f"🌐 GitHub releases sayfası açıldı!\n\n"
+                                f"📋 Adımlar:\n"
+                                f"1. 'cloud-client-installer.exe' linkine tıklayın\n"
+                                f"2. İndirme tamamlandıktan sonra dosyayı çalıştırın\n"
+                                f"3. 'Yönetici olarak çalıştır' seçin\n\n"
+                                f"🔗 Link: {github_url}"
+                            )
+                            return True
+                        except Exception as e:
+                            log(f"[UPDATER] GitHub açma hatası: {e}")
+                            messagebox.showerror("Hata", f"GitHub sayfası açılamadı.\n\nManuel link:\n{github_url}")
+                    
+                    # İptal durumunda hiçbir şey yapma
+                    return False
+                    
+                else:
+                    # Dosya da yok - sadece GitHub'a yönlendir
+                    github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
+                    
+                    result = messagebox.askyesno(
+                        "İndirme Başarısız",
+                        f"❌ Güncelleme indirilemedi\n\n"
+                        f"🌐 GitHub'dan manuel indirebilirsiniz:\n"
+                        f"{github_url}\n\n"
+                        f"GitHub sayfasını açmak istiyor musunuz?"
+                    )
+                    
+                    if result:
+                        try:
+                            import webbrowser
+                            webbrowser.open(github_url)
+                            return True
+                        except Exception as e:
+                            log(f"[UPDATER] GitHub açma hatası: {e}")
+                            messagebox.showerror("Hata", f"GitHub sayfası açılamadı.\n\nManuel link:\n{github_url}")
+                    
+                    return False
         except Exception as e:
             progress_dialog.close_dialog()
             messagebox.showerror("Update", f"Update error: {str(e)}")
@@ -297,11 +512,9 @@ def check_updates_and_apply_silent() -> bool:
                 
             log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
             
-            # Create batch script for server-safe update process
-            batch_script = create_server_safe_update_script(installer_path, temp_dir)
-            
             # Execute the update process
-            log("[SILENT UPDATE] Starting server-safe installer process...")
+            # Installer kendi task management'ini yapacak
+            log("[SILENT UPDATE] Starting installer process...")
             
             # Run installer with SYSTEM privileges in silent mode
             cmd = [
@@ -318,7 +531,7 @@ def check_updates_and_apply_silent() -> bool:
             
             if result.returncode == 0:
                 log("[SILENT UPDATE] Installer completed successfully")
-                log("[SILENT UPDATE] New version installed - tasks will be recreated on startup")
+                log("[SILENT UPDATE] New version will be started automatically by installer")
                 
                 # Cleanup temp files
                 try:
@@ -326,10 +539,10 @@ def check_updates_and_apply_silent() -> bool:
                 except:
                     pass
                 
-                # Exit - the new version will be started by task scheduler
-                log("[SILENT UPDATE] Update process completed - exiting for restart")
-                time.sleep(1)
-                os._exit(0)
+                # Installer başarılı - uygulama açık kalır
+                # Installer kendi restart işlemini yapacak
+                log("[SILENT UPDATE] ✅ Silent update completed - installer will handle app restart")
+                return True
                 
             else:
                 log(f"[SILENT UPDATE] Installer failed with code: {result.returncode}")
@@ -378,46 +591,7 @@ def download_installer_file(url: str, local_path: str) -> bool:
         log(f"[SILENT UPDATE] Download error: {e}")
         return False
 
-def create_server_safe_update_script(installer_path: str, temp_dir: str) -> str:
-    """Create batch script for server-safe update process"""
-    try:
-        batch_content = f'''@echo off
-REM Cloud Honeypot Client - Server Safe Update Script
-REM This script handles task cleanup and reinstallation during updates
 
-echo [SILENT UPDATE] Starting server-safe update process...
-
-REM Stop all existing tasks (if running)
-echo [SILENT UPDATE] Stopping existing tasks...
-schtasks /end /tn "CloudHoneypot-Background" 2>nul
-schtasks /end /tn "CloudHoneypot-Tray" 2>nul  
-schtasks /end /tn "CloudHoneypot-Watchdog" 2>nul
-schtasks /end /tn "CloudHoneypot-Updater" 2>nul
-schtasks /end /tn "CloudHoneypot-SilentUpdater" 2>nul
-
-REM Wait a moment for tasks to stop
-timeout /t 3 /nobreak >nul
-
-REM Run installer silently
-echo [SILENT UPDATE] Running installer...
-"{installer_path}" /S /NCRC
-
-REM Wait for installer to complete
-timeout /t 10 /nobreak >nul
-
-echo [SILENT UPDATE] Update script completed
-'''
-        
-        batch_path = os.path.join(temp_dir, "update_script.bat")
-        with open(batch_path, 'w') as f:
-            f.write(batch_content)
-            
-        log(f"[SILENT UPDATE] Created update script: {batch_path}")
-        return batch_path
-        
-    except Exception as e:
-        log(f"[SILENT UPDATE] Script creation error: {e}")
-        return ""
 
 def update_watchdog_loop():
     """Hourly update checker loop"""

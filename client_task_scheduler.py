@@ -1,64 +1,94 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER MODULE
-===============================================
+🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER MODULE v2.7.5
+=======================================================
 
-📋 ARCHITECTURE IMPLEMENTATION:
+📋 5-TASK SYSTEM ARCHITECTURE - SEPTEMBER 2025:
 ┌─────────────────────────────────────────────────────────────────┐
-│             WINDOWS TASK SCHEDULER CONFIGURATION               │
+│              COMPREHENSIVE TASK SCHEDULER SYSTEM               │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  🟢 BACKGROUND TASK: CloudHoneypot-Background                  │
-│  ├─ XML: Configured for system-level execution                │
-│  ├─ Trigger: <BootTrigger> PT30S delay                        │
-│  ├─ Security: S-1-5-18 (SYSTEM), HighestAvailable            │
-│  ├─ Command: honeypot-client.exe --mode=daemon --silent       │
-│  ├─ Restart: PT10S interval, 5 attempts                       │
-│  └─ Purpose: Headless server environments                     │
+│  🟢 CloudHoneypot-Background  → Boot-time daemon service       │
+│  ├─ Trigger: System boot (30s delay)                          │  
+│  ├─ Context: SYSTEM account, highest privileges               │
+│  ├─ Purpose: Headless server operation                        │
+│  └─ Command: honeypot-client.exe --mode=daemon --silent       │
 │                                                                 │
-│  🟡 TRAY TASK: CloudHoneypot-Tray                            │
-│  ├─ XML: Configured for user session execution               │
-│  ├─ Trigger: <LogonTrigger> PT15S delay                      │
-│  ├─ Security: Users group, HighestAvailable                  │
-│  ├─ Command: honeypot-client.exe --mode=tray --silent        │
-│  ├─ Restart: PT10S interval, 3 attempts                      │
-│  └─ Purpose: Interactive desktop environments                │
+│  🟡 CloudHoneypot-Tray       → User session GUI               │
+│  ├─ Trigger: User logon (15s delay)                          │
+│  ├─ Context: User account, interactive desktop               │
+│  ├─ Purpose: Desktop management interface                     │
+│  └─ Command: honeypot-client.exe --mode=tray --silent        │
+│                                                                 │
+│  � CloudHoneypot-Watchdog   → System health monitoring       │
+│  ├─ Trigger: Hourly schedule                                 │
+│  ├─ Context: SYSTEM account, maintenance                     │
+│  ├─ Purpose: Process recovery and health checks              │
+│  └─ Command: honeypot-client.exe --watchdog --silent         │
+│                                                                 │
+│  📱 CloudHoneypot-Updater    → Weekly update checks           │
+│  ├─ Trigger: Weekly schedule (Sunday 03:00)                  │
+│  ├─ Context: User account, interactive updates               │
+│  ├─ Purpose: Interactive update management                    │
+│  └─ Command: honeypot-client.exe --silent-update-check       │
+│                                                                 │
+│  🔄 CloudHoneypot-SilentUpdater → Automatic updates (2h)      │
+│  ├─ Trigger: Every 2 hours                                   │
+│  ├─ Context: SYSTEM account, background                      │
+│  ├─ Purpose: Unattended system maintenance                   │
+│  └─ Command: honeypot-client.exe --silent-update-check       │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
-│ DEPLOYMENT WORKFLOW:                                            │
-│ 1. Administrator privilege check                                │
-│ 2. Client executable validation                                 │
-│ 3. XML task definition generation                               │
-│ 4. Task removal (cleanup existing)                             │
-│ 5. Task installation via schtasks.exe                          │
-│ 6. Task verification and status check                          │
+│ 🏗️ MODULAR MANAGEMENT FUNCTIONS:                              │
 ├─────────────────────────────────────────────────────────────────┤
-│ ADVANTAGES OVER WINDOWS SERVICE:                                │
-│ ✅ No SYSTEM context GUI limitations                           │
-│ ✅ Built-in Windows reliability features                       │
-│ ✅ User-friendly management via Task Scheduler MMC            │
-│ ✅ Better separation between system/user contexts             │
-│ ✅ Automatic Windows Update compatibility                      │
-│ ✅ Standard Windows troubleshooting tools                     │
+│                                                                 │
+│  📊 perform_comprehensive_task_management() → Auto mgmt        │
+│  ├─ Check & install missing tasks (admin required)            │
+│  ├─ Activate existing tasks (no admin needed)                 │
+│  ├─ Report status to application state                        │
+│  └─ Integrated with client.py __init__                        │
+│                                                                 │
+│  🔧 Task Control Functions:                                    │
+│  ├─ get_task_status()    → Query task state                   │
+│  ├─ enable_task()        → Activate task                      │
+│  ├─ disable_task()       → Deactivate task                    │
+│  ├─ run_task()           → Immediate execution                 │
+│  └─ All work without admin privileges                         │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ 🎯 INSTALLER INTEGRATION STRATEGY:                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Installer: Stop all CloudHoneypot-* tasks                 │
+│  2. Installer: Delete all tasks for clean installation        │
+│  3. Installer: Install new application files                  │
+│  4. Installer: Launch application once                        │
+│  5. Application: Check & install missing tasks                │
+│  6. Application: Activate all available tasks                 │
+│  7. Future runs: Only verify & activate existing tasks       │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ ✅ ADVANTAGES OVER WINDOWS SERVICES:                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ▶ No SYSTEM context GUI limitations                          │
+│  ▶ Built-in Windows reliability & restart features            │
+│  ▶ User-friendly Task Scheduler MMC management               │
+│  ▶ Clean separation: system vs user contexts                 │
+│  ▶ Automatic Windows Update compatibility                     │
+│  ▶ Standard troubleshooting with Windows tools               │
+│  ▶ Modern XML-based configuration                             │
+│  ▶ Granular scheduling and trigger control                   │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
-🔧 USAGE:
-  python install_task_scheduler.py           # Install tasks
-  python install_task_scheduler.py uninstall # Remove tasks
-
-📝 XML FEATURES:
-- MultipleInstancesPolicy: IgnoreNew (prevents conflicts)
-- RestartPolicy: Automatic failure recovery
-- Hidden: false (visible in Task Scheduler)
-- ExecutionTimeLimit: PT0S (unlimited runtime)
-- Priority: 7 (normal priority)
-
-💡 INTEGRATION NOTES:
-- Works with singleton mutex system in client.py
-- Respects existing process detection logic
-- Compatible with legacy service monitor (transition period)
-- Generates clean XML for Windows Task Scheduler v1.4
+💡 INTEGRATION STATUS: v2.7.5 (September 2025)
+- ✅ Full modular integration with client.py
+- ✅ Installer-aware task management lifecycle  
+- ✅ Admin-optional task activation system
+- ✅ Comprehensive 5-task coverage
+- ✅ Production-ready deployment workflow
 """
 
 import os
@@ -156,20 +186,20 @@ def ensure_tasks_installed(log_func=None, force=False, max_age=TASK_CACHE_MAX_AG
     if not force and _should_trust_cache(state, max_age) and (state.get('all_installed') or state.get('both_installed')):
         cached_status = check_tasks_status(update_cache=True)
         if cached_status.get('all_installed') or cached_status.get('both_installed'):
-            _log_or_print(log_func, "✅ Task Scheduler tasks verified (cached)")
+            _log_or_print(log_func, "[OK] Task Scheduler tasks verified (cached)")
             return {'success': True, 'action': 'cache', 'status': cached_status}
 
     status = check_tasks_status(update_cache=True)
     if (status.get('all_installed') or status.get('both_installed')) and not force:
-        _log_or_print(log_func, "✅ Task Scheduler tasks verified (installed)")
+        _log_or_print(log_func, "[OK] Task Scheduler tasks verified (installed)")
         return {'success': True, 'action': 'verified', 'status': status}
 
     # Tasks missing - check admin rights
     if not admin_rights:
-        _log_or_print(log_func, "⚠️ Task Scheduler tasks missing but no admin rights - will be installed when run as admin")
+        _log_or_print(log_func, "[WARN] Task Scheduler tasks missing but no admin rights - will be installed when run as admin")
         return {'success': False, 'action': 'needs_admin', 'status': status, 'admin_required': True}
     
-    _log_or_print(log_func, "🔧 Installing missing Task Scheduler tasks...")
+    _log_or_print(log_func, "[SETUP] Installing missing Task Scheduler tasks...")
     success = install_tasks()
     if not success:
         failure_status = check_tasks_status(update_cache=False)
@@ -177,7 +207,7 @@ def ensure_tasks_installed(log_func=None, force=False, max_age=TASK_CACHE_MAX_AG
 
     status_after = check_tasks_status(update_cache=True)
     if status_after.get('all_installed') or status_after.get('both_installed'):
-        _log_or_print(log_func, "✅ Task Scheduler tasks successfully installed")
+        _log_or_print(log_func, "[OK] Task Scheduler tasks successfully installed")
         return {'success': True, 'action': 'installed', 'status': status_after}
     return {'success': False, 'action': 'verification_failed', 'status': status_after}
 
@@ -497,7 +527,7 @@ def install_task(task_name: str, xml_content: str) -> bool:
             pass
         
         if result.returncode == 0:
-            print(f"✓ Task {task_name} installed successfully")
+            print(f"[OK] Task {task_name} installed successfully")
             return True
         else:
             print(f"✗ Failed to install task {task_name}: {result.stderr}")
@@ -517,10 +547,10 @@ def uninstall_task(task_name: str) -> bool:
         ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
         
         if result.returncode == 0:
-            print(f"✓ Task {task_name} uninstalled successfully")
+            print(f"[OK] Task {task_name} uninstalled successfully")
             return True
         else:
-            print(f"✓ Task {task_name} was not found (already uninstalled)")
+            print(f"[INFO] Task {task_name} was not found (already uninstalled)")
             return True  # Not found is OK for uninstall
             
     except Exception as e:
@@ -548,7 +578,7 @@ def verify_tasks():
             ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
             
             if result.returncode == 0:
-                print(f"✓ Task {task_name} found and configured")
+                print(f"[OK] Task {task_name} found and configured")
                 # Parse status from output
                 for line in result.stdout.split('\n'):
                     if 'Status:' in line:
@@ -588,7 +618,7 @@ def install_all_tasks(include_silent_updater: bool = False) -> bool:
         if include_silent_updater:
             xml_content = create_silent_updater_task_xml()
             success &= install_task(TASK_NAME_SILENT_UPDATER, xml_content)
-            print(f"✓ Silent updater task {'installed' if success else 'failed'}")
+            print(f"[INFO] Silent updater task {'installed' if success else 'failed'}")
         
         return success
         
@@ -611,7 +641,7 @@ def main():
         success &= uninstall_task(TASK_NAME_WATCHDOG)
         
         if success:
-            print("\n✓ All tasks uninstalled successfully")
+            print("\n[OK] All tasks uninstalled successfully")
             sys.exit(0)
         else:
             print("\n✗ Some tasks could not be uninstalled")
@@ -685,7 +715,7 @@ def uninstall_tasks():
         result = subprocess.run(powershell_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         
         if result.returncode == 0:
-            print("✓ All CloudHoneypot tasks removed successfully")
+            print("[OK] All CloudHoneypot tasks removed successfully")
             
             # Also check if any tasks still exist
             remaining = check_remaining_tasks()
@@ -712,7 +742,7 @@ def fallback_individual_removal():
     success &= uninstall_task(TASK_NAME_WATCHDOG)
     
     if success:
-        print("✓ Individual task removal completed")
+        print("[OK] Individual task removal completed")
         return True
     else:
         print("✗ Some tasks could not be removed")
@@ -752,6 +782,188 @@ def check_tasks_status(update_cache=False):
         save_task_state(status)
 
     return status
+
+
+def get_task_status(task_name: str) -> dict:
+    """Get detailed status of a specific task"""
+    try:
+        # Check if task exists and get basic info
+        result = subprocess.run([
+            'schtasks', '/Query', '/TN', task_name, '/FO', 'LIST'
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        
+        if result.returncode != 0:
+            return {'exists': False, 'enabled': False, 'status': 'Not Found'}
+        
+        # Parse task details from output
+        task_info = {'exists': True, 'enabled': False, 'status': 'Unknown'}
+        
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+            if 'Status:' in line or 'Durum:' in line:  # Handle Turkish locale
+                status = line.split(':', 1)[1].strip()
+                task_info['status'] = status
+                # Task is enabled if status is Ready, Running, or similar active states
+                task_info['enabled'] = status.lower() not in ['disabled', 'devre dışı', 'could not start']
+        
+        return task_info
+        
+    except Exception as e:
+        return {'exists': False, 'enabled': False, 'status': f'Error: {e}'}
+
+
+def enable_task(task_name: str) -> bool:
+    """Enable a task (activate it)"""
+    try:
+        # Use schtasks /Change to enable the task
+        result = subprocess.run([
+            'schtasks', '/Change', '/TN', task_name, '/ENABLE'
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        
+        return result.returncode == 0
+        
+    except Exception:
+        return False
+
+
+def disable_task(task_name: str) -> bool:
+    """Disable a task (deactivate it)"""
+    try:
+        # Use schtasks /Change to disable the task  
+        result = subprocess.run([
+            'schtasks', '/Change', '/TN', task_name, '/DISABLE'
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        
+        return result.returncode == 0
+        
+    except Exception:
+        return False
+
+
+def run_task(task_name: str) -> bool:
+    """Manually run a task"""
+    try:
+        # Use schtasks /Run to start the task immediately
+        result = subprocess.run([
+            'schtasks', '/Run', '/TN', task_name
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        
+        return result.returncode == 0
+        
+    except Exception:
+        return False
+
+
+def perform_comprehensive_task_management(log_func=None, app_state=None):
+    """
+    Comprehensive Task Scheduler management for application startup
+    
+    This function handles the complete task lifecycle:
+    1. Check and install missing tasks (requires admin for installation)
+    2. Verify and activate existing tasks (works without admin)
+    3. Update application state with task information
+    
+    Args:
+        log_func: Logging function to use
+        app_state: Application state dict to update with missing task info
+        
+    Returns:
+        dict: Management results with success status and activated task count
+    """
+    if log_func is None:
+        log_func = print
+        
+    try:
+        log_func("🔧 Performing comprehensive Task Scheduler management...")
+        
+        # Step 1: Check and install missing tasks
+        result = ensure_tasks_installed(log_func=log_func, force=False)
+        
+        if result.get('success'):
+            log_func("✅ All Task Scheduler tasks are registered")
+        elif result.get('admin_required'):
+            # Detaylı durum bilgisi ver
+            status = result.get('status', {})
+            missing_tasks = []
+            
+            if not status.get('tray_task', False):
+                missing_tasks.append("Tray (user startup)")
+            if not status.get('background_task', False):
+                missing_tasks.append("Background (system service)")
+            if not status.get('watchdog_task', False):
+                missing_tasks.append("Watchdog (monitoring)")
+            if not status.get('updater_task', False):
+                missing_tasks.append("Updater (maintenance)")
+            if not status.get('silent_updater_task', False):
+                missing_tasks.append("SilentUpdater (auto-update)")
+            
+            if missing_tasks:
+                log_func(f"⚠️ Missing task(s): {', '.join(missing_tasks)} - requires admin installation")
+                # Update application state if provided
+                if app_state is not None:
+                    app_state["missing_tasks"] = missing_tasks
+            else:
+                log_func("✅ All Task Scheduler tasks are registered")
+        
+        # Step 2: Verify and enable existing tasks (works without admin)
+        log_func("🔧 Checking task activation status...")
+        task_names = [
+            TASK_NAME_BACKGROUND,
+            TASK_NAME_TRAY, 
+            TASK_NAME_WATCHDOG,
+            TASK_NAME_UPDATER,
+            TASK_NAME_SILENT_UPDATER
+        ]
+        
+        activated_count = 0
+        activation_results = {}
+        
+        for task_name in task_names:
+            try:
+                task_status = get_task_status(task_name)
+                if task_status.get('exists', False):
+                    if not task_status.get('enabled', False):
+                        log_func(f"📋 Activating task: {task_name}")
+                        if enable_task(task_name):
+                            activated_count += 1
+                            activation_results[task_name] = "activated"
+                            log_func(f"✅ Task activated: {task_name}")
+                        else:
+                            activation_results[task_name] = "activation_failed"
+                            log_func(f"⚠️ Could not activate task: {task_name}")
+                    else:
+                        activation_results[task_name] = "already_active"
+                        log_func(f"✅ Task already active: {task_name}")
+                        activated_count += 1
+                else:
+                    activation_results[task_name] = "not_found"
+                    
+            except Exception as task_error:
+                activation_results[task_name] = f"error: {task_error}"
+                log_func(f"⚠️ Task check error for {task_name}: {task_error}")
+        
+        if activated_count > 0:
+            log_func(f"🎯 Task management complete - {activated_count} tasks active")
+        else:
+            log_func("⚠️ No tasks could be activated - may need admin privileges")
+        
+        return {
+            'success': True,
+            'activated_count': activated_count,
+            'activation_results': activation_results,
+            'installation_result': result
+        }
+        
+    except Exception as e:
+        log_func(f"Task Scheduler management error: {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'activated_count': 0,
+            'activation_results': {},
+            'installation_result': {}
+        }
+
 
 # For backwards compatibility when run as standalone script
 if __name__ == "__main__":

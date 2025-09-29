@@ -424,3 +424,154 @@ class TunnelManager:
             return False
         except Exception:
             return False
+
+    @staticmethod
+    def is_service_running_by_port(app, listen_port: int, service_name: str) -> bool:
+        """Check if a specific service is running on a specific port"""
+        try:
+            st = app.state["servers"].get(int(listen_port))
+            if not st:
+                return False
+            return str(st.service_name or '').upper() == str(service_name or '').upper()
+        except Exception:
+            return False
+
+    @staticmethod  
+    def get_active_tunnels(app) -> list:
+        """Get list of currently active tunnels for tray status detection"""
+        active_list = []
+        try:
+            # Get each configured service from config
+            from client_constants import get_app_config
+            config = get_app_config()
+            default_ports = config.get("tunnels", {}).get("default_ports", [])
+            
+            for port_config in default_ports:
+                if not port_config.get("enabled"):
+                    continue
+                
+                local_port = port_config.get("local")
+                remote_port = port_config.get("remote") 
+                service_name = port_config.get("service", "Unknown")
+                
+                # Check if tunnel is running on this port
+                if TunnelManager.is_service_running_by_port(app, local_port, service_name):
+                    tunnel_info = {
+                        'local_port': local_port,
+                        'remote_port': remote_port,
+                        'service': service_name,
+                        'status': 'active'
+                    }
+                    active_list.append(tunnel_info)
+                    
+        except Exception as e:
+            log(f"[NETWORKING] Error getting active tunnels: {e}")
+        
+        return active_list
+
+    @staticmethod
+    def reconcile_remote_tunnels_loop(app):
+        """API tunnel reconciliation loop - manages tunnel state synchronization"""
+        log("Uzaktan yönetim döngüsü başlatıldı.")
+        while True:
+            try:
+                with app.reconciliation_lock:
+                    if app.state.get("reconciliation_paused"):
+                        log("Senkronizasyon duraklatıldı, bekleniyor...")
+                        time.sleep(1)
+                        continue
+
+                token = app.state.get("token")
+                if not token:
+                    log("Token bulunamadı, bekleniyor...")
+                    time.sleep(15)
+                    continue
+
+                # Hedef durumu API'den al
+                response = app.api_request("GET", "premium/tunnel-status", params={"token": token})
+                if not response:
+                    log("Tünel durumları alınamadı - Sunucu yanıt vermedi")
+                    time.sleep(15)
+                    continue
+
+                if not isinstance(response, dict):
+                    log(f"Geçersiz API yanıt formatı: {response}")
+                    time.sleep(15)
+                    continue
+
+                data = response
+                if data:
+                    log(f"API'den hedef durum alındı: {data}")
+
+                # Process each service in order
+                order = [("RDP",3389), ("MSSQL",1433), ("MYSQL",3306), ("FTP",21), ("SSH",22)]
+                for svc_u, lp in order:
+                    entry = data.get(svc_u)
+                    if not isinstance(entry, dict):
+                        continue
+                    desired = (entry.get('desired') or 'stopped').lower()
+                    running = TunnelManager.is_service_running_by_port(app, lp, svc_u)
+                    prev = app.state["remote_desired"].get(svc_u)
+                    if prev == desired and ((desired=='started' and running) or (desired=='stopped' and not running)):
+                        continue
+
+                    if desired == 'started' and not running:
+                        log(f"API komutu: '{svc_u}' servisi başlatılıyor.")
+                        try:
+                            # Handle RDP special case
+                            if svc_u == 'RDP':
+                                from client_constants import RDP_SECURE_PORT
+                                from client_utils import ServiceController
+                                if ServiceController.get_rdp_port() != RDP_SECURE_PORT:
+                                    ServiceController.switch_rdp_port(RDP_SECURE_PORT)
+                            
+                            newp = entry.get('new_port') or (53389 if svc_u=='RDP' else '-')
+                            app.start_single_row(str(lp), str(newp), app._normalize_service(svc_u))
+                            
+                            # Update UI state and tray icon
+                            port_tuple = (str(lp), str(newp), svc_u)
+                            if port_tuple not in app.state["selected_rows"]:
+                                app.state["selected_rows"].append(port_tuple)
+                            app._update_row_ui(str(lp), svc_u, True)
+                            if hasattr(app, 'update_tray_icon'):
+                                app.update_tray_icon()
+                        except Exception as e:
+                            log(f"remote start {svc_u} err: {e}")
+                            
+                    elif desired == 'stopped' and running:
+                        log(f"API komutu: '{svc_u}' servisi durduruluyor.")
+                        try:
+                            app.stop_single_row(str(lp), str(entry.get('new_port') or '-'), app._normalize_service(svc_u))
+                            
+                            # Handle RDP rollback
+                            if svc_u == 'RDP':
+                                from client_utils import ServiceController
+                                if ServiceController.get_rdp_port() != 3389:
+                                    ServiceController.switch_rdp_port(3389)
+                            
+                            # Update UI state - remove tuple
+                            newp = str(entry.get('new_port') or '-')
+                            app.state["selected_rows"] = [
+                                row for row in app.state["selected_rows"] 
+                                if not (isinstance(row, (list, tuple)) and len(row) >= 3 and row[0] == str(lp) and row[2].upper() == svc_u.upper())
+                            ]
+                            app._update_row_ui(str(lp), svc_u, False)
+                            if hasattr(app, 'update_tray_icon'):
+                                app.update_tray_icon()
+                        except Exception as e:
+                            log(f"remote stop {svc_u} err: {e}")
+                            
+                    app.state["remote_desired"][svc_u] = desired
+                
+                # Push current status back to dashboard
+                try:
+                    app.report_tunnel_status_once()
+                except Exception:
+                    pass
+                    
+            except Exception as e:
+                log(f"reconcile_remote_tunnels err: {e}")
+            
+            # Use RECONCILE_LOOP_INTERVAL from constants
+            from client_constants import RECONCILE_LOOP_INTERVAL
+            time.sleep(RECONCILE_LOOP_INTERVAL)

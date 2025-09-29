@@ -1,4 +1,4 @@
-; Cloud Honeypot Client Installer Script - v2.6.2
+; Cloud Honeypot Client Installer Script - v2.7.5
 ; Auto-elevating installer
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -11,7 +11,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 2
 !define VERSIONMINOR 7
-!define VERSIONBUILD 2
+!define VERSIONBUILD 5
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 RequestExecutionLevel admin
@@ -37,7 +37,7 @@ RequestExecutionLevel admin
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 !define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Cloud Honeypot Client now"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.6.2 installation completed successfully.$\r$\n$\r$\nThe application will configure auto-startup settings on first run.$\r$\n$\r$\nNo system restart required."
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.7.5 installation completed successfully.$\r$\n$\r$\nThe application will configure auto-startup settings on first run.$\r$\n$\r$\nNo system restart required."
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -66,7 +66,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     WriteRegStr HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\honeypot-client.exe" "~ RUNASADMIN"
     
     DetailPrint "================================================================"
-    DetailPrint "CLOUD HONEYPOT CLIENT v2.6.2 INSTALLATION"
+    DetailPrint "CLOUD HONEYPOT CLIENT v2.7.5 INSTALLATION"
     DetailPrint "================================================================"
     
     ; Set output path to the installation directory

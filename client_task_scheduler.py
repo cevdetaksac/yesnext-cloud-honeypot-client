@@ -258,10 +258,6 @@ def create_background_task_xml():
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartPolicy>
-      <Interval>PT10M</Interval>
-      <Count>5</Count>
-    </RestartPolicy>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -481,10 +477,6 @@ def create_silent_updater_task_xml():
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT45M</ExecutionTimeLimit>
     <Priority>6</Priority>
-    <RestartPolicy>
-      <Interval>PT5M</Interval>
-      <Count>3</Count>
-    </RestartPolicy>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -532,11 +524,11 @@ def install_task(task_name: str, xml_content: str) -> bool:
             print(f"[OK] Task {task_name} installed successfully")
             return True
         else:
-            print(f"✗ Failed to install task {task_name}: {result.stderr}")
+            print(f"[X] Failed to install task {task_name}: {result.stderr}")
             return False
             
     except Exception as e:
-        print(f"✗ Error installing task {task_name}: {e}")
+        print(f"[X] Error installing task {task_name}: {e}")
         return False
 
 def uninstall_task(task_name: str) -> bool:
@@ -557,7 +549,7 @@ def uninstall_task(task_name: str) -> bool:
             return True  # Not found is OK for uninstall
             
     except Exception as e:
-        print(f"✗ Error uninstalling task {task_name}: {e}")
+        print(f"[X] Error uninstalling task {task_name}: {e}")
         return False
 
 def verify_task_exists(task_name):
@@ -591,10 +583,10 @@ def verify_tasks():
                         print(f"  Status: {status}")
                         break
             else:
-                print(f"✗ Task {task_name} not found")
+                print(f"[X] Task {task_name} not found")
                 
         except Exception as e:
-            print(f"✗ Error checking task {task_name}: {e}")
+            print(f"[X] Error checking task {task_name}: {e}")
 
 def install_all_tasks(include_silent_updater: bool = False) -> bool:
     """Install all Task Scheduler tasks - used by installer and updates"""
@@ -628,7 +620,7 @@ def install_all_tasks(include_silent_updater: bool = False) -> bool:
         return success
         
     except Exception as e:
-        print(f"✗ install_all_tasks error: {e}")
+        print(f"[X] install_all_tasks error: {e}")
         return False
 
 def main():
@@ -649,7 +641,7 @@ def main():
             print("\n[OK] All tasks uninstalled successfully")
             sys.exit(0)
         else:
-            print("\n✗ Some tasks could not be uninstalled")
+            print("\n[X] Some tasks could not be uninstalled")
             sys.exit(1)
     
     # Install mode (default)
@@ -735,7 +727,7 @@ def uninstall_tasks():
             return fallback_individual_removal()
             
     except Exception as e:
-        print(f"✗ PowerShell removal failed: {e}")
+        print(f"[X] PowerShell removal failed: {e}")
         # Fallback to individual removal
         return fallback_individual_removal()
 
@@ -751,7 +743,7 @@ def fallback_individual_removal():
         print("[OK] Individual task removal completed")
         return True
     else:
-        print("✗ Some tasks could not be removed")
+        print("[X] Some tasks could not be removed")
         return False
 
 def check_remaining_tasks():

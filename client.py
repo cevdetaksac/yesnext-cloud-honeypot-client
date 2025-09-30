@@ -2595,43 +2595,68 @@ if __name__ == "__main__":
 
     elif operation_mode == DAEMON_MODE or args.daemon:
         # DAEMON MODE - Background operation, no GUI
-        app = None
-        try:
-            log("=== DAEMON MODE STARTUP ===")
-            
-            # Log directory setup
-            log_dir = os.path.join(os.environ.get('PROGRAMDATA', ''), 'YesNext', 'CloudHoneypotClient', 'logs')
+        import subprocess
+        import ctypes
+        import time
+        def is_user_logged_on():
+            try:
+                result = subprocess.run(['query', 'session'], capture_output=True, text=True, timeout=10)
+                for line in result.stdout.split('\n')[1:]:
+                    if 'Active' in line and 'console' in line.lower():
+                        return True
+            except Exception as e:
+                log(f"User session check error: {e}")
+            return False
+
+        if is_user_logged_on():
+            log("Active user session detected at daemon startup. Switching to tray/GUI mode.")
+            # Tray/GUI modunu başlat
+            log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
             os.makedirs(log_dir, exist_ok=True)
             setup_logging()
-            
-            log("Setting up daemon mode application...")
-            
-            # Initialize app in daemon mode
-            app = CloudHoneypotClient()
-            # Note: operation_mode tracked internally
-            
-            # Start daemon with proper error handling
-            log("Starting daemon mode...")
-            app.run_daemon()
-            
-        except KeyboardInterrupt:
-            log("Daemon interrupted by user signal")
-            sys.exit(0)
-        except Exception as daemon_error:
-            log(f"DAEMON CRITICAL ERROR: {daemon_error}")
-            import traceback
-            log(f"Daemon traceback: {traceback.format_exc()}")
-            
-            # Try to cleanup gracefully
             try:
-                if app and hasattr(app, 'heartbeat_path'):
-                    if hasattr(app, 'monitoring_manager'):
-                        app.monitoring_manager.stop_heartbeat_system()
-            except:
-                pass
-            sys.exit(1)  # Exit code 1 = Unhandled exception
-        
-        sys.exit(0)
+                config = load_config()
+                selected_language = config["language"]["selected"]
+                app = CloudHoneypotClient()
+                app.lang = selected_language
+                log(f"Application initialized with language: {selected_language}")
+                log("Building main GUI (daemon detected logon)...")
+                app.build_gui(minimized=False)
+                log("GUI build completed successfully")
+                if hasattr(app, 'root') and app.root:
+                    app.root.mainloop()
+            except Exception as gui_error:
+                log(f"GUI Mode Error (daemon logon): {gui_error}")
+                import traceback
+                log(f"GUI Error traceback: {traceback.format_exc()}")
+                sys.exit(1)
+            sys.exit(0)
+        else:
+            app = None
+            try:
+                log("=== DAEMON MODE STARTUP ===")
+                log_dir = os.path.join(os.environ.get('PROGRAMDATA', ''), 'YesNext', 'CloudHoneypotClient', 'logs')
+                os.makedirs(log_dir, exist_ok=True)
+                setup_logging()
+                log("Setting up daemon mode application...")
+                app = CloudHoneypotClient()
+                log("Starting daemon mode...")
+                app.run_daemon()
+            except KeyboardInterrupt:
+                log("Daemon interrupted by user signal")
+                sys.exit(0)
+            except Exception as daemon_error:
+                log(f"DAEMON CRITICAL ERROR: {daemon_error}")
+                import traceback
+                log(f"Daemon traceback: {traceback.format_exc()}")
+                try:
+                    if app and hasattr(app, 'heartbeat_path'):
+                        if hasattr(app, 'monitoring_manager'):
+                            app.monitoring_manager.stop_heartbeat_system()
+                except:
+                    pass
+                sys.exit(1)  # Exit code 1 = Unhandled exception
+            sys.exit(0)
     
     elif operation_mode == "watchdog":
         # ===== WATCHDOG MODE - Hourly process monitoring and restart =====

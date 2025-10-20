@@ -22,7 +22,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "2.8.0"  # Major update: Memory Optimization & Auto-Restart System
+VERSION = "2.8.1"  # Bugfix: Fixed python312.dll missing error in PyInstaller build
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

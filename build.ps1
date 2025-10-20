@@ -1,13 +1,13 @@
-# Cloud Honeypot Client v2.8.0 - Memory Optimization Build Script
-# Single script to build complete installer with memory optimization features
+# Cloud Honeypot Client v2.8.1 - Memory Optimization + DLL Fix Build Script
+# Single script to build complete installer with memory optimization and python312.dll fix
 
 param(
     [switch]$Clean = $false
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.8.0 Builder      " -ForegroundColor Green
-Write-Host "  🛡️ Memory Optimization Edition             " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.8.1 Builder      " -ForegroundColor Green
+Write-Host "  🛡️ Memory Optimization + DLL Fix          " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested
@@ -18,12 +18,12 @@ if ($Clean) {
     Write-Host "   ✅ Cleanup completed" -ForegroundColor Green
 }
 
-# Step 1: Build Python executable
-Write-Host "[1/4] Building Python executable..." -ForegroundColor Yellow
+# Step 1: Build Python executable with memory optimization modules
+Write-Host "[1/4] Building Python executable with memory optimization..." -ForegroundColor Yellow
 try {
-    & python -m PyInstaller --onefile --noconsole --icon="certs/honeypot_256.ico" --name="honeypot-client" --distpath="dist" --add-data="certs/*.ico;certs" --add-data="certs/*.png;certs" --add-data="certs/*.bmp;certs" --add-data="client_config.json;." --add-data="client_lang.json;." client.py
+    & python -m PyInstaller honeypot-client.spec
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "   SUCCESS: Executable built successfully" -ForegroundColor Green
+        Write-Host "   SUCCESS: Executable built successfully (UPX disabled, memory modules included)" -ForegroundColor Green
     } else {
         throw "PyInstaller failed"
     }

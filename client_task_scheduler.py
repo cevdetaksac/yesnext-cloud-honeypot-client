@@ -108,6 +108,7 @@ TASK_NAME_TRAY = "CloudHoneypot-Tray"
 TASK_NAME_WATCHDOG = "CloudHoneypot-Watchdog"
 TASK_NAME_UPDATER = "CloudHoneypot-Updater"
 TASK_NAME_SILENT_UPDATER = "CloudHoneypot-SilentUpdater"
+TASK_NAME_MEMORY_RESTART = "CloudHoneypot-MemoryRestart"
 
 def get_client_exe_path():
     """Get the current executable path dynamically"""
@@ -488,6 +489,65 @@ def create_silent_updater_task_xml():
 </Task>'''
     return xml_content
 
+def create_memory_restart_task_xml():
+    """Create XML for memory restart task (runs every 8 hours)"""
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_restart.ps1")
+    
+    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>{datetime.now().isoformat()}</Date>
+    <Author>Cloud Honeypot Client</Author>
+    <Description>Cloud Honeypot Client - Memory Restart (Every 8 hours for memory cleanup)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT8H</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2025-01-01T08:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>PowerShell.exe</Command>
+      <Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -File "{script_path}"</Arguments>
+      <WorkingDirectory>{os.path.dirname(script_path)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>'''
+    
+    return xml_content
+
 def install_task(task_name: str, xml_content: str) -> bool:
     """Install a scheduled task using schtasks command"""
     try:
@@ -616,6 +676,11 @@ def install_all_tasks(include_silent_updater: bool = False) -> bool:
             xml_content = create_silent_updater_task_xml()
             success &= install_task(TASK_NAME_SILENT_UPDATER, xml_content)
             print(f"[INFO] Silent updater task {'installed' if success else 'failed'}")
+        
+        # Install Memory Restart Task (every 8 hours)
+        xml_content = create_memory_restart_task_xml()
+        success &= install_task(TASK_NAME_MEMORY_RESTART, xml_content)
+        print(f"[INFO] Memory restart task {'installed' if success else 'failed'}")
         
         return success
         
@@ -767,12 +832,18 @@ def check_tasks_status(update_cache=False):
     bg_status = verify_task_exists(TASK_NAME_BACKGROUND)
     tray_status = verify_task_exists(TASK_NAME_TRAY)
     watchdog_status = verify_task_exists(TASK_NAME_WATCHDOG)
+    updater_status = verify_task_exists(TASK_NAME_UPDATER)
+    silent_updater_status = verify_task_exists(TASK_NAME_SILENT_UPDATER)
+    memory_restart_status = verify_task_exists(TASK_NAME_MEMORY_RESTART)
 
     status = {
         'background_task': bg_status,
         'tray_task': tray_status,
         'watchdog_task': watchdog_status,
-        'all_installed': bg_status and tray_status and watchdog_status,
+        'updater_task': updater_status,
+        'silent_updater_task': silent_updater_status,
+        'memory_restart_task': memory_restart_status,
+        'all_installed': bg_status and tray_status and watchdog_status and updater_status and silent_updater_status and memory_restart_status,
         'both_installed': bg_status and tray_status,  # backward compatibility
         'last_verified': int(time.time())
     }
@@ -899,6 +970,8 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
                 missing_tasks.append("Updater (maintenance)")
             if not status.get('silent_updater_task', False):
                 missing_tasks.append("SilentUpdater (auto-update)")
+            if not status.get('memory_restart_task', False):
+                missing_tasks.append("MemoryRestart (8h cleanup)")
             
             if missing_tasks:
                 log_func(f"⚠️ Missing task(s): {', '.join(missing_tasks)} - requires admin installation")
@@ -915,7 +988,8 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
             TASK_NAME_TRAY, 
             TASK_NAME_WATCHDOG,
             TASK_NAME_UPDATER,
-            TASK_NAME_SILENT_UPDATER
+            TASK_NAME_SILENT_UPDATER,
+            TASK_NAME_MEMORY_RESTART
         ]
         
         activated_count = 0

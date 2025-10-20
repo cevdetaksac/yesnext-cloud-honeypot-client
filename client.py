@@ -152,17 +152,17 @@ from client_security import SecurityManager
 from client_updater import UpdateManager
 from client_tray import TrayManager
 
-# ===================== EMERGENCY MEMORY OPTIMIZATION ===================== #
-# Import emergency memory patches for RAM leak prevention
+# ===================== SIMPLE MEMORY MANAGEMENT ===================== #
+# Basit memory restart sistemi
 try:
-    from client_auto_restart import enable_auto_restart, start_memory_watchdog, get_current_memory_mb
-    MEMORY_OPTIMIZATION_AVAILABLE = True
+    from client_memory_restart import enable_simple_memory_restart, get_current_memory_mb, check_previous_restart_state
+    MEMORY_RESTART_AVAILABLE = True
 except ImportError:
-    MEMORY_OPTIMIZATION_AVAILABLE = False
+    MEMORY_RESTART_AVAILABLE = False
     # Define dummy functions to prevent errors
-    def enable_auto_restart(*args, **kwargs): pass
-    def start_memory_watchdog(*args, **kwargs): pass
+    def enable_simple_memory_restart(*args, **kwargs): pass
     def get_current_memory_mb(): return 0
+    def check_previous_restart_state(): return None
 
 # ===================== MODULAR SYSTEM INITIALIZED ===================== #
 # Heartbeat, Singleton, Logging systems moved to separate modules
@@ -318,31 +318,80 @@ class CloudHoneypotClient:
         # RDP modülünü kullanarak başlangıç durumunu kontrol et
         self.rdp_manager.check_initial_rdp_state()
         
+        # Registry'ye current mode'u kaydet (Task Scheduler için)
+        self._update_registry_mode()
+        
         # Comprehensive Task Scheduler management - delegated to modular system
         from client_task_scheduler import perform_comprehensive_task_management
         task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
         
-        # ===================== EMERGENCY MEMORY OPTIMIZATION ===================== #
-        # Enable memory monitoring and auto-restart for servers with high RAM usage
-        if MEMORY_OPTIMIZATION_AVAILABLE:
+        # ===================== SIMPLE MEMORY RESTART ===================== #
+        # Basit memory management - 8 saatte bir restart
+        if MEMORY_RESTART_AVAILABLE:
             try:
-                # Start memory watchdog (logs memory usage every 10 minutes)
-                start_memory_watchdog(check_interval_minutes=10)
-                
-                # Enable auto-restart if memory exceeds 2GB or every 12 hours
-                enable_auto_restart(
-                    app_instance=self,
-                    restart_hours=12,        # Restart every 12 hours max
-                    memory_threshold_mb=2048 # Restart if memory > 2GB
-                )
+                # Check if this is a restart from previous session
+                previous_state = check_previous_restart_state()
+                if previous_state:
+                    gui_state = previous_state.get('gui_state', 'unknown')
+                    log(f"🔄 Restart detected - previous state: {gui_state}")
                 
                 current_memory = get_current_memory_mb()
-                log(f"🛡️ Memory optimization enabled: Current {current_memory:.1f}MB, Limit 2048MB, Auto-restart every 12h")
+                
+                # Her durumda restart schedule aktif (basit ve etkili)
+                enable_simple_memory_restart(restart_hours=8)
+                
+                log(f"� Simple memory restart enabled: Current {current_memory:.1f}MB, Restart every 8h")
                 
             except Exception as e:
-                log(f"⚠️ Memory optimization setup failed: {e}")
+                log(f"⚠️ Memory restart setup failed: {e}")
         else:
-            log("⚠️ Memory optimization disabled - modules not available")
+            log("⚠️ Memory restart disabled - module not available")
+
+    def _update_registry_mode(self):
+        """Current mode'u registry'ye kaydet (Task Scheduler için)"""
+        try:
+            current_mode = self._detect_current_mode()
+            
+            # Registry key oluştur/aç
+            import winreg
+            key_path = r"Software\YesNext\CloudHoneypot"
+            
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            except FileNotFoundError:
+                # Key yoksa oluştur
+                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+            
+            # Mode'u kaydet
+            winreg.SetValueEx(key, "LastMode", 0, winreg.REG_SZ, current_mode)
+            winreg.CloseKey(key)
+            
+            log(f"📋 Registry mode updated: {current_mode}")
+            
+        except Exception as e:
+            log(f"⚠️ Registry update failed: {e}")
+    
+    def _detect_current_mode(self):
+        """Mevcut çalışma modunu tespit et"""
+        try:
+            # Command line arguments'dan mode'u anla
+            for arg in sys.argv:
+                if "--mode=daemon" in arg:
+                    return "--mode=daemon"
+                elif "--mode=tray" in arg:
+                    return "--mode=tray"
+                elif "--mode=gui" in arg:
+                    return "--mode=gui"
+            
+            # Default: GUI varsa gui, yoksa daemon
+            if hasattr(self, 'root') and self.root:
+                return "--mode=gui"
+            else:
+                return "--mode=daemon"
+                
+        except Exception as e:
+            log(f"⚠️ Mode detection error: {e}")
+            return "--mode=daemon"  # Safe fallback
 
     def monitor_user_sessions(self):
         """Monitor for user logon sessions in daemon mode"""
@@ -1147,8 +1196,6 @@ class CloudHoneypotClient:
             
             # Tray ikonunu güncelle
             self.update_tray_icon()
-            
-            log(f"[GUI_SYNC] GUI ve tray durumu güncellendi")
                 
         except Exception as e:
             log(f"[GUI_SYNC] Senkronizasyon hatası: {e}")
@@ -2148,7 +2195,14 @@ class CloudHoneypotClient:
             self.state["fw_agent_started"] = True
 
     # ---------- GUI ---------- #
-    def build_gui(self, minimized=False):
+    def build_gui(self, minimized=None):
+        # Basit startup mode belirleme
+        startup_mode = "gui"  # default
+        
+        # Minimized parametresi varsa onu kullan
+        if minimized is not None:
+            startup_mode = "minimized" if minimized else "gui"
+            
         # One-time notice for simplicity and firewall prompts
         try:
             # Ensure root exists before messagebox
@@ -2176,7 +2230,7 @@ class CloudHoneypotClient:
                 self.root.protocol("WM_DELETE_WINDOW", self.on_close)
                 self.root.resizable(True, True)
                 
-                # Ekran merkezi pozisyonunu hesapla
+                # Ekran merkezi pozisyonunu hesapla (state restore edecek)
                 window_width = WINDOW_WIDTH
                 window_height = WINDOW_HEIGHT
                 screen_width = self.root.winfo_screenwidth()
@@ -2528,8 +2582,14 @@ class CloudHoneypotClient:
             self.update_tray_icon()
         except Exception as e:
             log(f"Exception: {e}")
-            if minimized:
-                self.root.withdraw()
+            
+        # ===== BASIT STARTUP MODE ===== #
+        # Basit startup mode uygulama
+        if startup_mode == "minimized":
+            self.root.iconify()
+        else:
+            # Normal GUI mode
+            self.root.deiconify()
 
         def _show_window():
             try:
@@ -2548,14 +2608,11 @@ class CloudHoneypotClient:
     def show_gui_from_tray(self, icon=None, item=None):
         """Show GUI from tray"""
         try:
-            log("Restoring GUI from tray...")
-            
             # Show the window
             if hasattr(self, 'root') and self.root:
                 self.root.deiconify()
                 self.root.lift()
                 self.root.focus_force()
-                log("GUI restored from tray successfully")
             
         except Exception as e:
             log(f"Show GUI error: {e}")

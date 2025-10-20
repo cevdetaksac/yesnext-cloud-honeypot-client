@@ -1,13 +1,13 @@
-# Cloud Honeypot Client v2.8.1 - Memory Optimization + DLL Fix Build Script
-# Single script to build complete installer with memory optimization and python312.dll fix
+# Cloud Honeypot Client v2.8.4 - Task Scheduler Memory Restart Build Script
+# Single script to build complete installer with Task Scheduler memory restart system
 
 param(
     [switch]$Clean = $false
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.8.1 Builder      " -ForegroundColor Green
-Write-Host "  🛡️ Memory Optimization + DLL Fix          " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.8.4 Builder      " -ForegroundColor Green
+Write-Host "  � Task Scheduler Memory Restart System   " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested
@@ -18,12 +18,12 @@ if ($Clean) {
     Write-Host "   ✅ Cleanup completed" -ForegroundColor Green
 }
 
-# Step 1: Build Python executable with memory optimization modules
-Write-Host "[1/4] Building Python executable with memory optimization..." -ForegroundColor Yellow
+# Step 1: Build Python executable with Task Scheduler memory restart
+Write-Host "[1/4] Building Python executable with Task Scheduler memory restart..." -ForegroundColor Yellow
 try {
-    & python -m PyInstaller honeypot-client.spec
+    & python -m PyInstaller honeypot-client.spec --clean
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "   SUCCESS: Executable built successfully (UPX disabled, memory modules included)" -ForegroundColor Green
+        Write-Host "   SUCCESS: Executable built successfully (Task Scheduler memory restart, 95% code reduction)" -ForegroundColor Green
     } else {
         throw "PyInstaller failed"
     }

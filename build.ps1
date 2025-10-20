@@ -1,12 +1,13 @@
-# Cloud Honeypot Client v2.6.2 - Simple Build Script
-# Single script to build complete installer
+# Cloud Honeypot Client v2.8.0 - Memory Optimization Build Script
+# Single script to build complete installer with memory optimization features
 
 param(
     [switch]$Clean = $false
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.6.2 Builder      " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.8.0 Builder      " -ForegroundColor Green
+Write-Host "  🛡️ Memory Optimization Edition             " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested

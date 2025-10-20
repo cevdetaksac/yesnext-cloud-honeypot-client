@@ -270,7 +270,6 @@ class HoneypotAPIClient:
             
             if result and 'count' in result:
                 count = int(result['count'])
-                # Sadece count değiştiğinde logla (isteğe bağlı iyileştirme)
                 return count
             
             return None

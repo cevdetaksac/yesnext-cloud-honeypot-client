@@ -255,8 +255,6 @@ class TrayManager:
         active_enabled_services = 0
         total_enabled_services = 0
         
-        log("[TRAY] Protection status kontrol ediliyor...")
-        
         try:
             # Config'den enabled servisleri al
             from client_constants import get_app_config
@@ -271,7 +269,6 @@ class TrayManager:
                 for tunnel in active_tunnels:
                     if 'local_port' in tunnel:
                         tunnel_ports[tunnel['local_port']] = tunnel
-            log(f"[TRAY] Active tunnel ports: {list(tunnel_ports.keys())}")
             
             # Her enabled servis için kontrol
             for port_config in default_ports:
@@ -282,8 +279,6 @@ class TrayManager:
                 local_port = port_config["local"]
                 total_enabled_services += 1
                 
-                log(f"[TRAY] {service_name} (port {local_port}) kontrolü - enabled=true")
-                
                 # Bu servis için aktif tünel var mı?
                 tunnel = tunnel_ports.get(local_port)
                 if tunnel:
@@ -291,25 +286,9 @@ class TrayManager:
                     status = tunnel.get('status', 'unknown')
                     if status == 'active':
                         active_enabled_services += 1
-                        log(f"[TRAY] ✅ {service_name}:{local_port} - ACTIVE (status=active)")
-                    else:
-                        log(f"[TRAY] ❌ {service_name}:{local_port} - NOT active (status={status})")
-                else:
-                    log(f"[TRAY] ❌ {service_name}:{local_port} - NO TUNNEL (not in active tunnels)")
-            
-            # Sonuçları logla
-            log(f"[TRAY] Enabled services: {total_enabled_services}, Active: {active_enabled_services}")
             
             # En az bir enabled service aktifse protection aktif
             has_active_protection = active_enabled_services > 0
-            
-            # RDP port durumunu da log'la (bilgi için)
-            if hasattr(self.app_instance, 'rdp_manager'):
-                try:
-                    is_rdp_on_secure_port, current_port = self.app_instance.rdp_manager.get_rdp_protection_status()
-                    log(f"[TRAY] RDP info: port={current_port}, secure_port={is_rdp_on_secure_port}")
-                except Exception as rdp_error:
-                    log(f"[TRAY] RDP info check error: {rdp_error}")
             
             # Tünel başlatma başarısızsa log ekle
             if total_enabled_services > 0 and active_enabled_services == 0:
@@ -319,7 +298,6 @@ class TrayManager:
             log(f"[TRAY] Protection status check error: {e}")
             has_active_protection = False
         
-        log(f"[TRAY] 🎯 Final result: has_active_protection={has_active_protection}")
         return has_active_protection
 
     def update_tray_icon(self):
@@ -335,8 +313,6 @@ class TrayManager:
                 # Update title with status
                 status = self.t("protection_active") if is_active else self.t("protection_inactive")
                 self.tray_icon.title = f"{self.t('app_title')} - {status}"
-                
-                log(f"Tray icon updated: active={is_active}")
                 
             except Exception as e:
                 log(f"Tray icon update error: {e}")

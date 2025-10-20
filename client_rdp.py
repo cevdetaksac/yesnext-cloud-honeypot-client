@@ -42,7 +42,10 @@ class RDPManager:
             if current_port is None:
                 current_port = 3389
             is_protected = current_port == RDP_SECURE_PORT
-            log(f"🔍 RDP koruma durumu: port={current_port}, korumalı={'Evet' if is_protected else 'Hayır'}")
+            # Sadece durum değişikliklerinde logla
+            if not hasattr(self, '_last_rdp_status') or self._last_rdp_status != (is_protected, current_port):
+                log(f"🔍 RDP koruma durumu: port={current_port}, korumalı={'Evet' if is_protected else 'Hayır'}")
+                self._last_rdp_status = (is_protected, current_port)
             return is_protected, current_port
         except Exception as e:
             log(f"❌ RDP durum kontrolü hatası: {e}")

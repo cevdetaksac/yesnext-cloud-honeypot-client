@@ -152,6 +152,18 @@ from client_security import SecurityManager
 from client_updater import UpdateManager
 from client_tray import TrayManager
 
+# ===================== EMERGENCY MEMORY OPTIMIZATION ===================== #
+# Import emergency memory patches for RAM leak prevention
+try:
+    from client_auto_restart import enable_auto_restart, start_memory_watchdog, get_current_memory_mb
+    MEMORY_OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    MEMORY_OPTIMIZATION_AVAILABLE = False
+    # Define dummy functions to prevent errors
+    def enable_auto_restart(*args, **kwargs): pass
+    def start_memory_watchdog(*args, **kwargs): pass
+    def get_current_memory_mb(): return 0
+
 # ===================== MODULAR SYSTEM INITIALIZED ===================== #
 # Heartbeat, Singleton, Logging systems moved to separate modules
 
@@ -293,6 +305,15 @@ class CloudHoneypotClient:
         self.root = self.btn_primary = self.tree = None
         self.attack_entry = self.ip_entry = self.show_cb = None
         
+        # GUI health monitoring
+        self.gui_health = {
+            'last_update': time.time(),
+            'update_count': 0,
+            'frozen_count': 0,
+            'last_response': time.time(),
+            'health_check_interval': 30  # seconds
+        }
+        
         # Check initial RDP state and report to API
         # RDP modülünü kullanarak başlangıç durumunu kontrol et
         self.rdp_manager.check_initial_rdp_state()
@@ -300,6 +321,28 @@ class CloudHoneypotClient:
         # Comprehensive Task Scheduler management - delegated to modular system
         from client_task_scheduler import perform_comprehensive_task_management
         task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
+        
+        # ===================== EMERGENCY MEMORY OPTIMIZATION ===================== #
+        # Enable memory monitoring and auto-restart for servers with high RAM usage
+        if MEMORY_OPTIMIZATION_AVAILABLE:
+            try:
+                # Start memory watchdog (logs memory usage every 10 minutes)
+                start_memory_watchdog(check_interval_minutes=10)
+                
+                # Enable auto-restart if memory exceeds 2GB or every 12 hours
+                enable_auto_restart(
+                    app_instance=self,
+                    restart_hours=12,        # Restart every 12 hours max
+                    memory_threshold_mb=2048 # Restart if memory > 2GB
+                )
+                
+                current_memory = get_current_memory_mb()
+                log(f"🛡️ Memory optimization enabled: Current {current_memory:.1f}MB, Limit 2048MB, Auto-restart every 12h")
+                
+            except Exception as e:
+                log(f"⚠️ Memory optimization setup failed: {e}")
+        else:
+            log("⚠️ Memory optimization disabled - modules not available")
 
     def monitor_user_sessions(self):
         """Monitor for user logon sessions in daemon mode"""
@@ -564,6 +607,138 @@ class CloudHoneypotClient:
             log(f"[API] Saldırı sayısı sorgulama hatası: {e}")
             return None
 
+    def check_gui_health(self):
+        """GUI sağlık durumunu kontrol et ve gerekirse yenile"""
+        if not self.root:
+            return
+            
+        try:
+            # GUI yanıt verme durumunu test et
+            current_time = time.time()
+            
+            # Test için basit bir GUI operasyonu yap
+            self.root.winfo_exists()
+            self.gui_health['last_response'] = current_time
+            self.gui_health['update_count'] += 1
+            
+            # Sağlık durumunu kontrol et
+            time_since_last_update = current_time - self.gui_health['last_update']
+            
+            if time_since_last_update > 60:  # 1 dakikadan uzun güncelleme yok
+                log(f"[GUI_HEALTH] GUI uzun süredir güncellenmedi: {time_since_last_update:.1f}s")
+                self.gui_health['frozen_count'] += 1
+                
+                # GUI'yi yenilemeye çalış
+                self.refresh_gui()
+                
+            # Donma sayısı çok yüksekse yeniden başlatma önerisi
+            if self.gui_health['frozen_count'] > 5:
+                log("[GUI_HEALTH] ⚠️ GUI sık sık donuyor - yeniden başlatma önerilir")
+                
+            # Windows Server özel kontrolleri
+            self.check_windows_session_state()
+                
+        except Exception as e:
+            log(f"[GUI_HEALTH] GUI sağlık kontrolü hatası: {e}")
+            self.gui_health['frozen_count'] += 1
+            
+        # Bir sonraki kontrol için zamanla
+        if self.root:
+            self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
+
+    def check_windows_session_state(self):
+        """Windows session durumunu kontrol et"""
+        try:
+            import subprocess
+            
+            # Session durumunu kontrol et
+            result = subprocess.run(['query', 'session'], 
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            if result.returncode == 0:
+                # Aktif session var mı kontrol et
+                has_active_session = 'Active' in result.stdout
+                
+                if not has_active_session:
+                    log("[GUI_HEALTH] Aktif kullanıcı session'ı yok - GUI minimal modda çalışacak")
+                    # Minimize to tray if no active session
+                    if hasattr(self, 'tray_manager') and self.tray_manager:
+                        self.root.withdraw()
+                        
+        except Exception as e:
+            log(f"[GUI_HEALTH] Session kontrolü hatası: {e}")
+
+    def restart_gui_if_needed(self):
+        """Kritik durumlarda GUI'yi yeniden başlat"""
+        try:
+            if self.gui_health['frozen_count'] > 10:
+                log("[GUI_HEALTH] 🔄 GUI çok sık donuyor - yeniden başlatılıyor")
+                
+                # Mevcut GUI'yi temizle
+                if self.root:
+                    self.root.destroy()
+                
+                # Yeni GUI başlat
+                import threading
+                restart_thread = threading.Thread(target=self._restart_gui_thread, daemon=True)
+                restart_thread.start()
+                
+        except Exception as e:
+            log(f"[GUI_HEALTH] GUI yeniden başlatma hatası: {e}")
+
+    def _restart_gui_thread(self):
+        """GUI yeniden başlatma thread'i"""
+        try:
+            time.sleep(2)  # Kısa bekleme
+            log("[GUI_HEALTH] GUI yeniden başlatılıyor...")
+            
+            # Reset GUI health
+            self.gui_health['frozen_count'] = 0
+            self.gui_health['last_update'] = time.time()
+            
+            # Yeni GUI başlat
+            self.build_gui()
+            
+        except Exception as e:
+            log(f"[GUI_HEALTH] GUI yeniden başlatma thread hatası: {e}")
+
+    def refresh_gui(self):
+        """GUI'yi yenileme işlemleri"""
+        if not self.root:
+            return
+            
+        try:
+            # GUI öğelerini zorla güncelle
+            self.root.update_idletasks()
+            
+            # Windows Server optimizasyonları
+            from client_utils import get_from_config
+            if get_from_config("advanced.windows_server_mode", False):
+                # Memory cleanup
+                import gc
+                gc.collect()
+                
+                # GUI handle cleanup
+                self.root.update()
+                
+                # Window state validation
+                if self.root.state() == 'withdrawn':
+                    log("[GUI_HEALTH] Pencere gizli durumda, görünür hale getiriliyor")
+                    self.root.deiconify()
+            
+            # Tray ikonunu güncelle
+            if hasattr(self, 'tray_manager'):
+                self.update_tray_icon()
+                
+            # Son güncelleme zamanını işaretle
+            self.gui_health['last_update'] = time.time()
+            
+            log("[GUI_HEALTH] GUI yenileme tamamlandı")
+            
+        except Exception as e:
+            log(f"[GUI_HEALTH] GUI yenileme hatası: {e}")
+
     def refresh_attack_count(self, async_thread=True):
         """GUI'deki saldırı sayacını günceller"""
         token = self.state.get("token")
@@ -816,8 +991,7 @@ class CloudHoneypotClient:
         # mode: "secure" (3389->53389) or "rollback" (53389->3389)
         with self.reconciliation_lock:
             self.state["reconciliation_paused"] = True
-            log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
-            log("RDP geçişi için API senkronizasyonu duraklatıldı.")
+            log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.RDP geçişi için API senkronizasyonu duraklatıldı.")
         
         def on_confirm_wrapped():
             """Wrapper for confirmation callback with additional handling"""
@@ -956,7 +1130,8 @@ class CloudHoneypotClient:
                     # Normal durumda - koruma için mavi
                     rdp_btn.config(text=new_text, bg="#2196F3", fg="white")
                 
-                log(f"🔄 RDP butonu güncellendi: {new_text}")
+                # Sadece debug mode'da logla
+                # log(f"🔄 RDP butonu güncellendi: {new_text}")
                 
                 # Tray ikonunu da güncelle
                 self.update_tray_icon()
@@ -1824,16 +1999,26 @@ class CloudHoneypotClient:
 
     def on_close(self):
         """Handle window close event - delegated to tray manager"""
-        if hasattr(self, 'tray_manager') and self.tray_manager:
-            self.tray_manager.on_window_close()
-        else:
-            # Fallback if no tray manager
-            if self.state.get("running", False):
-                messagebox.showwarning(self.t("warn"), "Please stop services first")
-                return
-            if hasattr(self, 'root') and self.root:
-                self.root.destroy()
-            os._exit(0)
+        try:
+            if hasattr(self, 'tray_manager') and self.tray_manager:
+                self.tray_manager.on_window_close()
+            else:
+                # Fallback if no tray manager
+                if self.state.get("running", False):
+                    messagebox.showwarning(self.t("warn"), "Please stop services first")
+                    return
+                    
+                # GUI cleanup before exit
+                if hasattr(self, 'gui_health'):
+                    log("[GUI_HEALTH] Uygulama kapanıyor - GUI temizleniyor")
+                    
+                if hasattr(self, 'root') and self.root:
+                    self.root.destroy()
+                os._exit(0)
+        except Exception as e:
+            log(f"[GUI_HEALTH] Kapanış hatası: {e}")
+            # Force exit if cleanup fails
+            os._exit(1)
 
     def stop_single_instance_server(self):
         s = self.state.get("ctrl_sock")
@@ -2354,6 +2539,9 @@ class CloudHoneypotClient:
 
         # Otomatik saldırı sayacı
         self.root.after(0, self.poll_attack_count)
+        
+        # GUI sağlık durumu izleme başlat
+        self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
 
 
 

@@ -1,5 +1,5 @@
-; Cloud Honeypot Client Installer Script - v2.7.8
-; Auto-elevating installer with auto-start capability
+; Cloud Honeypot Client Installer Script - v2.8.3
+; Enhanced installer process cleanup + GUI state preservation
 !include "MUI2.nsh"
 !include "WinVer.nsh"
 !include "LogicLib.nsh"
@@ -11,8 +11,8 @@ OutFile "cloud-client-installer.exe"
 !define COMPANYNAME "YesNext"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 2
-!define VERSIONMINOR 7
-!define VERSIONBUILD 8
+!define VERSIONMINOR 8
+!define VERSIONBUILD 3
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -38,7 +38,7 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page - Auto-start configuration
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.7.8 installed successfully$\r$\n$\r$\nApplication will start automatically$\r$\nDesktop shortcut has been created$\r$\nSystem is ready for security monitoring$\r$\n$\r$\nInstaller will close automatically..."
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v2.8.3 installed successfully$\r$\n$\r$\nApplication will start automatically$\r$\nDesktop shortcut has been created$\r$\nSystem is ready for security monitoring$\r$\n$\r$\nInstaller will close automatically..."
 ;!insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -88,12 +88,25 @@ ForceStopRetry:
     Push $5
     Call WriteLog
     DetailPrint $5
-    nsExec::Exec 'taskkill /f /t /im "$2" >nul 2>&1'
-    Pop $4
-    Sleep 1000
+    
+    ; First try gentle termination
+    nsExec::Exec 'taskkill /t /im "$2" >nul 2>&1'
+    Sleep 2000
+    
+    ; Check if still running
     nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "if (Get-Process -Name `"$0`" -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"'
     Pop $4
     StrCmp $4 "0" ForceStopOkay 0
+    
+    ; Force kill if still running
+    nsExec::Exec 'taskkill /f /t /im "$2" >nul 2>&1'
+    Sleep 2000
+    
+    ; Final check
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "if (Get-Process -Name `"$0`" -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"'
+    Pop $4
+    StrCmp $4 "0" ForceStopOkay 0
+    
     IntOp $1 $1 + 1
     IntCmp $1 ${MAX_PROCESS_KILL_ATTEMPTS} ForceStopFailed ForceStopRetry ForceStopRetry
 ForceStopOkay:
@@ -132,7 +145,7 @@ Function .onInit
     Delete $LogFile
     
     ; Start logging
-    Push "=== CLOUD HONEYPOT CLIENT v2.7.8 INSTALLER ==="
+    Push "=== CLOUD HONEYPOT CLIENT v2.8.3 INSTALLER ==="
     Call WriteLog
     Push "Installation started with admin privileges"
     Call WriteLog
@@ -160,12 +173,25 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
 
     ; Step 2: Terminate running honeypot processes
     !insertmacro LOG "[PREP] Terminating running honeypot processes..."
+    
+    ; Stop all related processes with comprehensive approach
     Push "honeypot-client"
     Call ForceStopProcess
-    Push "pythonw"
-    Call ForceStopProcess
-    Push "python"
-    Call ForceStopProcess
+    
+    ; Also check for any Python processes running our script
+    !insertmacro LOG "[PREP] Checking for Python processes running honeypot client..."
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.ProcessName -eq \"python\" -or $_.ProcessName -eq \"pythonw\" } | Where-Object { $_.MainModule.FileName -like \"*honeypot*\" -or $_.CommandLine -like \"*client.py*\" } | Stop-Process -Force -ErrorAction SilentlyContinue"'
+    
+    ; Additional cleanup for any remaining honeypot processes
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.ProcessName -like \"*honeypot*\" } | Stop-Process -Force -ErrorAction SilentlyContinue"'
+    
+    ; Wait for processes to fully terminate
+    Sleep 3000
+    
+    ; Final verification
+    !insertmacro LOG "[PREP] Verifying all honeypot processes are stopped..."
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "if (Get-Process -Name \"honeypot-client\" -ErrorAction SilentlyContinue) { Write-Host \"WARNING: honeypot-client still running\" } else { Write-Host \"OK: honeypot-client stopped\" }"'
+    
     !insertmacro LOG "[PREP] Pre-installation cleanup finished."
 
     ; =================================================================

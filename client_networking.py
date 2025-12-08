@@ -2,7 +2,21 @@
 # -*- coding: utf-8 -*-
 """
 Cloud Honeypot Client - Network and Tunneling
-Tünel sunucusu ve network bağlantı yönetimi
+Tunel sunucusu ve network baglanti yonetimi
+
+Version: 2.8.5 (Performance Optimized)
+
+Features:
+- Secure tunnel server with TLS (port 8443)
+- Local tunnel listener (port 8081)
+- Connection pooling and keepalive
+- Automatic reconnection handling
+
+Performance Notes (v2.8.5):
+- tunnel_sync_loop now includes watchdog (merged from tunnel_watchdog_loop)
+- Single loop handles both sync (60s) and watchdog (15s) operations
+- Reduced thread count and improved resource efficiency
+- tunnel_watchdog_loop is DEPRECATED - kept for compatibility
 """
 
 import os
@@ -273,90 +287,114 @@ class TunnelManager:
     
     @staticmethod
     def tunnel_sync_loop(app):
-        """Regularly synchronize tunnel states with API"""
+        """Combined tunnel sync and watchdog loop - PERFORMANCE OPTIMIZED
+        
+        Previously there were two separate loops:
+        - tunnel_sync_loop: API sync every 45s (checked every 10s)
+        - tunnel_watchdog_loop: Dead tunnel check every 15s
+        
+        Now combined into one loop that does both, reducing thread overhead.
+        """
+        last_sync = 0
+        last_watchdog = 0
+        
         while True:
             try:
                 current_time = time.time()
-                last_sync = app.state.get("last_tunnel_sync", 0)
-                sync_interval = app.state.get("tunnel_sync_interval", DASHBOARD_SYNC_INTERVAL)
                 
+                # Watchdog check - every WATCHDOG_INTERVAL (15s)
+                if current_time - last_watchdog >= WATCHDOG_INTERVAL:
+                    TunnelManager._do_watchdog_check(app)
+                    last_watchdog = current_time
+                
+                # API sync - every DASHBOARD_SYNC_INTERVAL (45s)
+                sync_interval = app.state.get("tunnel_sync_interval", DASHBOARD_SYNC_INTERVAL)
                 if current_time - last_sync >= sync_interval:
                     TunnelManager.sync_tunnel_states(app)
                     app.state["last_tunnel_sync"] = current_time
-                    
+                    last_sync = current_time
+                
+                # Sleep for the shorter interval
                 time.sleep(DASHBOARD_SYNC_CHECK)
+                
             except Exception as e:
                 log(f"Tunnel sync loop error: {e}")
-                time.sleep(DASHBOARD_SYNC_INTERVAL * 4)  # Error durumunda daha uzun bekle
+                time.sleep(DASHBOARD_SYNC_INTERVAL)  # Error durumunda daha uzun bekle
+
+    @staticmethod
+    def _do_watchdog_check(app):
+        """Internal watchdog check - monitors and restarts dead tunnels"""
+        try:
+            if not app.state.get("running"):
+                return
+                
+            # Güvenli desired set oluşturma
+            desired = set()
+            for row in app.state.get("selected_rows", []):
+                try:
+                    if isinstance(row, (list, tuple)) and len(row) >= 3:
+                        listen_port, new_port, service = str(row[0]), str(row[1]), str(row[2])
+                        desired.add((listen_port, service.upper()))
+                except Exception:
+                    pass  # Silent - avoid log spam
+            
+            # Restart missing/dead tunnels
+            for row in app.state.get("selected_rows", []):
+                try:
+                    # Güvenli tuple unpacking
+                    if isinstance(row, (list, tuple)) and len(row) >= 3:
+                        listen_port, new_port, service = row[0], row[1], row[2]
+                    else:
+                        continue  # Geçersiz format, atla
+                        
+                    lp = int(str(listen_port))
+                    st = app.state["servers"].get(lp)
+                    if (st is None) or (not st.is_alive()):
+                        try:
+                            st2 = TunnelServerThread(app, lp, str(service))
+                            st2.start(); time.sleep(0.2)
+                            if st2.is_alive():
+                                app.state["servers"][lp] = st2
+                                log(f"[watchdog] {service}:{lp} yeniden başlatıldı")
+                        except Exception as e:
+                            log(f"[watchdog] {service}:{lp} başlatılamadı: {e}")
+                except Exception:
+                    pass  # Silent - avoid log spam
+
+            # Stop excess tunnels
+            for lp, st in list(app.state["servers"].items()):
+                try:
+                    service_name = getattr(st, 'service_name', 'UNKNOWN')
+                    key = (str(lp), str(service_name).upper())
+                    if key not in desired:
+                        try: st.stop(); del app.state["servers"][lp]
+                        except Exception: pass
+                except Exception:
+                    pass  # Silent - avoid log spam
+        except Exception as e:
+            log(f"watchdog check err: {e}")
 
     @staticmethod  
     def tunnel_watchdog_loop(app):
-        """Monitor and restart dead tunnels"""
-        while True:
-            try:
-                if app.state.get("running"):
-                    # Güvenli desired set oluşturma
-                    desired = set()
-                    for row in app.state.get("selected_rows", []):
-                        try:
-                            if isinstance(row, (list, tuple)) and len(row) >= 3:
-                                listen_port, new_port, service = str(row[0]), str(row[1]), str(row[2])
-                                desired.add((listen_port, service.upper()))
-                        except Exception as e:
-                            log(f"[watchdog] Desired set'e eklenemedi {row}: {e}")
-                    
-                    # Restart missing/dead tunnels
-                    for row in app.state.get("selected_rows", []):
-                        try:
-                            # Güvenli tuple unpacking
-                            if isinstance(row, (list, tuple)) and len(row) >= 3:
-                                listen_port, new_port, service = row[0], row[1], row[2]
-                            else:
-                                continue  # Geçersiz format, atla
-                                
-                            lp = int(str(listen_port))
-                            st = app.state["servers"].get(lp)
-                            if (st is None) or (not st.is_alive()):
-                                try:
-                                    st2 = TunnelServerThread(app, lp, str(service))
-                                    st2.start(); time.sleep(0.2)
-                                    if st2.is_alive():
-                                        app.state["servers"][lp] = st2
-                                        log(f"[watchdog] {service}:{lp} yeniden başlatıldı")
-                                except Exception as e:
-                                    log(f"[watchdog] {service}:{lp} başlatılamadı: {e}")
-                        except Exception as e:
-                            log(f"[watchdog] Row işlenemedi {row}: {e}")
-
-                    # Stop excess tunnels
-                    for lp, st in list(app.state["servers"].items()):
-                        try:
-                            service_name = getattr(st, 'service_name', 'UNKNOWN')
-                            key = (str(lp), str(service_name).upper())
-                            if key not in desired:
-                                try: st.stop(); del app.state["servers"][lp]
-                                except Exception: pass
-                        except Exception as e:
-                            log(f"[watchdog] Server cleanup hatası {lp}: {e}")
-            except Exception as e:
-                log(f"watchdog loop err: {e}")
-            time.sleep(WATCHDOG_INTERVAL)
+        """DEPRECATED: Now integrated into tunnel_sync_loop for performance.
+        Kept for backward compatibility but does nothing."""
+        log("[DEPRECATED] tunnel_watchdog_loop is now integrated into tunnel_sync_loop")
+        # Do nothing - functionality moved to tunnel_sync_loop
+        pass
 
     @staticmethod
     def sync_tunnel_states(app):
-        """Synchronize tunnel states with API"""
+        """Synchronize tunnel states with API - with reduced logging"""
         if app.state.get("reconciliation_paused"):
-            log("[DASHBOARD_SYNC] Senkronizasyon duraklatıldı, atlanıyor...")
-            return
+            return  # Silent skip - no log spam
         try:
-            log("[DASHBOARD_SYNC] Dashboard durumları kontrol ediliyor...")
             remote = app.api_request("GET", "premium/tunnel-status") or {}
             local  = app.get_local_tunnel_state()
             
             if not remote:
-                log("[DASHBOARD_SYNC] Dashboard'dan yanıt alınamadı, atlanıyor")
-                return
+                return  # Silent skip - no log spam
 
+            changes_made = False
             for service, remote_cfg in remote.items():
                 if service not in DEFAULT_TUNNELS: 
                     continue
@@ -366,23 +404,22 @@ class TunnelManager:
 
                 if desired == 'started' and local_status != 'started':
                     newp = str(remote_cfg.get('new_port') or listen_port)
-                    log(f"[DASHBOARD_SYNC] {service} başlatılıyor - Dashboard isteği (port: {newp})")
+                    log(f"[SYNC] {service} başlatılıyor (port: {newp})")
                     app.start_single_row(listen_port, newp, service)
-                    # UI güncelleme: listen_port ile
                     app._update_row_ui(listen_port, service, True)
+                    changes_made = True
                 elif desired == 'stopped' and local_status != 'stopped':
                     newp = str(remote_cfg.get('new_port') or listen_port)
-                    log(f"[DASHBOARD_SYNC] {service} durduruluyor - Dashboard isteği")
+                    log(f"[SYNC] {service} durduruluyor")
                     app.stop_single_row(listen_port, newp, service)
+                    changes_made = True
 
-            app.report_tunnel_status_once()
-            
-            # GUI buton durumunu güncelle
-            app.sync_gui_with_tunnel_state()
-            
-            log("[DASHBOARD_SYNC] Dashboard senkronizasyonu tamamlandı")
+            if changes_made:
+                app.report_tunnel_status_once()
+                app.sync_gui_with_tunnel_state()
+                
         except Exception as e:
-            log(f"[DASHBOARD_SYNC] Tünel durumları senkronize edilirken hata: {e}")
+            log(f"[SYNC] Senkronizasyon hatası: {e}")
         finally:
             with app.reconciliation_lock:
                 app.state["reconciliation_paused"] = False

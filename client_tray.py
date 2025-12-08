@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLIENT TRAY MODULE
-=====================
+CLIENT TRAY MODULE - v2.8.5 (Performance Optimized)
+====================================================
 
-📱 SYSTEM TRAY INTEGRATION & NOTIFICATIONS
-===========================================
+SYSTEM TRAY INTEGRATION & NOTIFICATIONS
+========================================
+
+Performance Notes (v2.8.5):
+- Added minimized_to_tray flag for state tracking
+- Fixed window auto-show issue when intentionally minimized
+- Proper tray state management across GUI refreshes
 
 🔍 MODULE PURPOSE:
 This module provides comprehensive system tray integration for the Cloud Honeypot
@@ -325,6 +330,9 @@ class TrayManager:
         """Show main window from tray"""
         try:
             if hasattr(self.app_instance, 'root') and self.app_instance.root:
+                # Clear tray mode flag
+                self.app_instance.minimized_to_tray = False
+                
                 # Pencereyi göster ve öne getir
                 self.app_instance.root.deiconify()
                 self.app_instance.root.lift()
@@ -346,6 +354,8 @@ class TrayManager:
         """Minimize window to tray"""
         try:
             if hasattr(self.app_instance, 'root') and self.app_instance.root:
+                # Mark as intentionally in tray to prevent auto-show
+                self.app_instance.minimized_to_tray = True
                 self.app_instance.root.withdraw()
         except Exception as e:
             log(f"Minimize error: {e}")

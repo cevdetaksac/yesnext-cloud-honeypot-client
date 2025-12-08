@@ -1,13 +1,13 @@
-# Cloud Honeypot Client v2.8.4 - Task Scheduler Memory Restart Build Script
-# Single script to build complete installer with Task Scheduler memory restart system
+# Cloud Honeypot Client v2.8.5 - Performance Optimized Build Script
+# Single script to build complete installer with optimized performance
 
 param(
     [switch]$Clean = $false
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.8.4 Builder      " -ForegroundColor Green
-Write-Host "  � Task Scheduler Memory Restart System   " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.8.5 Builder      " -ForegroundColor Green
+Write-Host "  🚀 Performance Optimized Version          " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested
@@ -18,12 +18,12 @@ if ($Clean) {
     Write-Host "   ✅ Cleanup completed" -ForegroundColor Green
 }
 
-# Step 1: Build Python executable with Task Scheduler memory restart
-Write-Host "[1/4] Building Python executable with Task Scheduler memory restart..." -ForegroundColor Yellow
+# Step 1: Build Python executable with performance optimizations
+Write-Host "[1/4] Building Python executable with performance optimizations..." -ForegroundColor Yellow
 try {
     & python -m PyInstaller honeypot-client.spec --clean
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "   SUCCESS: Executable built successfully (Task Scheduler memory restart, 95% code reduction)" -ForegroundColor Green
+        Write-Host "   SUCCESS: Executable built successfully (performance optimized)" -ForegroundColor Green
     } else {
         throw "PyInstaller failed"
     }

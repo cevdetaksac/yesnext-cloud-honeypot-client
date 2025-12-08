@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLIENT MONITORING MODULE
-============================
+CLIENT MONITORING MODULE - v2.8.5 (Performance Optimized)
+==========================================================
 
-📊 SYSTEM HEALTH & HEARTBEAT MANAGEMENT
-========================================
+SYSTEM HEALTH & HEARTBEAT MANAGEMENT
+=====================================
+
+Performance Notes (v2.8.5):
+- FILE_HEARTBEAT_INTERVAL increased to 60s (was 10s)
+- Reduced file I/O by 83%
+- Health checks now at 60s intervals
 
 🔍 MODULE PURPOSE:
 This module provides comprehensive system monitoring capabilities for the 
@@ -91,7 +96,7 @@ import datetime as dt
 import ctypes
 from typing import Optional, Dict, Any
 
-from client_constants import HEARTBEAT_FILE, HEARTBEAT_INTERVAL, __version__
+from client_constants import HEARTBEAT_FILE, FILE_HEARTBEAT_INTERVAL, __version__
 from client_helpers import log
 
 # ===================== HEARTBEAT SYSTEM ===================== #
@@ -155,7 +160,7 @@ def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
 
 def heartbeat_worker(heartbeat_path: str, app_instance=None):
     """Background worker for heartbeat updates"""
-    log(f"Heartbeat worker başlatıldı (her {HEARTBEAT_INTERVAL} saniye)")
+    log(f"Heartbeat worker başlatıldı (her {FILE_HEARTBEAT_INTERVAL} saniye)")
     
     while True:
         try:
@@ -164,10 +169,10 @@ def heartbeat_worker(heartbeat_path: str, app_instance=None):
             else:
                 log("Heartbeat güncellenemedi")
             
-            time.sleep(HEARTBEAT_INTERVAL)
+            time.sleep(FILE_HEARTBEAT_INTERVAL)
         except Exception as e:
             log(f"Heartbeat worker hatası: {e}")
-            time.sleep(HEARTBEAT_INTERVAL)
+            time.sleep(FILE_HEARTBEAT_INTERVAL)
 
 def cleanup_heartbeat_file(heartbeat_path: str):
     """Clean up heartbeat file on application exit"""

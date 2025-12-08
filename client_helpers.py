@@ -3,10 +3,23 @@
 """
 Cloud Honeypot Client - Helper Functions
 Yardımcı fonksiyonlar ve genel amaçlı utilities
+
+Version: 2.8.5 (Performance Optimized)
+
+Features:
+- Public IP caching with 5-minute TTL (reduces HTTP calls)
+- Token obfuscation and security helpers
+- GUI message utilities
+- Hash and checksum functions
+
+Performance Notes (v2.8.5):
+- get_public_ip() now caches results for 300 seconds
+- Use force_refresh=True to bypass cache when needed
 """
 
 import os
 import sys
+import time
 import hashlib
 import requests
 import tkinter as tk
@@ -18,6 +31,13 @@ from client_utils import SystemUtils
 
 # Global logger reference - will be set by main application
 LOGGER: Optional[logging.Logger] = None
+
+# IP Cache for performance optimization
+_ip_cache = {
+    'ip': None,
+    'last_check': 0,
+    'cache_duration': 300  # 5 minutes cache (was checking every 60s)
+}
 
 def set_logger(logger: logging.Logger) -> None:
     """Set global logger for helper functions"""
@@ -79,13 +99,33 @@ class ClientHelpers:
         return h.hexdigest()
 
     @staticmethod
-    def get_public_ip() -> str:
-        """Get public IP address with fallback"""
+    def get_public_ip(force_refresh: bool = False) -> str:
+        """Get public IP address with caching for performance
+        
+        Args:
+            force_refresh: If True, bypass cache and fetch fresh IP
+            
+        Returns:
+            Public IP address string
+        """
+        global _ip_cache
+        current_time = time.time()
+        
+        # Return cached IP if still valid and not forcing refresh
+        if not force_refresh and _ip_cache['ip'] and \
+           (current_time - _ip_cache['last_check']) < _ip_cache['cache_duration']:
+            return _ip_cache['ip']
+        
+        # Fetch new IP
         try:
-            return requests.get("https://api.ipify.org", timeout=5).text.strip()
+            ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+            _ip_cache['ip'] = ip
+            _ip_cache['last_check'] = current_time
+            return ip
         except Exception as e:
             log(f"get_public_ip error: {e}")
-            return "0.0.0.0"
+            # Return cached IP if available, otherwise fallback
+            return _ip_cache['ip'] if _ip_cache['ip'] else "0.0.0.0"
 
     @staticmethod
     def safe_set_entry(entry: tk.Entry, text: str):

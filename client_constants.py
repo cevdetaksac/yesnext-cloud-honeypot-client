@@ -2,7 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 Cloud Honeypot Client - Constants and Configuration
-Tüm uygulama sabitlerinin merkezi yönetimi
+Tum uygulama sabitlerinin merkezi yonetimi
+
+Version: 2.8.5 (Performance Optimized)
+
+Key Intervals (optimized for performance):
+- FILE_HEARTBEAT_INTERVAL: 60s (was 10s in v2.8.4)
+- API_HEARTBEAT_INTERVAL: 60s (server heartbeat)
+- ATTACK_COUNT_REFRESH: 15s (GUI attack counter)
+- DASHBOARD_SYNC_INTERVAL: 45s (dashboard sync)
+- IP_CACHE_TTL: 300s (public IP cache lifetime)
+
+Notes:
+- Intervals are tuned to reduce CPU/network usage
+- All intervals can be overridden in client_config.json
 """
 
 import os
@@ -22,7 +35,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "2.8.1"  # Bugfix: Fixed python312.dll missing error in PyInstaller build
+VERSION = "2.8.5"  # Performance optimizations: reduced thread creation, optimized intervals
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -158,7 +171,7 @@ TRAY_MODE = GUI_MODE    # Tray mode is a variant of GUI mode
 # ===================== HEARTBEAT CONFIGURATION ===================== #
 
 HEARTBEAT_FILE = "heartbeat.json"
-HEARTBEAT_INTERVAL = 10  # seconds
+FILE_HEARTBEAT_INTERVAL = 60  # File heartbeat interval (was 10s, optimized to 60s for performance)
 
 # Singleton mutex name
 SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
@@ -167,14 +180,14 @@ SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
 
 # API and sync intervals (in seconds)
 API_RETRY_INTERVAL = 60          # API connection retry interval
-HEARTBEAT_INTERVAL = 60          # Heartbeat send interval
-ATTACK_COUNT_REFRESH = 10        # Attack count refresh interval (in seconds, converted to ms)
-DASHBOARD_SYNC_INTERVAL = 30     # Dashboard tunnel sync interval (increased for stability)
-DASHBOARD_SYNC_CHECK = 5         # Dashboard sync check frequency
+API_HEARTBEAT_INTERVAL = 60      # API heartbeat send interval
+ATTACK_COUNT_REFRESH = 15        # Attack count refresh interval (was 10s, optimized to 15s)
+DASHBOARD_SYNC_INTERVAL = 45     # Dashboard tunnel sync interval (was 30s, optimized to 45s)
+DASHBOARD_SYNC_CHECK = 10        # Dashboard sync check frequency (was 5s, optimized to 10s)
 RECONCILE_LOOP_INTERVAL = 600    # Old reconcile loop interval (10 minutes)
 API_STARTUP_DELAY = 5            # API startup delay (5 seconds)
 RDP_TRANSITION_TIMEOUT = 120     # RDP transition timeout
-WATCHDOG_INTERVAL = 10           # Tunnel watchdog check interval
+WATCHDOG_INTERVAL = 15           # Tunnel watchdog check interval (was 10s, optimized to 15s)
 
 # ===================== LOGGING CONFIGURATION ===================== #
 
@@ -281,7 +294,8 @@ __all__ = [
     'APP_STARTUP_KEY', 'TASK_NAME_BOOT', 'TASK_NAME_LOGON', 'REGISTRY_KEY_PATH',
     
     # Timing
-    'API_RETRY_INTERVAL', 'HEARTBEAT_INTERVAL', 'ATTACK_COUNT_REFRESH', 'DASHBOARD_SYNC_INTERVAL',
+    'API_RETRY_INTERVAL', 'API_HEARTBEAT_INTERVAL', 'FILE_HEARTBEAT_INTERVAL', 
+    'ATTACK_COUNT_REFRESH', 'DASHBOARD_SYNC_INTERVAL',
     'DASHBOARD_SYNC_CHECK', 'RECONCILE_LOOP_INTERVAL', 'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
     'WATCHDOG_INTERVAL',
     

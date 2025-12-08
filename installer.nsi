@@ -122,33 +122,48 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     ; =================================================================
     !insertmacro LOG "[PREP] Starting pre-installation cleanup..."
     
-    ; Step 1: Stop scheduled tasks first
-    !insertmacro LOG "[PREP] Stopping scheduled tasks..."
+    ; Step 0: CRITICAL - Disable watchdog FIRST to prevent respawn
+    !insertmacro LOG "[PREP] Disabling watchdog respawn mechanism..."
+    ; Write 'stop' token to prevent watchdog from restarting processes
+    nsExec::Exec 'cmd /c echo stop > "%TEMP%\honeypot_watchdog_token.txt"'
+    nsExec::Exec 'cmd /c echo stop > "%APPDATA%\YesNext\CloudHoneypot\watchdog_token.txt"'
+    ; Also create a stop flag in ProgramData
+    nsExec::Exec 'cmd /c mkdir "%ProgramData%\YesNext\CloudHoneypot" 2>nul'
+    nsExec::Exec 'cmd /c echo stop > "%ProgramData%\YesNext\CloudHoneypot\watchdog_stop.flag"'
+    Sleep 1000
+    
+    ; Step 1: Delete scheduled tasks FIRST (not just stop - DELETE them)
+    !insertmacro LOG "[PREP] Deleting scheduled tasks..."
+    nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-Watchdog" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-Background" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-Tray" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-Updater" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-SilentUpdater" /f >nul 2>&1'
+    ; Also stop any running instances
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Watchdog" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Updater" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-SilentUpdater" >nul 2>&1'
+    Sleep 500
 
-    ; Step 2: Force kill all honeypot processes (multiple methods)
-    !insertmacro LOG "[PREP] Killing honeypot processes..."
-    
-    ; Method 1: taskkill with force
+    ; Step 2: Force kill ALL honeypot processes (aggressive - multiple rounds)
+    !insertmacro LOG "[PREP] Killing honeypot processes (round 1)..."
     nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
-    Sleep 500
+    nsExec::Exec 'wmic process where "name=\'honeypot-client.exe\'" delete >nul 2>&1'
+    Sleep 1000
     
-    ; Method 2: WMIC process termination (more reliable)
-    nsExec::Exec 'wmic process where "name=\'honeypot-client.exe\'" call terminate >nul 2>&1'
-    Sleep 500
+    !insertmacro LOG "[PREP] Killing honeypot processes (round 2)..."
+    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
+    nsExec::Exec 'powershell -Command "Get-Process honeypot-client -ErrorAction SilentlyContinue | Stop-Process -Force" >nul 2>&1'
+    Sleep 1000
     
-    ; Method 3: PowerShell Stop-Process (handles stubborn processes)
-    nsExec::Exec 'powershell -Command "Stop-Process -Name honeypot-client -Force -ErrorAction SilentlyContinue" >nul 2>&1'
+    !insertmacro LOG "[PREP] Killing honeypot processes (round 3 - final)..."
+    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
     
     ; Step 3: Wait for file handles to be released
     !insertmacro LOG "[PREP] Waiting for file handles to release..."
-    Sleep 2000
+    Sleep 3000
     
-    ; Step 4: Final taskkill if anything remains
+    ; Step 4: One more kill attempt if process is stubborn
     nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
     Sleep 500
     

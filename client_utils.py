@@ -1027,10 +1027,34 @@ def watchdog_main(parent_pid: int, log_func=None):
     attempts = 0
     max_attempts = 5
     
+    # Check for installer stop flags at multiple locations
+    def check_stop_flag():
+        """Check if installer has requested watchdog to stop"""
+        stop_locations = [
+            os.path.join(os.environ.get('TEMP', ''), 'honeypot_watchdog_token.txt'),
+            os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypot', 'watchdog_token.txt'),
+            os.path.join(os.environ.get('ProgramData', 'C:\\ProgramData'), 'YesNext', 'CloudHoneypot', 'watchdog_stop.flag'),
+        ]
+        for loc in stop_locations:
+            try:
+                if os.path.exists(loc):
+                    with open(loc, 'r') as f:
+                        content = f.read().strip().lower()
+                        if content == 'stop':
+                            log_func(f"[watchdog] Stop flag found at {loc}, exiting")
+                            return True
+            except:
+                pass
+        return False
+    
     while attempts < max_attempts:
         time.sleep(5)
         
-        # Watchdog token kontrolü
+        # Check stop flags (installer places these)
+        if check_stop_flag():
+            return
+        
+        # Watchdog token kontrolü (eski yöntem)
         token = read_watchdog_token("")
         if token.lower() == 'stop':
             return
@@ -1038,6 +1062,10 @@ def watchdog_main(parent_pid: int, log_func=None):
         # Parent process kontrolü
         alive = is_process_running_windows(int(parent_pid))
         if not alive:
+            # Before restarting, check stop flags again
+            if check_stop_flag():
+                return
+            
             log_func(f"[watchdog] Parent process {parent_pid} not found, attempting restart")
             attempts += 1
             

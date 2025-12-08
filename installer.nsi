@@ -118,25 +118,39 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     SectionIn RO
 
     ; =================================================================
-    ; PRE-INSTALLATION CLEANUP (OPTIMIZED - ~2 seconds total)
+    ; PRE-INSTALLATION CLEANUP
     ; =================================================================
     !insertmacro LOG "[PREP] Starting pre-installation cleanup..."
     
-    ; Step 1: Stop scheduled tasks and kill processes in parallel
-    !insertmacro LOG "[PREP] Stopping tasks and processes..."
-    
-    ; Stop all tasks (non-blocking, fast)
+    ; Step 1: Stop scheduled tasks first
+    !insertmacro LOG "[PREP] Stopping scheduled tasks..."
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Watchdog" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Updater" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-SilentUpdater" >nul 2>&1'
 
-    ; Force kill all honeypot processes immediately (single command)
-    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
+    ; Step 2: Force kill all honeypot processes (multiple methods)
+    !insertmacro LOG "[PREP] Killing honeypot processes..."
     
-    ; Brief wait for cleanup
-    Sleep 1000
+    ; Method 1: taskkill with force
+    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
+    Sleep 500
+    
+    ; Method 2: WMIC process termination (more reliable)
+    nsExec::Exec 'wmic process where "name=\'honeypot-client.exe\'" call terminate >nul 2>&1'
+    Sleep 500
+    
+    ; Method 3: PowerShell Stop-Process (handles stubborn processes)
+    nsExec::Exec 'powershell -Command "Stop-Process -Name honeypot-client -Force -ErrorAction SilentlyContinue" >nul 2>&1'
+    
+    ; Step 3: Wait for file handles to be released
+    !insertmacro LOG "[PREP] Waiting for file handles to release..."
+    Sleep 2000
+    
+    ; Step 4: Final taskkill if anything remains
+    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
+    Sleep 500
     
     !insertmacro LOG "[PREP] Pre-installation cleanup finished."
 

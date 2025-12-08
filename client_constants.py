@@ -35,7 +35,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "2.8.5"  # Performance optimizations: reduced thread creation, optimized intervals
+VERSION = "2.8.6"  # UI-only mode: tray skips background tasks when daemon is active
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

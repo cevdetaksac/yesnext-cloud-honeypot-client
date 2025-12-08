@@ -19,62 +19,54 @@ v2.8.5 Performans İyileştirmeleri
 - Kalp atışı ve saldırı sayacı: API ile haberleşme.
 - Kullanıcı onayı: Açılışta görünür onay ve tercihler.
 - Dil desteği: Türkçe ve İngilizce; uygulama içinden değiştirilebilir.
-- Otomatik güncelleme: GitHub Releases üzerinden yeni sürümü indirip kendini günceller (SHA256 doğrulaması destekli).
-- Firewall Agent: Dashboard’tan verilen IP/CIDR/ülke bloklarını (Windows/Linux) yerel firewall’a uygular, kaldırmaları da takip eder.
+- Otomatik güncelleme: GitHub Releases üzerinden yeni sürümü indirip kendini günceller.
+- Firewall Agent: Dashboard'tan verilen IP/CIDR/ülke bloklarını (Windows/Linux) yerel firewall'a uygular.
 
-Firewall Agent (Yeni)
+Firewall Agent
 - Kural adı: `HP-BLOCK-<id>`
 - Windows: `netsh advfirewall firewall add rule ... action=block remoteip=<CIDR>`; büyük listelerde otomatik parçalama.
 - Linux: Tercihen `ipset` + `iptables -m set` (fallback: `iptables` + `comment`).
 - Ülke blokları: Varsayılan kaynak ipdeny.com (`https://www.ipdeny.com/ipblocks/data/countries/<cc>.zone`), günlük cache.
 - Konfig: `API_BASE`, `TOKEN`, `CIDR_FEED_BASE` (opsiyonel), `REFRESH_INTERVAL_SEC` (varsayılan 10s).
-- Uygulama: `client.py`, arkaplanda `firewall_agent.py`’yi otomatik başlatır.
 
 Derleme
-- Gereksinimler: Python 3.11/3.12, pip, PyInstaller
-- Onedir paket (önerilen dağıtım): `powershell -ExecutionPolicy Bypass -File scripts/build-onedir.ps1`
-  - Çıktılar: `dist/client-onedir/`, `dist/client-onedir.zip`, `dist/hashes.txt`
-- Tek dosya (isteğe bağlı): `powershell -ExecutionPolicy Bypass -File scripts/build.ps1`
-  - Çıktı: `dist/client.exe`
+- Gereksinimler: Python 3.11/3.12, pip, PyInstaller, NSIS
+- Build: `powershell -ExecutionPolicy Bypass -File build.ps1`
+  - Çıktı: `cloud-client-installer.exe` (~20 MB)
 
 İmzalama (isteğe bağlı)
 - Üretim için OV/EV Code Signing sertifikası önerilir.
-- Geliştirme için self-signed PFX ile imza atabilirsiniz:
-  - `scripts/sign.ps1 -File dist\client.exe -PfxPath C:\certs\codesign.pfx -PfxPassword PAROLA`
-- `scripts/build-and-sign.ps1` uçtan uca derleme+imzalama yapar.
+- Geliştirme için self-signed PFX ile imza atabilirsiniz.
 
 Otomatik Güncelleme
-- Uygulama açılışında veya menüden "Güncellemeleri Denetle" ile GitHub Releases’ı kontrol eder.
-- Yeni sürüm bulursa `client-onedir.zip`’i indirir; `hashes.txt` varsa SHA256 doğrular; onayla birlikte kendini günceller.
-- Repo bilgisi `client.py` içinde `GITHUB_OWNER`/`GITHUB_REPO` ile yapılandırılır.
+- Uygulama açılışında veya menüden "Güncellemeleri Denetle" ile GitHub Releases'ı kontrol eder.
+- Yeni sürüm bulursa `cloud-client-installer.exe`'yi indirir ve sessiz kurulum yapar.
+- Daemon modu için Task Scheduler her 2 saatte bir güncelleme kontrolü yapar (oturum açık olmasa bile).
+- Repo bilgisi `client_constants.py` içinde `GITHUB_OWNER`/`GITHUB_REPO` ile yapılandırılır.
 
-CI/CD ve Release
-- GitHub Actions workflow: `.github/workflows/release.yml`
-- Tetikleyici: `v*` etiketi push edildiğinde çalışır.
-- Üretilen ve release’a yüklenen dosyalar:
-  - `dist/client-onedir.zip`
-  - `dist/hashes.txt`
-  Bu isimler istemcinin otomatik güncelleme mekanizması tarafından beklenir.
+Release
+- Manuel release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file release_notes_vX.Y.Z.md cloud-client-installer.exe`
+- Release dosyası: `cloud-client-installer.exe`
 
 Sürümleme
-- SemVer: `__version__` değişkeni üzerinden.
-- Dağıtımlar GitHub Releases ile etkinleştirilir (bkz: `.github/workflows/release.yml`).
+- SemVer: `__version__` değişkeni üzerinden (`client_constants.py`).
+- Dağıtımlar GitHub Releases ile etkinleştirilir.
 
 Katkılar
 - Lütfen CONTRIBUTING.md ve CODE_OF_CONDUCT.md belgelerini inceleyin.
 
 Güvenlik
-- Güvenlik açıklarını kamuya açık issue yerine SECURITY.md’teki kanallardan bildirin.
+- Güvenlik açıklarını kamuya açık issue yerine SECURITY.md'teki kanallardan bildirin.
 
 Lisans
 - Apache-2.0 Lisansı (LICENSE dosyasına bakın).
 
 Kullanım (Windows)
-- `client-onedir.zip`’i release sayfasından indirin ve bir klasöre çıkarın.
-- `client-onedir.exe`’yi yönetici olarak çalıştırın.
-- İlk açılışta token’ı girin; firewall agent arka planda otomatik başlar.
+- `cloud-client-installer.exe`'yi release sayfasından indirin.
+- Installer'ı yönetici olarak çalıştırın.
+- İlk açılışta token'ı girin; firewall agent arka planda otomatik başlar.
 
 Notlar
-- Ülke CIDR feed’i varsayılan ipdeny.com’dur; istenirse `CIDR_FEED_BASE` ile değiştirilebilir.
-- Firewall komutları için Windows’ta Administrator, Linux’ta root yetkisi gerekir.
+- Ülke CIDR feed'i varsayılan ipdeny.com'dur; istenirse `CIDR_FEED_BASE` ile değiştirilebilir.
+- Firewall komutları için Windows'ta Administrator, Linux'ta root yetkisi gerekir.
 

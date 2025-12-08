@@ -290,6 +290,15 @@ class CloudHoneypotClient:
         else:
             self.heartbeat_path = ""
         
+        # Check if daemon is already running (for tray UI-only mode)
+        self.daemon_is_active = False
+        try:
+            self.daemon_is_active = ClientHelpers.is_daemon_running()
+            if self.daemon_is_active:
+                log("🔄 Daemon detected - Tray will run in UI-only mode (no duplicate background tasks)")
+        except Exception as e:
+            log(f"⚠️ Daemon detection failed: {e}")
+        
         # Initialize GUI elements
         self.root = self.btn_primary = self.tree = None
         self.attack_entry = self.ip_entry = self.show_cb = None
@@ -423,7 +432,16 @@ class CloudHoneypotClient:
             time.sleep(30)
 
     def start_delayed_api_sync(self):
-        """Start API synchronization with delay in background thread"""
+        """Start API synchronization with delay in background thread
+        
+        NOTE: When daemon is running, skip background tasks to avoid duplication.
+        Tray mode in UI-only configuration only provides the interface.
+        """
+        # Skip background tasks if daemon is already handling them
+        if getattr(self, 'daemon_is_active', False):
+            log("🔄 UI-only mode: Skipping background API sync (daemon handles this)")
+            return
+            
         def delayed_api_start():
             log(f"API senkronizasyonu {API_STARTUP_DELAY} saniye bekletiliyor (manuel işlemler için)...")
             time.sleep(API_STARTUP_DELAY)
@@ -2087,7 +2105,14 @@ class CloudHoneypotClient:
 
     # ---------- Update Watchdog (hourly) - Modularized ---------- #
     def start_update_watchdog(self):
-        """Start update watchdog through update manager"""
+        """Start update watchdog through update manager
+        
+        NOTE: Skipped in UI-only mode when daemon is running.
+        """
+        # Skip if daemon is handling this
+        if getattr(self, 'daemon_is_active', False):
+            log("🔄 UI-only mode: Skipping update watchdog (daemon handles this)")
+            return
         return self.update_manager.start_update_watchdog(auto_update=True)
 
     # ---------- Daemon ---------- #
@@ -2165,7 +2190,15 @@ class CloudHoneypotClient:
 
     # ---------- Firewall Agent ---------- #
     def start_firewall_agent(self):
-        """Start firewall agent with updated client_firewall module"""
+        """Start firewall agent with updated client_firewall module
+        
+        NOTE: Skipped in UI-only mode when daemon is running.
+        """
+        # Skip if daemon is handling this
+        if getattr(self, 'daemon_is_active', False):
+            log("🔄 UI-only mode: Skipping firewall agent (daemon handles this)")
+            return
+            
         try:
             # FirewallAgent already imported at top level
             pass
@@ -2267,23 +2300,27 @@ class CloudHoneypotClient:
             log(f"build_gui pre-notice error: {e}")
         self.start_single_instance_server()
 
-        # Background services will be started after GUI creation and token loading
-        threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-        # Note: tunnel_watchdog_loop is now integrated into tunnel_sync_loop
-        # Remote management: report open ports + reconcile desired tunnels
-        try:
-            threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
-        except Exception as e:
-            log(f"open ports reporter start failed: {e}")
-        try:
-            threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
-        except Exception as e:
-            log(f"remote tunnels loop start failed: {e}")
-        # Start firewall agent in background
-        try:
-            self.start_firewall_agent()
-        except Exception as e:
-            log(f"firewall agent start failed (gui): {e}")
+        # Background services - skip if daemon is running (UI-only mode)
+        if not getattr(self, 'daemon_is_active', False):
+            threading.Thread(target=self.heartbeat_loop, daemon=True).start()
+            # Note: tunnel_watchdog_loop is now integrated into tunnel_sync_loop
+            # Remote management: report open ports + reconcile desired tunnels
+            try:
+                threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
+            except Exception as e:
+                log(f"open ports reporter start failed: {e}")
+            try:
+                threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
+            except Exception as e:
+                log(f"remote tunnels loop start failed: {e}")
+            # Start firewall agent in background
+            try:
+                self.start_firewall_agent()
+            except Exception as e:
+                log(f"firewall agent start failed (gui): {e}")
+        else:
+            log("🔄 UI-only mode: Skipping background threads (heartbeat, open ports, tunnels, firewall)")
+        
         # Start external watchdog
         try:
             start_watchdog_if_needed(WATCHDOG_TOKEN_FILE, log)

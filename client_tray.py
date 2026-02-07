@@ -331,7 +331,7 @@ class TrayManager:
         try:
             if hasattr(self.app_instance, 'root') and self.app_instance.root:
                 # Clear tray mode flag
-                self.app_instance.minimized_to_tray = False
+                self.app_instance._tray_mode.clear()
                 
                 # Pencereyi göster ve öne getir
                 self.app_instance.root.deiconify()
@@ -355,7 +355,7 @@ class TrayManager:
         try:
             if hasattr(self.app_instance, 'root') and self.app_instance.root:
                 # Mark as intentionally in tray to prevent auto-show
-                self.app_instance.minimized_to_tray = True
+                self.app_instance._tray_mode.set()
                 self.app_instance.root.withdraw()
         except Exception as e:
             log(f"Minimize error: {e}")
@@ -419,18 +419,8 @@ class TrayManager:
         except Exception:
             pass
             
-        # Ana pencereyi kapat
-        if hasattr(self.app_instance, 'root') and self.app_instance.root:
-            self.app_instance.root.destroy()
-            
-        # Single instance kontrolünü kapat
-        try:
-            self.app_instance.stop_single_instance_server()
-        except Exception:
-            pass
-            
-        import os
-        os._exit(0)
+        # Merkezi temiz çıkış
+        self.app_instance.graceful_exit(0)
     
     def tray_loop(self):
         """Main tray loop - runs in background thread"""
@@ -513,15 +503,6 @@ class TrayManager:
                 if hasattr(self.app_instance, 'root') and self.app_instance.root:
                     self.app_instance.root.destroy()
                     
-                try:
-                    from client_utils import write_watchdog_token
-                    from client_constants import WATCHDOG_TOKEN_FILE
-                    write_watchdog_token('stop', WATCHDOG_TOKEN_FILE)
-                except:
-                    pass
-                    
-                self.app_instance.stop_single_instance_server()
-                import os
-                os._exit(0)
+                self.app_instance.graceful_exit(0)
         except Exception as e:
             log(f"Window close error: {e}")

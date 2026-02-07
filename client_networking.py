@@ -264,21 +264,14 @@ class NetworkingHelpers:
 
     @staticmethod
     def is_port_in_use(port: int) -> bool:
-        """Check if a port is currently in use"""
+        """Check if a port is currently in use (native socket — no subprocess)"""
         try:
-            if os.name == 'nt':
-                from client_helpers import run_cmd
-                ps = (
-                    f"$p={int(port)};"
-                    "$l=Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue;"
-                    "if ($l) { Write-Output 'FOUND'; exit 0 } else { exit 1 }"
-                )
-                res = run_cmd(['powershell','-NoProfile','-Command', ps], timeout=8, suppress_rc_log=True)
-                if res and getattr(res, 'returncode', 1) == 0 and getattr(res, 'stdout', '').find('FOUND') >= 0:
-                    return True
-        except Exception as e:
-            log(f"Port check exception: {e}")
-        return False
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                result = s.connect_ex(("127.0.0.1", int(port)))
+                return result == 0  # 0 = connected = port in use
+        except Exception:
+            return False
 
 # ===================== TUNNEL MANAGEMENT LOOPS ===================== #
 
@@ -373,14 +366,6 @@ class TunnelManager:
                     pass  # Silent - avoid log spam
         except Exception as e:
             log(f"watchdog check err: {e}")
-
-    @staticmethod  
-    def tunnel_watchdog_loop(app):
-        """DEPRECATED: Now integrated into tunnel_sync_loop for performance.
-        Kept for backward compatibility but does nothing."""
-        log("[DEPRECATED] tunnel_watchdog_loop is now integrated into tunnel_sync_loop")
-        # Do nothing - functionality moved to tunnel_sync_loop
-        pass
 
     @staticmethod
     def sync_tunnel_states(app):

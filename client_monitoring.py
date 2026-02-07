@@ -94,6 +94,7 @@ import time
 import threading
 import datetime as dt
 import ctypes
+import tempfile
 from typing import Optional, Dict, Any
 
 from client_constants import HEARTBEAT_FILE, FILE_HEARTBEAT_INTERVAL, __version__
@@ -128,8 +129,21 @@ def create_heartbeat_file(app_dir: str) -> str:
         log(f"Heartbeat dosyası oluşturulamadı: {e}")
         return ""
 
+def _atomic_write_json(filepath: str, data: dict):
+    """Atomik JSON yazma — temp dosyaya yaz, sonra rename et"""
+    dir_name = os.path.dirname(filepath)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, filepath)  # atomic on same filesystem
+    except Exception:
+        try: os.unlink(tmp_path)
+        except OSError: pass
+        raise
+
 def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
-    """Update heartbeat file with current timestamp and status"""
+    """Update heartbeat file with current timestamp and status (atomic write)"""
     if not heartbeat_path or not os.path.exists(heartbeat_path):
         return False
     
@@ -149,9 +163,8 @@ def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
         else:
             heartbeat_data["status"] = "running"
         
-        # Write updated data
-        with open(heartbeat_path, 'w', encoding='utf-8') as f:
-            json.dump(heartbeat_data, f, indent=2, ensure_ascii=False)
+        # Atomic write — çökme anında dosya bozulmaz
+        _atomic_write_json(heartbeat_path, heartbeat_data)
         
         return True
     except Exception as e:

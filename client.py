@@ -1,10 +1,11 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT v2.8.5 - PERFORMANCE OPTIMIZED
+🎯 CLOUD HONEYPOT CLIENT v2.9.0 - STABILITY & PERFORMANCE OVERHAUL
 =======================================================
 
 📊 VERSION HISTORY:
+├─ v2.9.0 (Feb 2026) - Stability fixes, thread-safety, dead code removal
 ├─ v2.8.5 (Dec 2025) - Performance optimizations, thread reduction
 ├─ v2.8.4 (Dec 2025) - Task Scheduler memory restart (95% code reduction)
 ├─ v2.8.0 (Sep 2025) - Modular architecture implementation
@@ -205,6 +206,14 @@ class CloudHoneypotClient:
         """Log message using global logger with class context"""
         log(f"[CLIENT] {message}")
 
+    def _gui_safe(self, func):
+        """Thread-safe GUI çağrısı — root yoksa veya yok edilmişse sessizce atlar"""
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.after(0, func)
+        except Exception:
+            pass  # root destroyed veya erişilemez
+
     def get_token(self) -> Optional[str]:
         """Kaydedilmiş token'ı yükler"""
         return self.token_manager.get_token()
@@ -303,8 +312,8 @@ class CloudHoneypotClient:
         self.root = self.btn_primary = self.tree = None
         self.attack_entry = self.ip_entry = self.show_cb = None
         
-        # Tray mode tracking - prevents window from auto-showing when intentionally in tray
-        self.minimized_to_tray = False
+        # Tray mode tracking - thread-safe flag (prevents window from auto-showing)
+        self._tray_mode = threading.Event()  # set() = in tray, clear() = visible
         
         # GUI health monitoring - PERFORMANCE OPTIMIZED
         self.gui_health = {
@@ -653,12 +662,9 @@ class CloudHoneypotClient:
                     self.state["public_ip"] = ip
                     
                     # GUI update only if IP actually changed (performance optimization)
-                    if ip != last_gui_ip and self.ip_entry and self.root:
+                    if ip != last_gui_ip and self.ip_entry:
                         last_gui_ip = ip
-                        try:
-                            self.root.after(0, lambda i=ip: ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({i})"))
-                        except:
-                            pass  # GUI not ready, skip silently
+                        self._gui_safe(lambda i=ip: ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({i})"))
                     
                     # Akıllı heartbeat gönder (online/idle/offline)
                     self.send_heartbeat_once()
@@ -734,7 +740,7 @@ class CloudHoneypotClient:
                     log("[GUI_HEALTH] Aktif kullanıcı session'ı yok - GUI minimal modda çalışacak")
                     # Minimize to tray if no active session
                     if hasattr(self, 'tray_manager') and self.tray_manager:
-                        self.minimized_to_tray = True  # Mark as in tray
+                        self._tray_mode.set()
                         self.root.withdraw()
                         
         except Exception as e:
@@ -789,11 +795,9 @@ class CloudHoneypotClient:
             if get_from_config("advanced.windows_server_mode", False):
                 # Window state validation - BUT RESPECT TRAY MODE!
                 # Only restore window if NOT intentionally minimized to tray
-                if self.root.state() == 'withdrawn' and not self.minimized_to_tray:
+                if self.root.state() == 'withdrawn' and not self._tray_mode.is_set():
                     log("[GUI_HEALTH] Pencere gizli durumda (tray mode değil), görünür hale getiriliyor")
                     self.root.deiconify()
-                elif self.minimized_to_tray:
-                    pass  # Tray modunda - log spam'i önle
             
             # Tray ikonunu güncelle - only if state changed
             if hasattr(self, 'tray_manager') and hasattr(self, '_last_tray_state'):
@@ -832,21 +836,7 @@ class CloudHoneypotClient:
                 self._last_attack_count = cnt
                     
                 # GUI thread-safe güncelleme
-                try:
-                    def update_entry():
-                        ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-                    
-                    # Check if main loop is running
-                    try:
-                        self.root.after(0, update_entry)
-                    except RuntimeError as e:
-                        if "main thread is not in main loop" in str(e):
-                            # Main loop not started yet, update directly
-                            ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
-                        else:
-                            raise e
-                except Exception:
-                    ClientHelpers.safe_set_entry(self.attack_entry, str(cnt))
+                self._gui_safe(lambda c=cnt: ClientHelpers.safe_set_entry(self.attack_entry, str(c)))
             except Exception:
                 pass
                 
@@ -862,8 +852,8 @@ class CloudHoneypotClient:
         self.refresh_attack_count(async_thread=True)
         try:
             self.root.after(ATTACK_COUNT_REFRESH * 1000, self.poll_attack_count)
-        except:
-            pass
+        except Exception as e:
+            log(f"poll_attack_count scheduling failed: {e}")
 
     # ---------- Single Instance Control ---------- #
     def control_server_loop(self, sock):
@@ -883,27 +873,15 @@ class CloudHoneypotClient:
                 
                 cmd = buf.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW" and self.show_cb:
-                    def do_show():
-                        try: 
-                            self.show_cb()
-                        except: 
-                            pass
-                    
-                    try:
-                        if self.root: 
-                            self.root.after(0, do_show)
-                        else: 
-                            do_show()
-                    except:
-                        do_show()
+                    self._gui_safe(self.show_cb)
                         
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"Control server loop error: {e}")
             finally:
                 try: 
                     conn.close()
-                except: 
-                    pass
+                except Exception as e: 
+                    log(f"Control server conn.close() failed: {e}")
 
     def start_single_instance_server(self):
         """Start single instance enforcement server"""
@@ -1363,13 +1341,7 @@ class CloudHoneypotClient:
                     self.tree.item(iid, tags=("aktif",) if active else ())
             except Exception:
                 pass
-        try:
-            if self.root:
-                self.root.after(0, apply)
-                return
-        except Exception as e:
-            log(f"Exception: {e}")
-        apply()
+        self._gui_safe(apply)
 
     def _active_rows_from_servers(self):
         rows = []
@@ -1689,8 +1661,8 @@ class CloudHoneypotClient:
             try:
                 if not messagebox.askyesno(self.t("warn"), self.t("port_in_use").format(port=listen_port)):
                     return False
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"Port-in-use dialog failed for port {listen_port}: {e}")
         
         # Tünel başlatma sırasında geçici olarak sync'i duraklat
         if manual_action:
@@ -1849,8 +1821,8 @@ class CloudHoneypotClient:
         if st:
             try:
                 st.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"Tunnel stop failed for port {listen_port}: {e}")
         
         self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
         if not self.state["servers"]:
@@ -2079,22 +2051,35 @@ class CloudHoneypotClient:
             if hasattr(self, 'tray_manager') and self.tray_manager:
                 self.tray_manager.on_window_close()
             else:
-                # Fallback if no tray manager
                 if self.state.get("running", False):
                     messagebox.showwarning(self.t("warn"), "Please stop services first")
                     return
-                    
-                # GUI cleanup before exit
-                if hasattr(self, 'gui_health'):
-                    log("[GUI_HEALTH] Uygulama kapanıyor - GUI temizleniyor")
-                    
-                if hasattr(self, 'root') and self.root:
-                    self.root.destroy()
-                os._exit(0)
+                self.graceful_exit(0)
         except Exception as e:
-            log(f"[GUI_HEALTH] Kapanış hatası: {e}")
-            # Force exit if cleanup fails
-            os._exit(1)
+            log(f"[EXIT] Kapanış hatası: {e}")
+            sys.exit(1)
+
+    def graceful_exit(self, code: int = 0):
+        """Merkezi temiz çıkış — tüm kaynakları serbest bırakır"""
+        try:
+            log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
+            # Heartbeat cleanup
+            if hasattr(self, 'monitoring_manager'):
+                self.monitoring_manager.stop_heartbeat_system()
+            # Tray cleanup
+            if hasattr(self, 'tray_manager') and self.tray_manager:
+                try: self.tray_manager.stop_tray_system()
+                except Exception: pass
+            # Socket cleanup
+            self.stop_single_instance_server()
+            # GUI cleanup
+            if self.root:
+                try: self.root.destroy()
+                except Exception: pass
+        except Exception as e:
+            log(f"[EXIT] Cleanup hatası: {e}")
+        finally:
+            sys.exit(code)
 
     def stop_single_instance_server(self):
         s = self.state.get("ctrl_sock")
@@ -2124,15 +2109,17 @@ class CloudHoneypotClient:
         
         # Session monitoring for daemon-to-tray handover
         threading.Thread(target=self.monitor_user_sessions, daemon=True).start()
-        # Remote management: report open ports + reconcile desired tunnels
+        # Remote management: report open ports
         try:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
         except Exception as e:
             log(f"open ports reporter start failed: {e}")
+        # Tunnel sync (includes watchdog + API reconciliation in single loop)
         try:
-            threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
+            from client_networking import TunnelManager
+            threading.Thread(target=TunnelManager.tunnel_sync_loop, args=(self,), name="tunnel_sync_loop", daemon=True).start()
         except Exception as e:
-            log(f"remote tunnels loop start failed: {e}")
+            log(f"tunnel sync loop start failed: {e}")
         # Start firewall agent in background (Windows/Linux)
         try:
             self.start_firewall_agent()
@@ -2303,16 +2290,11 @@ class CloudHoneypotClient:
         # Background services - skip if daemon is running (UI-only mode)
         if not getattr(self, 'daemon_is_active', False):
             threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-            # Note: tunnel_watchdog_loop is now integrated into tunnel_sync_loop
-            # Remote management: report open ports + reconcile desired tunnels
+            # Remote management: report open ports
             try:
                 threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
             except Exception as e:
                 log(f"open ports reporter start failed: {e}")
-            try:
-                threading.Thread(target=self.reconcile_remote_tunnels_loop, daemon=True).start()
-            except Exception as e:
-                log(f"remote tunnels loop start failed: {e}")
             # Start firewall agent in background
             try:
                 self.start_firewall_agent()
@@ -2391,7 +2373,7 @@ class CloudHoneypotClient:
                                creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 pass
-            os._exit(0)
+            sys.exit(0)
         lang_menu = tk.Menu(menu_settings, tearoff=0)
         lang_menu.add_command(label=self.t("menu_lang_tr"), command=lambda: set_lang("tr"))
         lang_menu.add_command(label=self.t("menu_lang_en"), command=lambda: set_lang("en"))
@@ -2641,7 +2623,7 @@ class CloudHoneypotClient:
 
         def _show_window():
             try:
-                self.minimized_to_tray = False  # No longer in tray mode
+                self._tray_mode.clear()
                 self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
@@ -2659,7 +2641,7 @@ class CloudHoneypotClient:
         try:
             # Show the window
             if hasattr(self, 'root') and self.root:
-                self.minimized_to_tray = False  # No longer in tray mode
+                self._tray_mode.clear()
                 self.root.deiconify()
                 self.root.lift()
                 self.root.focus_force()
@@ -2873,7 +2855,7 @@ if __name__ == "__main__":
             if tray_mode:
                 log("Tray mode: Minimizing to tray...")
                 if hasattr(app, 'root') and app.root:
-                    app.minimized_to_tray = True  # Mark as intentionally in tray
+                    app._tray_mode.set()  # Mark as intentionally in tray
                     app.root.withdraw()  # Hide the window
                     app.root.update()
                     log("Tray mode: Window hidden successfully")
@@ -2994,52 +2976,3 @@ if __name__ == "__main__":
         # Fallback - should not happen with current logic
         log(f"ERROR: Unknown operation mode: {operation_mode}")
         sys.exit(1)
-
-    # ===== GUI MODE =====
-    
-    # Initialize basic logging FIRST
-    log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
-    os.makedirs(log_dir, exist_ok=True)
-    setup_logging()
-    
-    log("=== GUI MODE STARTUP - Simplified version ===")
-    
-    try:
-        # Load configuration
-        config = load_config()
-        selected_language = config["language"]["selected"]
-        
-        # Create app instance
-        app = CloudHoneypotClient()
-        app.lang = selected_language
-        log(f"Application initialized with language: {selected_language}")
-        
-        # Task Scheduler management handled by modular system in __init__
-        if ctypes.windll.shell32.IsUserAnAdmin():
-            log("Admin yetkisi mevcut - Task Scheduler yönetimi __init__ tarafından halledildi")
-        else:
-            log("Normal user mode - Task Scheduler will be configured later")
-        
-        # Build GUI directly
-        log("Building main GUI...")
-        app.build_gui(minimized=False)
-        log("GUI build completed successfully")
-        
-        # Run main loop
-        if hasattr(app, 'root') and app.root:
-            app.root.mainloop()
-        
-    except Exception as gui_error:
-        log(f"GUI Mode Error: {gui_error}")
-        import traceback
-        log(f"GUI Error traceback: {traceback.format_exc()}")
-        sys.exit(1)
-    
-    else:
-        # Fallback - should not happen with current logic
-        log(f"ERROR: Unknown operation mode: {operation_mode}")
-        sys.exit(1)
-
-
-
-

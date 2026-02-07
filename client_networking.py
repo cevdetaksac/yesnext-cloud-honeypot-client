@@ -4,19 +4,23 @@
 Cloud Honeypot Client - Network and Tunneling
 Tunel sunucusu ve network baglanti yonetimi
 
-Version: 2.8.5 (Performance Optimized)
+Version: 2.9.3 (Performance & Stability Overhaul)
 
 Features:
 - Secure tunnel server with TLS (port 8443)
 - Local tunnel listener (port 8081)
 - Connection pooling and keepalive
 - Automatic reconnection handling
+- ThreadPoolExecutor for bounded connection handling
+- Shared SSL context (single allocation, reused across connections)
+- Connection semaphore to prevent OOM under attack
 
-Performance Notes (v2.8.5):
-- tunnel_sync_loop now includes watchdog (merged from tunnel_watchdog_loop)
+Performance Notes (v2.9.3):
+- ThreadPoolExecutor replaces unbounded thread-per-connection (max 200 workers)
+- Shared SSL context eliminates per-connection 2-5KB allocation
+- Connection semaphore prevents resource exhaustion under port scan attacks
+- tunnel_sync_loop includes watchdog (merged from tunnel_watchdog_loop)
 - Single loop handles both sync (60s) and watchdog (15s) operations
-- Reduced thread count and improved resource efficiency
-- tunnel_watchdog_loop is DEPRECATED - kept for compatibility
 """
 
 import os
@@ -25,6 +29,7 @@ import json
 import time
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Import constants directly
 from client_constants import DEFAULT_TUNNELS, DASHBOARD_SYNC_INTERVAL, DASHBOARD_SYNC_CHECK, WATCHDOG_INTERVAL
@@ -87,6 +92,52 @@ def get_network_config() -> Dict[str, Any]:
         "server_name": SERVER_NAME
     }
 
+# ===================== SHARED TLS CONTEXT ===================== #
+# Single SSL context reused across all connections (was creating new one per connection: ~2-5KB each)
+_TLS_CONTEXT: Optional[ssl.SSLContext] = None
+_TLS_CONTEXT_LOCK = threading.Lock()
+
+def _get_tls_context() -> ssl.SSLContext:
+    """Get or create shared TLS context (thread-safe singleton)"""
+    global _TLS_CONTEXT
+    if _TLS_CONTEXT is None:
+        with _TLS_CONTEXT_LOCK:
+            if _TLS_CONTEXT is None:  # Double-check locking
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                _TLS_CONTEXT = ctx
+                log("[NET] Shared TLS context created (reused for all connections)")
+    return _TLS_CONTEXT
+
+# ===================== CONNECTION POOL ===================== #
+# Shared thread pool for handling incoming tunnel connections
+_MAX_TUNNEL_WORKERS = 200  # Maximum concurrent tunnel handler threads
+_CONNECTION_SEMAPHORE = threading.Semaphore(_MAX_TUNNEL_WORKERS)
+_tunnel_pool: Optional[ThreadPoolExecutor] = None
+_tunnel_pool_lock = threading.Lock()
+
+def _get_tunnel_pool() -> ThreadPoolExecutor:
+    """Get or create shared ThreadPoolExecutor for tunnel connections"""
+    global _tunnel_pool
+    if _tunnel_pool is None:
+        with _tunnel_pool_lock:
+            if _tunnel_pool is None:
+                _tunnel_pool = ThreadPoolExecutor(
+                    max_workers=_MAX_TUNNEL_WORKERS,
+                    thread_name_prefix="TunnelHandler"
+                )
+                log(f"[NET] ThreadPoolExecutor created (max_workers={_MAX_TUNNEL_WORKERS})")
+    return _tunnel_pool
+
+# Active connection counter for monitoring
+_active_connections = 0
+_active_connections_lock = threading.Lock()
+
+def get_active_connection_count() -> int:
+    """Get the current number of active tunnel connections"""
+    return _active_connections
+
 # ===================== TUNNEL SERVER IMPLEMENTATION ===================== #
 
 class TunnelServerThread(threading.Thread):
@@ -109,18 +160,25 @@ class TunnelServerThread(threading.Thread):
             log(f"[{self.service_name}] Failed to bind port {self.listen_port}: {e}")
             return
 
-        # Main accept loop with timeout handling
+        # Main accept loop with ThreadPoolExecutor (bounded connection handling)
+        pool = _get_tunnel_pool()
         while not self.stop_evt.is_set():
             try:
                 self.sock.settimeout(1.0)
-                client_sock, _ = self.sock.accept()
+                client_sock, addr = self.sock.accept()
                 
-                # Handle connection in separate thread
-                threading.Thread(
-                    target=NetworkingHelpers.handle_incoming_connection,
-                    args=(self.app, client_sock, self.listen_port, self.service_name),
-                    daemon=True
-                ).start()
+                # Check if we have capacity (non-blocking)
+                if not _CONNECTION_SEMAPHORE.acquire(blocking=False):
+                    log(f"[{self.service_name}] Connection limit reached ({_MAX_TUNNEL_WORKERS}), rejecting {addr[0]}")
+                    try: client_sock.close()
+                    except: pass
+                    continue
+                
+                # Submit to thread pool instead of unbounded thread creation
+                pool.submit(
+                    NetworkingHelpers._handle_connection_with_semaphore,
+                    self.app, client_sock, self.listen_port, self.service_name
+                )
                 
             except socket.timeout:
                 continue
@@ -144,11 +202,8 @@ class NetworkingHelpers:
     
     @staticmethod
     def create_tls_socket():
-        """Create TLS connection to honeypot server"""
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
+        """Create TLS connection to honeypot server using shared SSL context"""
+        ctx = _get_tls_context()  # Reuse shared context instead of creating new one each time
         raw = socket.create_connection((HONEYPOT_IP, HONEYPOT_TUNNEL_PORT), timeout=CONNECT_TIMEOUT)
         return ctx.wrap_socket(raw, server_hostname=HONEYPOT_IP)
 
@@ -195,6 +250,19 @@ class NetworkingHelpers:
         
         # Diğer servisler için mevcut port mapping mantığı
         return client_port
+
+    @staticmethod
+    def _handle_connection_with_semaphore(app, local_sock, listen_port, service_name):
+        """Wrapper that releases semaphore after connection completes"""
+        global _active_connections
+        with _active_connections_lock:
+            _active_connections += 1
+        try:
+            NetworkingHelpers.handle_incoming_connection(app, local_sock, listen_port, service_name)
+        finally:
+            _CONNECTION_SEMAPHORE.release()
+            with _active_connections_lock:
+                _active_connections -= 1
 
     @staticmethod
     def handle_incoming_connection(app, local_sock, listen_port: str, service_name: str):

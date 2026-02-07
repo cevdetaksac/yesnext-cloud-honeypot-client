@@ -1,10 +1,12 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT v2.9.1 - STABILITY & PERFORMANCE OVERHAUL
+🎯 CLOUD HONEYPOT CLIENT v2.9.3 - PERFORMANCE & STABILITY OVERHAUL
 =======================================================
 
 📊 VERSION HISTORY:
+├─ v2.9.3 (Feb 2026) - Performance fixes: ThreadPoolExecutor, shared SSL, session API, GUI safety
+├─ v2.9.2 (Feb 2026) - Installer overhaul, task name fixes, dead autostart code removal
 ├─ v2.9.1 (Feb 2026) - Dead code cleanup, 661 lines removed
 ├─ v2.9.0 (Feb 2026) - Stability fixes, thread-safety, graceful exit
 ├─ v2.8.5 (Dec 2025) - Performance optimizations, thread reduction
@@ -112,7 +114,7 @@ from client_firewall import FirewallAgent
 from client_helpers import log, ClientHelpers, run_cmd
 import client_helpers
 from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
-from client_api import HoneypotAPIClient, api_request_with_token, update_client_ip_api, send_heartbeat_api, report_open_ports_api, report_tunnel_action_api
+from client_api import HoneypotAPIClient, api_request_with_token, report_tunnel_action_api
 from client_tokens import create_token_manager, get_token_file_paths
 from client_task_scheduler import perform_comprehensive_task_management
 from client_utils import (ServiceController, load_i18n, install_excepthook, 
@@ -127,7 +129,7 @@ from client_constants import (
     HONEYPOT_TUNNEL_PORT, SERVER_NAME, DEFAULT_TUNNELS,
     API_STARTUP_DELAY, API_RETRY_INTERVAL, API_SLOW_RETRY_DELAY,
     API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH, RECONCILE_LOOP_INTERVAL,
-    TASK_NAME_BOOT, TASK_NAME_LOGON, CONSENT_FILE, STATUS_FILE,
+    CONSENT_FILE, STATUS_FILE,
     WATCHDOG_TOKEN_FILE, __version__, GITHUB_OWNER, GITHUB_REPO,
     WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT
 )
@@ -274,7 +276,7 @@ class CloudHoneypotClient:
         
         # Initialize application state FIRST
         self.state = {
-            "running": False, "servers": {}, "threads": [], "token": None,
+            "running": False, "servers": {}, "token": None,
             "public_ip": None, "tray": None, "selected_rows": [],
             "selected_ports_map": None, "ctrl_sock": None,
             "reconciliation_paused": False, "remote_desired": {}
@@ -405,41 +407,45 @@ class CloudHoneypotClient:
             return "--mode=daemon"  # Safe fallback
 
     def monitor_user_sessions(self):
-        """Monitor for user logon sessions in daemon mode"""
+        """Monitor for user logon sessions in daemon mode (optimized subprocess usage)"""
         import subprocess
         import time
         
         log("Daemon: User session monitoring started")
+        check_interval = 30  # seconds
         
         while True:
             try:
-                # Check for active user sessions
-                result = subprocess.run(['query', 'session'], 
-                                      capture_output=True, text=True, timeout=10,
-                                      creationflags=subprocess.CREATE_NO_WINDOW)
+                # Check for active user sessions using query session
+                result = subprocess.run(
+                    ['query', 'session'], 
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                
+                if result.returncode != 0:
+                    # query session failed (e.g. RDS not installed) — skip silently
+                    time.sleep(check_interval)
+                    continue
                 
                 # Look for Active sessions (interactive logon)
-                active_sessions = []
-                for line in result.stdout.split('\n')[1:]:  # Skip header
-                    if 'Active' in line and 'console' in line.lower():
-                        active_sessions.append(line.strip())
+                has_active = any(
+                    'Active' in line and 'console' in line.lower()
+                    for line in result.stdout.split('\n')[1:]
+                )
                 
-                if active_sessions:
-                    log(f"Daemon: Active user session detected, gracefully shutting down for tray handover...")
-                    log(f"Sessions: {len(active_sessions)} active")
-                    
-                    # Allow some time for tray task to start
+                if has_active:
+                    log("Daemon: Active user session detected, gracefully shutting down for tray handover...")
                     time.sleep(3)
-                    
-                    # Graceful shutdown - tray task will take over via StopExisting policy
                     log("Daemon: Exiting for user session handover")
-                    os._exit(0)  # Clean exit for daemon
+                    os._exit(0)
                     
+            except subprocess.TimeoutExpired:
+                log("Session monitoring: query session timed out")
             except Exception as e:
                 log(f"Session monitoring error: {e}")
             
-            # Check every 30 seconds
-            time.sleep(30)
+            time.sleep(check_interval)
 
     def start_delayed_api_sync(self):
         """Start API synchronization with delay in background thread
@@ -611,10 +617,10 @@ class CloudHoneypotClient:
 
 # ---------- IP & Heartbeat Management ---------- #
     def update_client_ip(self, new_ip: str):
-        """Update client IP address via API"""
+        """Update client IP address via session-based API client"""
         token = self.state.get("token")
         if token:
-            update_client_ip_api(str(API_URL), token, new_ip, log)
+            self.api_client.update_client_ip(token, new_ip)
 
     def get_intelligent_status(self) -> str:
         """Determine intelligent status based on program and tunnel state"""
@@ -629,7 +635,7 @@ class CloudHoneypotClient:
         return "idle"
 
     def send_heartbeat_once(self, status_override: Optional[str] = None):
-        """Send single heartbeat to API with intelligent status detection"""
+        """Send single heartbeat to API with intelligent status detection (session-based)"""
         token = self.state.get("token")
         if token:
             ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
@@ -638,9 +644,9 @@ class CloudHoneypotClient:
             if status_override is None:
                 status_override = self.get_intelligent_status()
             
-            send_heartbeat_api(
-                str(API_URL), token, ip, SERVER_NAME, 
-                self.state.get("running", False), status_override, log
+            self.api_client.send_heartbeat(
+                token, ip, SERVER_NAME,
+                self.state.get("running", False), status_override
             )
 
     def heartbeat_loop(self):
@@ -714,14 +720,21 @@ class CloudHoneypotClient:
             # Windows Server özel kontrolleri - PERFORMANCE: Only check every 5 health cycles
             if self.gui_health['update_count'] % 5 == 0:
                 self.check_windows_session_state()
+            
+            # Reset counter to prevent integer overflow (every 1000 cycles)
+            if self.gui_health['update_count'] > 1000:
+                self.gui_health['update_count'] = 0
                 
         except Exception as e:
             log(f"[GUI_HEALTH] GUI sağlık kontrolü hatası: {e}")
             self.gui_health['frozen_count'] += 1
             
-        # Bir sonraki kontrol için zamanla
-        if self.root:
-            self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
+        # Bir sonraki kontrol için zamanla — root.after MUST be inside try/except with winfo_exists
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
+        except Exception:
+            pass  # root destroyed, no more scheduling
 
     def check_windows_session_state(self):
         """Windows session durumunu kontrol et"""
@@ -747,39 +760,9 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"[GUI_HEALTH] Session kontrolü hatası: {e}")
 
-    def restart_gui_if_needed(self):
-        """Kritik durumlarda GUI'yi yeniden başlat"""
-        try:
-            if self.gui_health['frozen_count'] > 10:
-                log("[GUI_HEALTH] 🔄 GUI çok sık donuyor - yeniden başlatılıyor")
-                
-                # Mevcut GUI'yi temizle
-                if self.root:
-                    self.root.destroy()
-                
-                # Yeni GUI başlat
-                import threading
-                restart_thread = threading.Thread(target=self._restart_gui_thread, daemon=True)
-                restart_thread.start()
-                
-        except Exception as e:
-            log(f"[GUI_HEALTH] GUI yeniden başlatma hatası: {e}")
-
-    def _restart_gui_thread(self):
-        """GUI yeniden başlatma thread'i"""
-        try:
-            time.sleep(2)  # Kısa bekleme
-            log("[GUI_HEALTH] GUI yeniden başlatılıyor...")
-            
-            # Reset GUI health
-            self.gui_health['frozen_count'] = 0
-            self.gui_health['last_update'] = time.time()
-            
-            # Yeni GUI başlat
-            self.build_gui()
-            
-        except Exception as e:
-            log(f"[GUI_HEALTH] GUI yeniden başlatma thread hatası: {e}")
+    # restart_gui_if_needed & _restart_gui_thread REMOVED (v2.9.3)
+    # Reason: build_gui() was called from non-main thread — Tkinter is NOT thread-safe
+    # The method was never called anywhere, and doing so would cause random crashes.
 
     def refresh_gui(self):
         """GUI'yi yenileme işlemleri - PERFORMANCE OPTIMIZED"""
@@ -850,29 +833,48 @@ class CloudHoneypotClient:
             worker()
 
     def poll_attack_count(self):
+        """Poll attack count with single-chain scheduling guard"""
+        # Prevent double scheduling chains
+        if hasattr(self, '_poll_chain_active') and self._poll_chain_active:
+            return
+        self._poll_chain_active = True
+        
         self.refresh_attack_count(async_thread=True)
         try:
-            self.root.after(ATTACK_COUNT_REFRESH * 1000, self.poll_attack_count)
+            if self.root and self.root.winfo_exists():
+                self.root.after(ATTACK_COUNT_REFRESH * 1000, self._poll_attack_count_chain)
         except Exception as e:
+            self._poll_chain_active = False
             log(f"poll_attack_count scheduling failed: {e}")
+    
+    def _poll_attack_count_chain(self):
+        """Internal polling chain — only runs from a single root.after chain"""
+        self.refresh_attack_count(async_thread=True)
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.after(ATTACK_COUNT_REFRESH * 1000, self._poll_attack_count_chain)
+            else:
+                self._poll_chain_active = False
+        except Exception:
+            self._poll_chain_active = False
 
     # ---------- Single Instance Control ---------- #
     def control_server_loop(self, sock):
         """Handle control server connections for single instance enforcement"""
+        MAX_CMD_LEN = 256  # Prevent malicious clients from sending unbounded data
         while True:
             try:
                 conn, _ = sock.accept()
                 conn.settimeout(2.0)
                 
-                # Read command
-                buf = b""
-                while True:
-                    ch = conn.recv(1)
-                    if not ch or ch == b"\n": 
-                        break
-                    buf += ch
+                # Buffered read with size limit (replaces byte-by-byte recv(1))
+                buf = conn.recv(MAX_CMD_LEN)
+                if not buf:
+                    continue
                 
-                cmd = buf.decode("utf-8", "ignore").strip().upper()
+                # Extract first line (commands are newline-terminated)
+                line = buf.split(b"\n", 1)[0]
+                cmd = line.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW" and self.show_cb:
                     self._gui_safe(self.show_cb)
                         
@@ -928,39 +930,6 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"read_status error: {e}")
             return [], False
-
-    # ---------- Autostart (Task Scheduler) ---------- #
-    def task_command_daemon(self):
-        if getattr(sys, 'frozen', False):
-            return f'"{sys.executable}" --daemon'
-        return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}" --daemon'
-
-    def task_command_minimized(self):
-        if getattr(sys, 'frozen', False):
-            return f'"{sys.executable}" --minimized'
-        return f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}" --minimized'
-
-    def install_autostart_system_boot(self):
-        run_cmd([
-            'schtasks','/Create','/TN', TASK_NAME_BOOT,
-            '/SC','ONSTART','/RU','SYSTEM',
-            '/TR', self.task_command_daemon(), '/F'
-        ])
-        # Not running immediately to avoid spawning extra background instances
-        # Task will run on next boot as intended
-
-    def install_autostart_user_logon(self):
-        user = os.environ.get("USERNAME") or ""
-        run_cmd([
-            'schtasks','/Create','/TN', TASK_NAME_LOGON,
-            '/SC','ONLOGON','/RU', user,
-            '/TR', self.task_command_minimized(), '/RL','HIGHEST','/F'
-        ])
-
-    def remove_autostart(self):
-        run_cmd(['schtasks','/End','/TN', TASK_NAME_BOOT])
-        run_cmd(['schtasks','/Delete','/TN', TASK_NAME_BOOT, '/F'])
-        run_cmd(['schtasks','/Delete','/TN', TASK_NAME_LOGON, '/F'])
 
     # ---------- Consent ---------- #
     def read_consent(self):
@@ -2005,7 +1974,7 @@ class CloudHoneypotClient:
         token = self.state.get("token")
         if token:
             ports = self._collect_open_ports_windows() if os.name == 'nt' else []
-            report_open_ports_api(str(API_URL), token, ports, log)
+            self.api_client.report_open_ports(token, ports)
 
     def report_open_ports_loop(self):
         while True:
@@ -2624,8 +2593,8 @@ class CloudHoneypotClient:
             except: pass
         self.show_cb = _show_window
 
-        # Otomatik saldırı sayacı
-        self.root.after(0, self.poll_attack_count)
+        # poll_attack_count is already started above — do NOT schedule again
+        # (previously caused double scheduling chains)
         
         # GUI sağlık durumu izleme başlat
         self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)

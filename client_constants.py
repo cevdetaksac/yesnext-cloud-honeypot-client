@@ -35,7 +35,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "2.9.1"  # Dead code cleanup & codebase reduction
+VERSION = "2.9.3"  # Performance & stability: ThreadPoolExecutor, shared SSL, session API, GUI safety
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -156,10 +156,8 @@ PORT_TABLOSU = get_port_table()
 
 # ===================== WINDOWS INTEGRATION ===================== #
 
-# Registry and Task Scheduler
+# Registry
 APP_STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-TASK_NAME_BOOT = "CloudHoneypotClientBoot"
-TASK_NAME_LOGON = "CloudHoneypotClientLogon"
 
 # ===================== APPLICATION MODES ===================== #
 
@@ -291,7 +289,7 @@ __all__ = [
     'DEFAULT_TUNNELS', 'PORT_TABLOSU',
     
     # Windows integration
-    'APP_STARTUP_KEY', 'TASK_NAME_BOOT', 'TASK_NAME_LOGON', 'REGISTRY_KEY_PATH',
+    'APP_STARTUP_KEY', 'REGISTRY_KEY_PATH',
     
     # Timing
     'API_RETRY_INTERVAL', 'API_HEARTBEAT_INTERVAL', 'FILE_HEARTBEAT_INTERVAL', 

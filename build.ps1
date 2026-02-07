@@ -1,4 +1,4 @@
-# Cloud Honeypot Client v2.8.6 - UI-Only Mode Build Script
+# Cloud Honeypot Client v2.9.3 - Build Script
 # Single script to build complete installer with optimized performance
 
 param(
@@ -6,8 +6,8 @@ param(
 )
 
 Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Cloud Honeypot Client v2.8.6 Builder      " -ForegroundColor Green
-Write-Host "  🚀 UI-Only Mode Optimization              " -ForegroundColor Green  
+Write-Host "  Cloud Honeypot Client v2.9.3 Builder      " -ForegroundColor Green
+Write-Host "  🚀 Optimized Build                        " -ForegroundColor Green  
 Write-Host "===============================================" -ForegroundColor Green
 
 # Clean previous builds if requested

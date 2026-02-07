@@ -123,6 +123,12 @@ def check_singleton(mode: str) -> bool:
         if last_error == winerror.ERROR_ALREADY_EXISTS:
             log(f"Another instance detected - attempting graceful shutdown")
             
+            # Close the duplicate handle before retrying
+            try:
+                win32api.CloseHandle(mutex)
+            except Exception:
+                pass
+            
             # Try to find and gracefully shutdown existing process
             if shutdown_existing_instance():
                 log("Existing instance shutdown successfully - waiting before starting new instance")
@@ -134,6 +140,10 @@ def check_singleton(mode: str) -> bool:
                 
                 if last_error == winerror.ERROR_ALREADY_EXISTS:
                     log("ERROR: Could not acquire singleton mutex after shutdown attempt")
+                    try:
+                        win32api.CloseHandle(mutex)
+                    except Exception:
+                        pass
                     return False
             else:
                 log("ERROR: Failed to shutdown existing instance")

@@ -1,91 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CLIENT MONITORING MODULE
-========================
+Client Monitoring — Heartbeat & health-check system.
 
-SYSTEM HEALTH & HEARTBEAT MANAGEMENT
-=====================================
-Version: See client_constants.VERSION
+JSON heartbeat file updated every FILE_HEARTBEAT_INTERVAL seconds,
+atomic writes via temp+rename. Health check exits with code 0/3.
 
-Performance Notes:
-- FILE_HEARTBEAT_INTERVAL increased to 60s (was 10s)
-- Reduced file I/O by 83%
-- Health checks now at 60s intervals
-
-🔍 MODULE PURPOSE:
-This module provides comprehensive system monitoring capabilities for the 
-Cloud Honeypot Client, including real-time health checks, heartbeat monitoring,
-and application lifecycle tracking.
-
-📋 CORE RESPONSIBILITIES:
-┌─────────────────────────────────────────────────────────────────┐
-│                    MONITORING FUNCTIONS                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  💓 HEARTBEAT SYSTEM                                            │
-│  ├─ create_heartbeat_file()   → Initialize heartbeat tracking  │
-│  ├─ update_heartbeat_file()   → Update system status           │
-│  ├─ heartbeat_worker()        → Background monitoring thread   │
-│  └─ cleanup_heartbeat_file()  → Graceful system shutdown       │
-│                                                                 │
-│  🔍 HEALTH MONITORING                                           │
-│  ├─ perform_health_check()    → System health validation       │
-│  └─ Health status reporting   → External monitoring support    │
-│                                                                 │
-│  🏗️ MANAGEMENT CLASS                                            │
-│  └─ MonitoringManager         → Centralized monitoring control │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚀 KEY FEATURES:
-├─ Real-time System Status: JSON-based heartbeat with timestamps
-├─ Health Check Automation: Periodic health validation (exit codes)
-├─ Process Lifecycle Tracking: PID, startup, shutdown monitoring
-├─ Admin Privilege Detection: Security context awareness  
-├─ API Connection Status: External service connectivity
-├─ Active Tunnel Monitoring: Real-time tunnel count tracking
-└─ External Monitoring Support: Standard exit codes for automation
-
-📝 HEARTBEAT DATA STRUCTURE:
-{
-  "application": "Cloud Honeypot Client",
-  "version": "2.x.x",
-  "pid": 1234,
-  "executable": "/path/to/executable",
-  "started_at": "2025-09-27T16:00:00",
-  "last_heartbeat": "2025-09-27T16:05:30",
-  "status": "running|initializing|stopped",
-  "admin_privileges": true|false,
-  "active_tunnels": 3,
-  "api_connected": true|false
-}
-
-🔧 USAGE PATTERNS:
-# Initialize monitoring system
-monitoring_manager = MonitoringManager(app_dir)
-if monitoring_manager.start_heartbeat_system(app_instance):
-    heartbeat_path = monitoring_manager.get_heartbeat_path()
-
-# Perform health check (CLI usage)
-perform_health_check()  # Exits with appropriate code
-
-🚨 EXIT CODES:
-├─ 0: Health check passed
-├─ 3: Health check failed (stale heartbeat, system issues)
-└─ Standard Python exit codes for other errors
-
-🔄 INTEGRATION:
-- Used by: Main application (client.py)
-- Depends on: client_constants.py, client_helpers.py
-- Thread-safe: Yes (background heartbeat worker)
-- External monitoring: Compatible with standard monitoring tools
-
-📈 PERFORMANCE:
-- Heartbeat interval: 10 seconds (configurable)
-- Health check timeout: 60 seconds for stale detection
-- Memory footprint: Minimal (<1MB additional)
-- I/O operations: Optimized JSON read/write
+Key exports:
+  MonitoringManager             — start/stop heartbeat, get path
+  perform_health_check()        — CLI health probe (exit 0 OK, 3 fail)
+  create/update/cleanup_heartbeat_file()  — low-level heartbeat I/O
 """
 
 import os

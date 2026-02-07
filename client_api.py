@@ -8,10 +8,10 @@ ve saldırı sayısı sorgulama gibi işlemleri merkezileştirir.
 
 Sınıflar:
     - HoneypotAPIClient: API ile etkileşim kurmak için ana sınıf.
-    - AsyncAttackCounter: Saldırı sayacını asenkron olarak günceller.
 
 Fonksiyonlar:
-    - test_api_connection: API bağlantısını test eder.
+    - api_request_with_token: Token ile API isteği wrapper.
+    - report_tunnel_action_api: Tünel eylemlerini raporlar.
 """
 
 # Import constants for timeout values
@@ -297,89 +297,6 @@ def api_request_with_token(api_client, token: str, method: str, endpoint: str,
             api_client.log(f"[API] Wrapper hatası: {e}")
         return None
 
-# ===================== HEARTBEAT & IP MANAGEMENT ===================== #
-# Purpose: Client IP tracking and heartbeat communication
-
-def update_client_ip_api(api_url: str, token: str, new_ip: str, log_func=None):
-    """Update client IP address via API with improved error handling"""
-    import requests
-    import requests.exceptions
-    
-    try:
-        if not token: 
-            if log_func: log_func("IP update skipped: no token")
-            return False
-        
-        response = requests.post(f"{api_url}/update-ip", 
-                               json={"token": token, "ip": new_ip}, timeout=API_REQUEST_TIMEOUT)
-        
-        if response.status_code == 200:
-            # IP güncelleme sadece değişim oldğunda loglanacak
-            if log_func: log_func(f"IP updated to: {new_ip}")
-            return True
-        else:
-            if log_func: log_func(f"IP update server error: HTTP {response.status_code}")
-            return False
-            
-    except requests.exceptions.ConnectionError as e:
-        if log_func: log_func(f"IP update network error: {e}")
-        return False
-    except requests.exceptions.Timeout as e:
-        if log_func: log_func(f"IP update timeout error: {e}")
-        return False
-    except requests.exceptions.RequestException as e:
-        if log_func: log_func(f"IP update request error: {e}")
-        return False
-    except Exception as e:
-        if log_func: log_func(f"IP update unexpected error: {e}")
-        return False
-
-def send_heartbeat_api(api_url: str, token: str, ip: str, hostname: str, 
-                      running: bool, status_override: Optional[str] = None, log_func=None):
-    """Send single heartbeat to API with improved error handling"""
-    import requests
-    import requests.exceptions
-    
-    try:
-        if not token:
-            if log_func: log_func("heartbeat skipped: no token")
-            return False
-        
-        # Support for new idle status and intelligent status detection
-        if status_override in ("online", "idle", "offline", "error"):
-            status = status_override
-        else:
-            status = "online" if running else "offline"
-        
-        payload = {
-            "token": token, "ip": ip, "hostname": hostname,
-            "running": running, "status": status
-        }
-        
-        # Increased timeout and better error handling  
-        response = requests.post(f"{api_url}/heartbeat", json=payload, timeout=API_REQUEST_TIMEOUT)
-        
-        # Check response status
-        if response.status_code == 200:
-            # Sadece önemli durumlarda logla (status değişiminde vs.)
-            return True
-        else:
-            if log_func: log_func(f"heartbeat server error: HTTP {response.status_code}")
-            return False
-            
-    except requests.exceptions.ConnectionError as e:
-        if log_func: log_func(f"heartbeat network error: {e}")
-        return False
-    except requests.exceptions.Timeout as e:
-        if log_func: log_func(f"heartbeat timeout error: {e}")
-        return False
-    except requests.exceptions.RequestException as e:
-        if log_func: log_func(f"heartbeat request error: {e}")
-        return False
-    except Exception as e:
-        if log_func: log_func(f"heartbeat unexpected error: {e}")
-        return False
-
 # ===================== TUNNEL ACTION REPORTING ===================== #
 # Purpose: Report tunnel state changes to honeypot server
 
@@ -410,13 +327,11 @@ def report_tunnel_action_api(api_request_func, token: str, service: str, action:
         if log_func: log_func(f"Tünel eylemi raporlanırken hata: {e}")
         return False
 
-# ===================== CLIENT REGISTRATION & PORT REPORTING ===================== #
-# Purpose: Client registration and port status reporting
+# ===================== CLIENT REGISTRATION ===================== #
 
 def register_client_api(api_url: str, server_name: str, ip: str, token_save_func=None, log_func=None) -> Optional[str]:
-    """Register client with API and get token - improved error handling"""
+    """Register client with API and get token"""
     import requests
-    import requests.exceptions
     
     try:
         payload = {"server_name": f"{server_name} ({ip})", "ip": ip}
@@ -430,55 +345,10 @@ def register_client_api(api_url: str, server_name: str, ip: str, token_save_func
                     token_save_func(token)
                 if log_func: log_func(f"Client registration successful: {server_name}")
                 return token
-            else:
-                if log_func: log_func("Registration failed: no token in response")
-                return None
-        else:
-            if log_func: log_func(f"Registration server error: HTTP {response.status_code}")
-            return None
-            
-    except requests.exceptions.ConnectionError as e:
-        if log_func: log_func(f"Registration network error: {e}")
-        return None
-    except requests.exceptions.Timeout as e:
-        if log_func: log_func(f"Registration timeout error: {e}")
-        return None
-    except requests.exceptions.RequestException as e:
-        if log_func: log_func(f"Registration request error: {e}")
-        return None
-    except Exception as e:
-        if log_func: log_func(f"Registration unexpected error: {e}")
-        return None
-
-def report_open_ports_api(api_url: str, token: str, ports: list, log_func=None) -> bool:
-    """Report open ports to API with improved error handling"""
-    import requests
-    import requests.exceptions
-    
-    try:
-        if not token:
-            if log_func: log_func("Open ports report skipped: no token")
-            return False
         
-        payload = {"token": token, "ports": ports}
-        response = requests.post(f"{api_url}/agent/open-ports", json=payload, timeout=API_REQUEST_TIMEOUT)
-        
-        if response.status_code == 200:
-            if log_func: log_func(f"Open ports reported successfully: {len(ports)} ports")
-            return True
-        else:
-            if log_func: log_func(f"Open ports server error: HTTP {response.status_code}")
-            return False
+        if log_func: log_func(f"Registration failed: HTTP {response.status_code}")
+        return None
             
-    except requests.exceptions.ConnectionError as e:
-        if log_func: log_func(f"Open ports network error: {e}")
-        return False
-    except requests.exceptions.Timeout as e:
-        if log_func: log_func(f"Open ports timeout error: {e}")
-        return False
-    except requests.exceptions.RequestException as e:
-        if log_func: log_func(f"Open ports request error: {e}")
-        return False
     except Exception as e:
-        if log_func: log_func(f"Open ports unexpected error: {e}")
-        return False
+        if log_func: log_func(f"Registration error: {e}")
+        return None

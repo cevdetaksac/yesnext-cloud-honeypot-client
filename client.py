@@ -128,7 +128,7 @@ from client_constants import (
     TRY_TRAY, RDP_SECURE_PORT, HONEYPOT_IP, 
     HONEYPOT_TUNNEL_PORT, SERVER_NAME, DEFAULT_TUNNELS,
     API_STARTUP_DELAY, API_RETRY_INTERVAL, API_SLOW_RETRY_DELAY,
-    API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH, RECONCILE_LOOP_INTERVAL,
+    API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH,
     CONSENT_FILE, STATUS_FILE,
     WATCHDOG_TOKEN_FILE, __version__, GITHUB_OWNER, GITHUB_REPO,
     WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT
@@ -139,7 +139,7 @@ from client_rdp import RDPManager, RDPPopupManager
 
 # Import new modular components
 from client_monitoring import MonitoringManager, perform_health_check
-from client_instance import InstanceManager, check_singleton
+from client_instance import check_singleton
 from client_logging import LoggingManager, setup_logging
 from client_security import SecurityManager
 from client_updater import UpdateManager
@@ -236,7 +236,6 @@ class CloudHoneypotClient:
         self.monitoring_manager = MonitoringManager(APP_DIR)
         self.security_manager = SecurityManager()
         self.update_manager = UpdateManager()
-        self.instance_manager = InstanceManager()
         
         # Initialize security system
         try:

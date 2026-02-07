@@ -581,11 +581,3 @@ class RDPPopupManager:
             return False
         
         self.show_rdp_popup("rollback", on_rollback_confirm)
-
-def create_rdp_manager(main_app=None) -> RDPManager:
-    """RDP Manager factory fonksiyonu"""
-    return RDPManager(main_app)
-
-def create_rdp_popup_manager(main_app=None, translation_func=None) -> RDPPopupManager:
-    """RDP Popup Manager factory fonksiyonu"""
-    return RDPPopupManager(main_app, translation_func)

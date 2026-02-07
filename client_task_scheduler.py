@@ -1,95 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER MODULE
-==================================================
+Client Task Scheduler — Windows Task Scheduler integration.
 
-📋 5-TASK SYSTEM ARCHITECTURE - SEPTEMBER 2025:
-┌─────────────────────────────────────────────────────────────────┐
-│              COMPREHENSIVE TASK SCHEDULER SYSTEM               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  🟢 CloudHoneypot-Background  → Boot-time daemon service       │
-│  ├─ Trigger: System boot (30s delay)                          │  
-│  ├─ Context: SYSTEM account, highest privileges               │
-│  ├─ Purpose: Headless server operation                        │
-│  └─ Command: honeypot-client.exe --mode=daemon --silent       │
-│                                                                 │
-│  🟡 CloudHoneypot-Tray       → User session GUI               │
-│  ├─ Trigger: User logon (15s delay)                          │
-│  ├─ Context: User account, interactive desktop               │
-│  ├─ Purpose: Desktop management interface                     │
-│  └─ Command: honeypot-client.exe --mode=tray --silent        │
-│                                                                 │
-│  � CloudHoneypot-Watchdog   → System health monitoring       │
-│  ├─ Trigger: Hourly schedule                                 │
-│  ├─ Context: SYSTEM account, maintenance                     │
-│  ├─ Purpose: Process recovery and health checks              │
-│  └─ Command: honeypot-client.exe --watchdog --silent         │
-│                                                                 │
-│  📱 CloudHoneypot-Updater    → Weekly update checks           │
-│  ├─ Trigger: Weekly schedule (Sunday 03:00)                  │
-│  ├─ Context: User account, interactive updates               │
-│  ├─ Purpose: Interactive update management                    │
-│  └─ Command: honeypot-client.exe --silent-update-check       │
-│                                                                 │
-│  🔄 CloudHoneypot-SilentUpdater → Automatic updates (2h)      │
-│  ├─ Trigger: Every 2 hours                                   │
-│  ├─ Context: SYSTEM account, background                      │
-│  ├─ Purpose: Unattended system maintenance                   │
-│  └─ Command: honeypot-client.exe --silent-update-check       │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ 🏗️ MODULAR MANAGEMENT FUNCTIONS:                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  📊 perform_comprehensive_task_management() → Auto mgmt        │
-│  ├─ Check & install missing tasks (admin required)            │
-│  ├─ Activate existing tasks (no admin needed)                 │
-│  ├─ Report status to application state                        │
-│  └─ Integrated with client.py __init__                        │
-│                                                                 │
-│  🔧 Task Control Functions:                                    │
-│  ├─ get_task_status()    → Query task state                   │
-│  ├─ enable_task()        → Activate task                      │
-│  ├─ disable_task()       → Deactivate task                    │
-│  ├─ run_task()           → Immediate execution                 │
-│  └─ All work without admin privileges                         │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ 🎯 INSTALLER INTEGRATION STRATEGY:                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. Installer: Stop all CloudHoneypot-* tasks                 │
-│  2. Installer: Delete all tasks for clean installation        │
-│  3. Installer: Install new application files                  │
-│  4. Installer: Launch application once                        │
-│  5. Application: Check & install missing tasks                │
-│  6. Application: Activate all available tasks                 │
-│  7. Future runs: Only verify & activate existing tasks       │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ ✅ ADVANTAGES OVER WINDOWS SERVICES:                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ▶ No SYSTEM context GUI limitations                          │
-│  ▶ Built-in Windows reliability & restart features            │
-│  ▶ User-friendly Task Scheduler MMC management               │
-│  ▶ Clean separation: system vs user contexts                 │
-│  ▶ Automatic Windows Update compatibility                     │
-│  ▶ Standard troubleshooting with Windows tools               │
-│  ▶ Modern XML-based configuration                             │
-│  ▶ Granular scheduling and trigger control                   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+6-task system: Background (boot), Tray (logon), Watchdog (15m),
+Updater (weekly), SilentUpdater (2h), MemoryRestart (8h).
+XML-based schtasks creation, admin-optional activation.
 
-💡 INTEGRATION STATUS:
-- ✅ Full modular integration with client.py
-- ✅ Installer-aware task management lifecycle  
-- ✅ Admin-optional task activation system
-- ✅ Comprehensive 5-task coverage
-- ✅ Production-ready deployment workflow
-- Version: See client_constants.VERSION
+Key exports:
+  perform_comprehensive_task_management() — startup task check/activate
+  ensure_tasks_installed()                — install missing tasks (admin)
+  check_tasks_status()                    — verify all task states
+  install_tasks() / uninstall_tasks()     — full install/remove
+  get_task_status/enable_task/disable_task/run_task — per-task control
 """
 
 import os
@@ -98,7 +21,6 @@ import subprocess
 import ctypes
 import json
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from client_constants import TASK_STATE_FILE

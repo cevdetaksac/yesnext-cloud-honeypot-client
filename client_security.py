@@ -1,134 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLIENT SECURITY MODULE  
-==========================
+Client Security — Windows Defender compatibility & process integrity.
 
-🛡️ WINDOWS DEFENDER & SECURITY COMPLIANCE
-==========================================
+Creates trust signals (registry entries, security_metadata.json) to
+prevent false-positive detections. Validates process integrity and
+checks security environment (admin, AV, firewall).
 
-🔍 MODULE PURPOSE:
-This module ensures Cloud Honeypot Client operates safely within Windows security
-frameworks, particularly Windows Defender. Implements trust signals, security
-metadata, and compliance checks to prevent false positive detections while
-maintaining legitimate security monitoring capabilities.
-
-📋 CORE RESPONSIBILITIES:
-┌─────────────────────────────────────────────────────────────────┐
-│                    SECURITY FUNCTIONS                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  🛡️ WINDOWS DEFENDER COMPATIBILITY                              │
-│  ├─ check_defender_compatibility() → Security framework check  │
-│  ├─ create_defender_trust_signals() → Trust metadata creation  │
-│  └─ File hash verification        → Digital integrity checks   │
-│                                                                 │
-│  🔒 PROCESS INTEGRITY                                           │
-│  ├─ verify_process_integrity()    → Process validation         │
-│  ├─ Digital signature checks     → Authenticity verification  │
-│  └─ Executable name validation   → Prevent spoofing attacks   │
-│                                                                 │
-│  📊 SECURITY ENVIRONMENT                                        │
-│  ├─ check_security_environment() → System security analysis   │
-│  ├─ Admin privilege detection    → Elevation status checking  │
-│  ├─ Antivirus presence detection → Security software scanning │
-│  └─ Firewall status monitoring   → Network security checking  │
-│                                                                 │
-│  🏗️ MANAGEMENT CLASS                                            │
-│  └─ SecurityManager              → Centralized security control│
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚀 KEY FEATURES:
-├─ Legitimate Software Signals: Registry entries, metadata, digital signatures
-├─ Trust Metadata Generation: Security compliance documentation  
-├─ False Positive Prevention: Proactive Windows Defender compatibility
-├─ Process Integrity Validation: Ensures authentic, unmodified execution
-├─ Security Context Awareness: Admin/user privilege detection
-├─ Compliance Documentation: Automated security audit trail
-└─ Legitimate Domain Validation: Network traffic legitimacy
-
-🔧 TRUST SIGNALS IMPLEMENTED:
-┌─────────────────────────────────────────────────────────────────┐
-│                     SECURITY TRUST MATRIX                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  📝 REGISTRY ENTRIES                                            │
-│  ├─ HKCU\\Software\\YesNext\\CloudHoneypotClient               │
-│  ├─ InstallTime: Installation timestamp                        │
-│  ├─ Purpose: "Network Security Monitoring"                     │
-│  └─ Legitimate: 1 (Boolean flag)                              │
-│                                                                 │
-│  📄 METADATA FILES                                              │
-│  ├─ security_metadata.json → Application legitimacy data       │
-│  ├─ Version information    → Software version tracking         │
-│  └─ Digital signatures     → Authenticity verification         │
-│                                                                 │
-│  🌐 NETWORK LEGITIMACY                                          │
-│  ├─ Legitimate domains list → Approved API endpoints           │
-│  ├─ Restricted paths       → Sensitive directory protection    │
-│  └─ Traffic patterns       → Normal vs suspicious behavior    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🔍 SECURITY CHECKS:
-├─ File Hash Verification: SHA-256 integrity checking
-├─ Digital Signature Validation: Code signing certificate verification  
-├─ Process Name Validation: Prevent executable spoofing
-├─ Registry Integrity: Legitimate installation markers
-├─ Admin Privilege Status: Security context awareness
-├─ Antivirus Integration: Compatible operation detection
-└─ Firewall Compliance: Network security policy adherence
-
-🚨 SECURITY METADATA STRUCTURE:
-{
-  "application_name": "Cloud Honeypot Client",
-  "vendor": "YesNext Technology",
-  "purpose": "Network Security Monitoring", 
-  "legitimate": true,
-  "signed": true|false,
-  "version": "2.x.x",
-  "install_timestamp": "2025-09-27T16:00:00Z",
-  "integrity_verified": true,
-  "admin_privileges": true|false,
-  "compliance_level": "enterprise"
-}
-
-🔧 USAGE PATTERNS:
-# Initialize security management
-security_mgr = SecurityManager()
-if security_mgr.initialize():
-    status = security_mgr.get_security_status()
-
-# Check for admin privileges
-if security_mgr.is_admin():
-    # Perform privileged operations
-    pass
-
-# Verify application integrity
-if verify_process_integrity():
-    # Continue normal operation
-    pass
-
-🚨 ERROR HANDLING:
-├─ Registry Access Denied: Continue without registry markers
-├─ File Hash Failures: Log warning, continue operation
-├─ Privilege Detection Errors: Assume limited privileges
-├─ Metadata Creation Failures: Degrade gracefully
-└─ Digital Signature Issues: Log warning, verify through other means
-
-🔄 INTEGRATION:
-- Used by: Main application initialization (client.py)
-- Depends on: client_constants.py, client_helpers.py, Windows APIs
-- Security impact: Prevents false positive malware detection
-- Compliance: Windows security framework compatible
-
-📈 PERFORMANCE:
-- Security check time: <500ms on system initialization
-- Registry operations: Sub-millisecond individual calls
-- File hash calculation: ~100ms for typical executable sizes
-- Memory overhead: Minimal (<500KB security metadata)
-- Continuous monitoring: No performance impact after initialization
+Key exports:
+  SecurityManager                  — initialize(), get_security_status(), is_admin()
+  check_defender_compatibility()   — hash + registry markers
+  create_defender_trust_signals()   — metadata + process verification
+  verify_process_integrity()       — exe name & PID check
+  check_security_environment()     — admin / AV / firewall status dict
 """
 
 import os

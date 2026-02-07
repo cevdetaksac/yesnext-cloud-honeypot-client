@@ -551,10 +551,6 @@ class FirewallAgent:
             time.sleep(sleep_for)
 
 
-# Legacy alias for backward compatibility
-Agent = FirewallAgent
-
-
 # ---------------------------- Defaults & CLI ---------------------------- #
 
 def _default_cache_dir() -> Path:

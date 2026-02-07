@@ -164,7 +164,6 @@ APP_STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 # Operation modes
 GUI_MODE = "gui"        # Normal GUI application with tray functionality
 DAEMON_MODE = "daemon"  # Background-only mode for servers
-TRAY_MODE = GUI_MODE    # Tray mode is a variant of GUI mode
 
 # ===================== HEARTBEAT CONFIGURATION ===================== #
 
@@ -182,7 +181,6 @@ API_HEARTBEAT_INTERVAL = 60      # API heartbeat send interval
 ATTACK_COUNT_REFRESH = 15        # Attack count refresh interval (was 10s, optimized to 15s)
 DASHBOARD_SYNC_INTERVAL = 45     # Dashboard tunnel sync interval (was 30s, optimized to 45s)
 DASHBOARD_SYNC_CHECK = 10        # Dashboard sync check frequency (was 5s, optimized to 10s)
-RECONCILE_LOOP_INTERVAL = 600    # Old reconcile loop interval (10 minutes)
 API_STARTUP_DELAY = 5            # API startup delay (5 seconds)
 RDP_TRANSITION_TIMEOUT = 120     # RDP transition timeout
 WATCHDOG_INTERVAL = 15           # Tunnel watchdog check interval (was 10s, optimized to 15s)
@@ -238,23 +236,11 @@ API_QUICK_RETRY_DELAY = 5
 API_SLOW_RETRY_DELAY = 60
 API_REQUEST_TIMEOUT = 8
 
-# ===================== ERROR MESSAGES ===================== #
-
-# Common error message keys for i18n
-ERROR_KEYS = {
-    "api_connection_failed": "api_connection_failed",
-    "token_load_error": "token_load_error", 
-    "tunnel_start_error": "tunnel_start_error",
-    "admin_required": "admin_required",
-    "update_error": "update_error"
-}
-
 # ===================== FEATURE FLAGS ===================== #
 
 # Feature toggles from configuration
 ENABLE_AUTO_UPDATE = get_from_config("advanced.auto_update", True)
 ENABLE_TRAY_ICON = get_from_config("advanced.minimize_to_tray", True)
-ENABLE_STARTUP_NOTICE = get_from_config("advanced.show_startup_notice", True)
 ENABLE_ADMIN_ELEVATION = get_from_config("advanced.request_admin_privileges", True)
 
 # Debug and development flags
@@ -294,7 +280,7 @@ __all__ = [
     # Timing
     'API_RETRY_INTERVAL', 'API_HEARTBEAT_INTERVAL', 'FILE_HEARTBEAT_INTERVAL', 
     'ATTACK_COUNT_REFRESH', 'DASHBOARD_SYNC_INTERVAL',
-    'DASHBOARD_SYNC_CHECK', 'RECONCILE_LOOP_INTERVAL', 'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
+    'DASHBOARD_SYNC_CHECK', 'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
     'WATCHDOG_INTERVAL',
     
     # Logging
@@ -304,7 +290,7 @@ __all__ = [
     'API_MAX_QUICK_RETRIES', 'API_QUICK_RETRY_DELAY', 'API_SLOW_RETRY_DELAY', 'API_REQUEST_TIMEOUT',
     
     # Feature flags
-    'ENABLE_AUTO_UPDATE', 'ENABLE_TRAY_ICON', 'ENABLE_STARTUP_NOTICE', 'ENABLE_ADMIN_ELEVATION',
+    'ENABLE_AUTO_UPDATE', 'ENABLE_TRAY_ICON', 'ENABLE_ADMIN_ELEVATION',
     'DEBUG_MODE', 'VERBOSE_LOGGING', 'SILENT_ADMIN_ELEVATION', 'SKIP_USER_DIALOGS',
     
     # Helper functions

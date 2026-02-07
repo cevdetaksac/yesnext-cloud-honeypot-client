@@ -58,7 +58,3 @@ def enable_simple_memory_restart(restart_hours=8):
     """Compatibility function - artık Task Scheduler kullanıyor"""
     log(f"🔄 Memory restart now managed by Task Scheduler (every {restart_hours}h)")
     return True
-
-def start_memory_watchdog(*args, **kwargs):
-    """Compatibility function - no longer needed"""
-    pass

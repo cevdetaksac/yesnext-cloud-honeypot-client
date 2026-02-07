@@ -1,134 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLIENT UPDATE MODULE
-=======================
+Client Updater — Installer-based update system via GitHub releases.
 
-🔄 AUTOMATED UPDATE SYSTEM
-===========================
+Interactive & silent update modes with progress dialogs.
+Hourly watchdog loop for automatic background updates.
 
-🔍 MODULE PURPOSE:
-This module provides comprehensive update management for the Cloud Honeypot Client,
-including interactive user updates, silent automatic updates, and continuous
-version monitoring. Integrates with GitHub releases and installer-based deployment.
-
-📋 CORE RESPONSIBILITIES:
-┌─────────────────────────────────────────────────────────────────┐
-│                     UPDATE FUNCTIONS                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  🔄 INTERACTIVE UPDATES                                         │
-│  ├─ check_updates_and_prompt()    → User-initiated updates     │
-│  ├─ Progress dialog integration   → Real-time update progress  │
-│  ├─ User confirmation dialogs     → Explicit user consent      │
-│  └─ Graceful application restart → Seamless version transition │
-│                                                                 │
-│  🤖 SILENT UPDATES                                              │
-│  ├─ check_updates_and_apply_silent() → Automated updates       │
-│  ├─ Background version checking   → Periodic update discovery  │
-│  ├─ Non-intrusive installation   → No user interruption       │
-│  └─ Automatic restart management  → Self-updating capability   │
-│                                                                 │
-│  ⏰ UPDATE WATCHDOG                                             │
-│  ├─ update_watchdog_loop()        → Hourly update monitoring   │
-│  ├─ Scheduled update checks       → Configurable intervals     │
-│  └─ Resource-aware timing         → System load consideration  │
-│                                                                 │
-│  🏗️ MANAGEMENT CLASS                                            │
-│  └─ UpdateManager                 → Centralized update control │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚀 KEY FEATURES:
-├─ GitHub Integration: Direct integration with GitHub releases API
-├─ Installer-Based Updates: Modern MSI/EXE installer deployment  
-├─ Progress Tracking: Real-time update progress with user feedback
-├─ Silent Operation: Background updates with minimal disruption
-├─ Version Management: Semantic versioning and compatibility checks
-├─ Rollback Protection: Backup creation before major updates
-├─ Network Resilience: Retry logic and connection error handling
-└─ Security Validation: Digital signature verification for downloads
-
-🔧 UPDATE WORKFLOW:
-┌─────────────────────────────────────────────────────────────────┐
-│                    UPDATE PROCESS FLOW                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1️⃣ VERSION DISCOVERY                                          │
-│  ├─ Query GitHub releases API                                  │
-│  ├─ Compare with current version                               │
-│  └─ Determine update necessity                                 │
-│                                                                 │
-│  2️⃣ USER INTERACTION (Interactive Mode)                        │
-│  ├─ Display update notification                                │
-│  ├─ Show changelog/release notes                              │
-│  ├─ Request user confirmation                                  │
-│  └─ Initialize progress dialog                                 │
-│                                                                 │
-│  3️⃣ DOWNLOAD & INSTALLATION                                    │
-│  ├─ Download new installer package                            │
-│  ├─ Verify digital signature                                  │
-│  ├─ Execute installer with parameters                         │
-│  └─ Monitor installation progress                             │
-│                                                                 │
-│  4️⃣ APPLICATION TRANSITION                                     │
-│  ├─ Graceful shutdown of current instance                     │
-│  ├─ Wait for installation completion                          │
-│  ├─ Automatic restart with new version                        │
-│  └─ Cleanup temporary files                                   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-📊 UPDATE MODES:
-├─ Interactive Mode: User-initiated updates with full UI feedback
-├─ Silent Mode: Automated background updates (configurable)
-├─ Scheduled Mode: Time-based update checking (hourly default)  
-├─ Manual Mode: On-demand update checking via menu/command
-└─ Emergency Mode: Critical security updates (immediate)
-
-🔧 CONFIGURATION:
-- Update Source: GitHub repository (owner/repo from constants)
-- Check Interval: 1 hour (3600 seconds) default
-- Retry Logic: 3 attempts with exponential backoff
-- Timeout Values: 30 seconds for API calls, 300 seconds for downloads
-- User Consent: Required for interactive updates, optional for silent
-
-🚀 USAGE PATTERNS:
-# Initialize update management
-update_mgr = UpdateManager()
-update_mgr.start_update_watchdog(auto_update=True)
-
-# Interactive update check
-update_mgr.check_for_updates_interactive(app_instance)
-
-# Silent update check  
-success = update_mgr.check_for_updates_silent()
-
-# Watchdog setup in application
-def start_update_watchdog(self):
-    return self.update_manager.start_update_watchdog(auto_update=True)
-
-🚨 ERROR HANDLING:
-├─ Network Connectivity: Graceful degradation, retry with backoff
-├─ API Rate Limits: Respect GitHub API limits, adaptive timing
-├─ Download Failures: Multiple mirror attempts, partial resume support
-├─ Installation Errors: Rollback to previous version if possible
-├─ Permission Issues: Elevation request or graceful failure
-├─ Disk Space: Pre-check available space, cleanup on failure
-└─ Version Conflicts: Compatibility validation before installation
-
-🔄 INTEGRATION:
-- Used by: Main application (client.py), GUI menu system
-- Depends on: client_utils.py, client_constants.py, GitHub API
-- UI Integration: Progress dialogs, notification systems
-- Platform: Windows-focused with cross-platform potential
-
-📈 PERFORMANCE:
-- API call overhead: <500ms for version check
-- Download speed: Limited by network and GitHub CDN
-- Installation time: 10-30 seconds typical installer execution
-- Memory usage: <5MB during update operations
-- Background impact: Minimal CPU usage during watchdog operation
+Key exports:
+  UpdateManager                    — start_update_watchdog(), interactive/silent checks
+  check_updates_and_prompt(app)    — interactive update with UI dialogs
+  check_updates_and_apply_silent() — background NSIS silent install
+  update_watchdog_loop()           — hourly update check (daemon thread)
 """
 
 import os

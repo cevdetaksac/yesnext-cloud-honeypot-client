@@ -38,14 +38,6 @@ class SystemUtils:
     """Sistem yardımcıları"""
     
     @staticmethod
-    def get_computer_name() -> str:
-        """Bilgisayar adını al"""
-        try:
-            return os.environ.get('COMPUTERNAME', 'Unknown')
-        except Exception:
-            return 'Unknown'
-    
-    @staticmethod
     def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False, log_func=None):
         """Terminal komutu çalıştır - Unicode safe"""
         if log_func is None:
@@ -86,48 +78,6 @@ class SystemUtils:
         except Exception as e:
             log_func(f"Command error: {e}")
             return None
-    
-    @staticmethod
-    def get_username() -> str:
-        """Kullanıcı adını al"""
-        try:
-            return os.environ.get('USERNAME', 'Unknown')
-        except Exception:
-            return 'Unknown'
-    
-    @staticmethod
-    def get_windows_version() -> str:
-        """Windows versiyonunu al"""
-        try:
-            import platform
-            return f"{platform.system()} {platform.release()} {platform.version()}"
-        except Exception:
-            return "Unknown Windows"
-    
-    @staticmethod
-    def get_python_version() -> str:
-        """Python versiyonunu al"""
-        return f"Python {sys.version.split()[0]}"
-    
-    @staticmethod
-    def get_executable_path() -> str:
-        """Çalıştırılabilir dosya yolunu al"""
-        if getattr(sys, 'frozen', False):
-            # PyInstaller ile derlenmiş
-            return sys.executable
-        else:
-            # Script olarak çalışıyor
-            return os.path.abspath(__file__)
-    
-    @staticmethod
-    def get_working_directory() -> str:
-        """Çalışma dizinini al"""
-        if getattr(sys, 'frozen', False):
-            # PyInstaller ile derlenmiş
-            return os.path.dirname(sys.executable)
-        else:
-            # Script olarak çalışıyor
-            return os.path.dirname(os.path.abspath(__file__))
 
 def load_i18n(lang_file: str = "client_lang.json", language: str = "tr") -> dict:
     """Load all language data from JSON file"""

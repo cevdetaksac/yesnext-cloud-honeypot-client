@@ -1,104 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLIENT INSTANCE MANAGEMENT MODULE
-====================================
+Client Instance Management — Singleton control & process management.
 
-🔒 SINGLETON CONTROL & PROCESS MANAGEMENT
-==========================================
+Ensures only one Cloud Honeypot Client instance runs at a time using
+Windows named mutexes. Handles graceful shutdown of existing instances.
 
-🔍 MODULE PURPOSE:
-This module ensures only one instance of the Cloud Honeypot Client runs at a time,
-preventing conflicts and resource contention between multiple application instances.
-Provides robust process management and graceful instance handover.
-
-📋 CORE RESPONSIBILITIES:
-┌─────────────────────────────────────────────────────────────────┐
-│                   INSTANCE CONTROL FUNCTIONS                   │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  🔒 SINGLETON ENFORCEMENT                                       │
-│  ├─ check_singleton()          → Mutex-based instance control  │
-│  ├─ Global Mutex Management    → Windows named mutex system    │
-│  └─ Mode-specific isolation    → Daemon vs GUI separation      │
-│                                                                 │
-│  ⚡ PROCESS MANAGEMENT                                          │
-│  ├─ shutdown_existing_instance() → Graceful process cleanup    │
-│  ├─ Process Discovery          → Find running instances        │
-│  ├─ Graceful Termination      → SIGTERM before SIGKILL       │
-│  └─ Timeout Handling          → Force kill after grace period │
-│                                                                 │
-│  🏗️ MANAGEMENT CLASS                                            │
-│  └─ InstanceManager            → Centralized instance control  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚀 KEY FEATURES:
-├─ Named Mutex System: "Global\\CloudHoneypotClient_Singleton" 
-├─ Cross-Session Protection: Works across user sessions & SYSTEM
-├─ Graceful Handover: Clean shutdown of existing instances
-├─ Process Discovery: Automatic detection of running instances
-├─ Timeout Protection: Prevents hanging during shutdown
-├─ Error Recovery: Robust error handling during process operations
-└─ Mode Awareness: Respects daemon vs GUI execution contexts
-
-🔧 SINGLETON WORKFLOW:
-┌─────────────────────────────────────────────────────────────────┐
-│                    INSTANCE STARTUP FLOW                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1️⃣ Attempt Mutex Creation                                     │
-│  ├─ Try to acquire global named mutex                          │
-│  └─ If successful → Continue with startup                      │
-│                                                                 │
-│  2️⃣ Handle Existing Instance                                   │
-│  ├─ If mutex exists → Find running processes                   │
-│  ├─ Send graceful termination signal                          │
-│  ├─ Wait for cleanup (5 second timeout)                       │
-│  └─ Force kill if necessary                                    │
-│                                                                 │
-│  3️⃣ Retry Mutex Acquisition                                    │
-│  ├─ Attempt mutex creation again                              │
-│  ├─ If successful → Startup continues                          │
-│  └─ If failed → Exit with error code 2                        │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-💻 PROCESS DISCOVERY:
-- Target Processes: honeypot-client.exe, client.exe
-- Method: psutil process iteration with name matching
-- Exclusion: Current process PID automatically excluded
-- Cross-platform: Windows-focused but extensible
-
-🔧 USAGE PATTERNS:
-# Check singleton before main application starts
-if not check_singleton("daemon"):
-    sys.exit(2)  # Another instance running
-
-# Using manager class
-instance_mgr = InstanceManager()
-if instance_mgr.acquire_singleton("gui"):
-    # Application startup continues
-    pass
-
-🚨 ERROR HANDLING:
-├─ Mutex Creation Failure: Log error, return False
-├─ Process Discovery Failure: Continue with assumption of no conflicts
-├─ Shutdown Timeout: Force termination after grace period
-├─ Permission Denied: Log warning, attempt to continue
-└─ System Resource Limits: Graceful degradation
-
-🔄 INTEGRATION:
-- Used by: Main application startup (client.py)
-- Depends on: client_constants.py, client_helpers.py, psutil, win32api
-- Thread-safe: Yes (mutex operations are atomic)
-- Platform: Windows-specific (named mutexes)
-
-📈 PERFORMANCE:
-- Mutex operations: Sub-millisecond on modern systems
-- Process discovery: <100ms for typical process counts
-- Shutdown timeout: 5 seconds maximum per process
-- Memory overhead: Minimal (<100KB)
+Key exports:
+  check_singleton(mode)         — Acquire global mutex, shutdown conflicts
+  shutdown_existing_instance()  — Find & terminate running instances
+  InstanceManager               — OOP wrapper around singleton logic
 """
 
 import os

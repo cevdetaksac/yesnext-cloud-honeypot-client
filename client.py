@@ -318,13 +318,10 @@ class CloudHoneypotClient:
         # Tray mode tracking - thread-safe flag (prevents window from auto-showing)
         self._tray_mode = threading.Event()  # set() = in tray, clear() = visible
         
-        # GUI health monitoring - PERFORMANCE OPTIMIZED
+        # GUI health monitoring
         self.gui_health = {
-            'last_update': time.time(),
             'update_count': 0,
-            'frozen_count': 0,
-            'last_response': time.time(),
-            'health_check_interval': 60  # seconds (was 30s, optimized for performance)
+            'health_check_interval': 60  # seconds
         }
         
         # Check initial RDP state and report to API
@@ -502,14 +499,6 @@ class CloudHoneypotClient:
                 json.dump(data or {}, f, ensure_ascii=False)
         except Exception as e:
             log(f"write status raw error: {e}")
-
-    def first_run_notice(self):
-        try:
-            # Skip first run notice for now to avoid dict issues
-            log("First run notice skipped - avoiding dict issues")
-            return
-        except Exception as e:
-            log(f"first_run_notice error: {e}")
 
     # ---------- I18N ---------- #
     def t(self, key: str) -> str:
@@ -689,52 +678,38 @@ class CloudHoneypotClient:
             return None
 
     def check_gui_health(self):
-        """GUI sağlık durumunu kontrol et - PERFORMANCE OPTIMIZED"""
+        """Periodic GUI health check — tray icon sync & session monitoring"""
         if not self.root:
             return
             
         try:
-            # GUI yanıt verme durumunu test et
-            current_time = time.time()
-            
-            # Test için basit bir GUI operasyonu yap
             self.root.winfo_exists()
-            self.gui_health['last_response'] = current_time
             self.gui_health['update_count'] += 1
             
-            # Sağlık durumunu kontrol et - only check every 2 minutes
-            time_since_last_update = current_time - self.gui_health['last_update']
+            # Tray icon update — only if tunnel state changed
+            if hasattr(self, 'tray_manager'):
+                current_state = bool(self.state.get("servers"))
+                if not hasattr(self, '_last_tray_state') or current_state != self._last_tray_state:
+                    self._last_tray_state = current_state
+                    self.update_tray_icon()
             
-            if time_since_last_update > 120:  # 2 dakikadan uzun güncelleme yok (was 60s)
-                log(f"[GUI_HEALTH] GUI uzun süredir güncellenmedi: {time_since_last_update:.1f}s")
-                self.gui_health['frozen_count'] += 1
-                
-                # GUI'yi yenilemeye çalış
-                self.refresh_gui()
-                
-            # Donma sayısı çok yüksekse yeniden başlatma önerisi
-            if self.gui_health['frozen_count'] > 10:  # was 5
-                log("[GUI_HEALTH] ⚠️ GUI sık sık donuyor - yeniden başlatma önerilir")
-                self.gui_health['frozen_count'] = 0  # Reset to avoid log spam
-                
-            # Windows Server özel kontrolleri - PERFORMANCE: Only check every 5 health cycles
+            # Windows Server session check — every 5th cycle (~5 min)
             if self.gui_health['update_count'] % 5 == 0:
                 self.check_windows_session_state()
             
-            # Reset counter to prevent integer overflow (every 1000 cycles)
+            # Prevent integer overflow
             if self.gui_health['update_count'] > 1000:
                 self.gui_health['update_count'] = 0
                 
         except Exception as e:
-            log(f"[GUI_HEALTH] GUI sağlık kontrolü hatası: {e}")
-            self.gui_health['frozen_count'] += 1
+            log(f"[GUI_HEALTH] Sağlık kontrolü hatası: {e}")
             
-        # Bir sonraki kontrol için zamanla — root.after MUST be inside try/except with winfo_exists
+        # Schedule next check
         try:
             if self.root and self.root.winfo_exists():
                 self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
         except Exception:
-            pass  # root destroyed, no more scheduling
+            pass
 
     def check_windows_session_state(self):
         """Windows session durumunu kontrol et"""
@@ -759,40 +734,6 @@ class CloudHoneypotClient:
                         
         except Exception as e:
             log(f"[GUI_HEALTH] Session kontrolü hatası: {e}")
-
-    # restart_gui_if_needed & _restart_gui_thread REMOVED (v2.9.3)
-    # Reason: build_gui() was called from non-main thread — Tkinter is NOT thread-safe
-    # The method was never called anywhere, and doing so would cause random crashes.
-
-    def refresh_gui(self):
-        """GUI'yi yenileme işlemleri - PERFORMANCE OPTIMIZED"""
-        if not self.root:
-            return
-            
-        try:
-            # GUI öğelerini zorla güncelle - less frequent for performance
-            # REMOVED: self.root.update_idletasks() - too expensive, not needed frequently
-            
-            # Windows Server optimizasyonları - PERFORMANCE: Removed gc.collect() and update()
-            # These were causing GUI freezes of 50-200ms
-            # NOTE: Auto-deiconify REMOVED (v2.9.4) — was causing tray-mode window to pop up
-            # The window should ONLY be shown by explicit user action (tray click, show_window)
-            
-            # Tray ikonunu güncelle - only if state changed
-            if hasattr(self, 'tray_manager') and hasattr(self, '_last_tray_state'):
-                current_state = bool(self.state.get("servers"))
-                if current_state != self._last_tray_state:
-                    self.update_tray_icon()
-                    self._last_tray_state = current_state
-            elif hasattr(self, 'tray_manager'):
-                self._last_tray_state = bool(self.state.get("servers"))
-                self.update_tray_icon()
-                
-            # Son güncelleme zamanını işaretle
-            self.gui_health['last_update'] = time.time()
-            
-        except Exception as e:
-            log(f"[GUI_HEALTH] GUI yenileme hatası: {e}")
 
     def refresh_attack_count(self, async_thread=True):
         """GUI'deki saldırı sayacını günceller"""
@@ -2194,57 +2135,11 @@ class CloudHoneypotClient:
         if minimized is not None:
             startup_mode = "minimized" if minimized else "gui"
             
-        # One-time notice for simplicity and firewall prompts
-        try:
-            # Ensure root exists before messagebox
-            if not self.root:
-                self.root = tk.Tk()
-                self.root.withdraw()  # Geçici olarak gizle
-                
-                # Ana pencere özelliklerini ayarla - use hardcoded title for now
-                self.root.title(f"Cloud Honeypot Client v{__version__}")
-                
-                # Window icon ayarla
-                try:
-                    self.root.iconbitmap('certs/honeypot.ico')
-                    # Taskbar icon için ayrıca PhotoImage ile ayarla
-                    try:
-                        from PIL import Image, ImageTk
-                        img = Image.open('certs/honeypot.ico')
-                        photo = ImageTk.PhotoImage(img)
-                        self.root.iconphoto(True, photo)
-                    except:
-                        pass
-                except:
-                    pass  # Icon yüklenemezse sessizce devam et
-                
-                self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-                self.root.resizable(True, True)
-                
-                # Ekran merkezi pozisyonunu hesapla (state restore edecek)
-                window_width = WINDOW_WIDTH
-                window_height = WINDOW_HEIGHT
-                screen_width = self.root.winfo_screenwidth()
-                screen_height = self.root.winfo_screenheight()
-                center_x = int(screen_width/2 - window_width/2)
-                center_y = int(screen_height/2 - window_height/2)
-                
-                # Pencereyi merkeze konumlandır
-                self.root.geometry(f'{window_width}x{window_height}+{center_x}+{center_y}')
-                
-            self.first_run_notice()
-            
-            # Continue building actual UI below (root will be reconfigured)
-            if not minimized and not self._tray_mode.is_set():
-                try:
-                    self.root.deiconify()  # Pencereyi göster
-                    self.root.lift()  # Öne getir
-                    self.root.focus_force()  # Fokusla
-                except Exception as e:
-                    log(f"Window show error: {e}")
-                    pass
-        except Exception as e:
-            log(f"build_gui pre-notice error: {e}")
+        # Ensure root window exists (needed for consent dialogs, etc.)
+        if not self.root:
+            self.root = tk.Tk()
+            self.root.withdraw()  # Start hidden — will be configured below
+
         self.start_single_instance_server()
 
         # Background services - skip if daemon is running (UI-only mode)
@@ -2274,15 +2169,12 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"update watchdog thread error: {e}")
 
-        if not self.root:
-            self.root = tk.Tk()
-        else:
-            # Only show window if NOT in minimized/tray startup mode
-            if startup_mode != "minimized" and not self._tray_mode.is_set():
-                try:
-                    self.root.deiconify()
-                except Exception:
-                    pass
+        # Configure main window
+        if startup_mode != "minimized" and not self._tray_mode.is_set():
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
         self.root.title(f"{self.t('app_title')} v{__version__}")
         
         # Window icon ayarla
@@ -2585,10 +2477,14 @@ class CloudHoneypotClient:
             if not self._tray_mode.is_set():
                 self.root.deiconify()
 
+        # show_cb is used by single-instance control server to bring window to front
         def _show_window():
             try:
-                self._tray_mode.clear()
-                self.root.deiconify(); self.root.lift(); self.root.focus_force()
+                if hasattr(self, 'tray_manager') and self.tray_manager:
+                    self.tray_manager.show_window()
+                else:
+                    self._tray_mode.clear()
+                    self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
 
@@ -2597,31 +2493,6 @@ class CloudHoneypotClient:
         
         # GUI sağlık durumu izleme başlat
         self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
-
-
-
-    def show_gui_from_tray(self, icon=None, item=None):
-        """Show GUI from tray"""
-        try:
-            # Show the window
-            if hasattr(self, 'root') and self.root:
-                self._tray_mode.clear()
-                self.root.deiconify()
-                self.root.lift()
-                self.root.focus_force()
-            
-        except Exception as e:
-            log(f"Show GUI error: {e}")
-            
-    def quit_from_tray(self, icon=None, item=None):
-        """Quit from tray"""
-        try:
-            if hasattr(self, 'root') and self.root:
-                self.root.quit()
-            sys.exit(0)
-        except Exception as e:
-            log(f"Quit error: {e}")
-            sys.exit(0)
 
 
 

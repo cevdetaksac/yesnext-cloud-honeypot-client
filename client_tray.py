@@ -1,160 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CLIENT TRAY MODULE
-==================
-
-SYSTEM TRAY INTEGRATION & NOTIFICATIONS
-========================================
+CLIENT TRAY MODULE — System tray integration for Cloud Honeypot Client.
 Version: See client_constants.VERSION
 
-Performance Notes:
-- Added minimized_to_tray flag for state tracking
-- Fixed window auto-show issue when intentionally minimized
-- Proper tray state management across GUI refreshes
+Provides:
+  - TrayManager class: centralized tray icon lifecycle, context menu, window show/hide/exit
+  - Dynamic status icons: green (active tunnels) / red (inactive) via pystray + PIL
+  - Fallback: programmatic icon generation if .ico files are missing
+  - Thread model: daemon thread for tray loop, thread-safe UI coordination
 
-🔍 MODULE PURPOSE:
-This module provides comprehensive system tray integration for the Cloud Honeypot
-Client, including dynamic status indicators, context menus, window management,
-and seamless background operation. Enables users to monitor and control the
-application without maintaining a visible window.
-
-📋 CORE RESPONSIBILITIES:
-┌─────────────────────────────────────────────────────────────────┐
-│                      TRAY FUNCTIONS                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  📱 TRAY ICON MANAGEMENT                                        │
-│  ├─ tray_make_image()           → Dynamic status icon creation │
-│  ├─ Icon state management      → Active/inactive visual states │
-│  ├─ Resource-based icons       → File system icon loading      │
-│  └─ Fallback icon generation   → Programmatic icon creation    │
-│                                                                 │
-│  🖼️ WINDOW INTEGRATION                                          │
-│  ├─ show_window()              → Restore application window    │
-│  ├─ minimize_to_tray()         → Hide window to system tray   │
-│  ├─ Window positioning         → Smart centering and focus     │
-│  └─ Icon synchronization       → Window/tray icon consistency  │
-│                                                                 │
-│  🎛️ CONTEXT MENU SYSTEM                                        │
-│  ├─ Dynamic menu creation      → Context-sensitive options     │
-│  ├─ Multi-language support     → Translated menu items        │
-│  ├─ Action callbacks          → Window show/hide/exit actions │
-│  └─ Status display            → Real-time protection status   │
-│                                                                 │
-│  🏗️ MANAGEMENT CLASS                                            │
-│  └─ TrayManager                → Centralized tray control      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚀 KEY FEATURES:
-├─ Dynamic Status Icons: Real-time visual feedback of protection status
-├─ Seamless Window Management: Hide/restore with tray interaction
-├─ Context Menu Integration: Right-click access to core functions  
-├─ Multi-language Support: Localized menu items and tooltips
-├─ Resource Optimization: Efficient icon loading and caching
-├─ Platform Integration: Native Windows system tray compliance
-├─ Graceful Degradation: Continues operation if tray unavailable
-└─ Background Persistence: Maintains operation while hidden
-
-🎨 ICON SYSTEM:
-┌─────────────────────────────────────────────────────────────────┐
-│                     DYNAMIC ICON STATES                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  🟢 ACTIVE STATE (Protection Running)                          │
-│  ├─ Icon: honeypot_active_16.ico                              │
-│  ├─ Color: Green indicator                                     │
-│  ├─ Tooltip: "Cloud Honeypot Client - Protection Active"      │
-│  └─ Meaning: Tunnels active, monitoring in progress           │
-│                                                                 │
-│  🔴 INACTIVE STATE (Protection Stopped)                        │
-│  ├─ Icon: honeypot_inactive_16.ico                            │
-│  ├─ Color: Red indicator                                       │
-│  ├─ Tooltip: "Cloud Honeypot Client - Protection Inactive"    │
-│  └─ Meaning: No active tunnels, standby mode                  │
-│                                                                 │
-│  🎨 FALLBACK GENERATION                                         │
-│  ├─ Method: PIL-based programmatic creation                    │
-│  ├─ Design: Colored circles with cloud symbols                │
-│  └─ Compatibility: Works without icon files present           │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🖱️ CONTEXT MENU STRUCTURE:
-├─ 🏠 "Show Window" (Default Action) → Restore main application window
-├─ ❌ "Exit Application" → Graceful shutdown with cleanup
-├─ ℹ️ Status Display → Current protection and tunnel status
-├─ 🌍 Language Selection → Dynamic language switching
-└─ 📊 Quick Stats → Tunnel count, attack statistics
-
-🔧 WINDOW MANAGEMENT:
-├─ Smart Positioning: Automatic centering on screen
-├─ Focus Management: Proper window focus and activation  
-├─ State Persistence: Remember window position preferences
-├─ Multi-Monitor Support: Handles multiple display configurations
-├─ Taskbar Integration: Proper taskbar icon representation
-└─ Minimize Behavior: Configurable minimize-to-tray vs taskbar
-
-🚀 USAGE PATTERNS:
-# Initialize tray system
-tray_mgr = TrayManager(app_instance, translation_function)
-if tray_mgr.start_tray_system():
-    # Tray system active
-    pass
-
-# Update icon status
-tray_mgr.update_tray_icon()
-
-# Handle window close event
-tray_mgr.on_window_close()
-
-🔄 LIFECYCLE MANAGEMENT:
-┌─────────────────────────────────────────────────────────────────┐
-│                      TRAY LIFECYCLE                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1️⃣ INITIALIZATION                                             │
-│  ├─ Check pystray availability                                 │
-│  ├─ Load icon resources                                        │
-│  ├─ Create tray icon object                                    │
-│  └─ Start background tray thread                               │
-│                                                                 │
-│  2️⃣ OPERATION                                                  │
-│  ├─ Monitor application status changes                         │
-│  ├─ Update icon based on tunnel status                        │
-│  ├─ Handle user interactions (clicks, menu)                   │
-│  └─ Coordinate with main application window                    │
-│                                                                 │
-│  3️⃣ SHUTDOWN                                                   │
-│  ├─ Send final offline heartbeat                              │
-│  ├─ Clean up heartbeat monitoring                             │
-│  ├─ Stop background processes                                 │
-│  ├─ Remove tray icon                                          │
-│  └─ Graceful application termination                          │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-🚨 ERROR HANDLING:
-├─ Tray Unavailable: Graceful fallback to normal window operation
-├─ Icon Loading Failures: Automatic fallback to programmatic icons
-├─ Menu Creation Errors: Simplified menu with core functions only
-├─ Window Management Issues: Log errors, continue tray operation
-├─ Thread Synchronization: Proper thread safety for UI operations
-└─ Resource Cleanup: Ensure proper cleanup on all exit scenarios
-
-🔄 INTEGRATION:
-- Used by: Main application GUI system (client.py)
-- Depends on: client_constants.py, client_utils.py, pystray, PIL
-- Thread model: Background daemon thread for tray operations
-- UI coordination: Thread-safe communication with main UI thread
-
-📈 PERFORMANCE:
-- Tray initialization: <100ms on modern systems
-- Icon update frequency: Event-driven (no polling overhead)  
-- Memory usage: <2MB for tray operations and icon caching
-- CPU impact: Negligible during normal operation
-- Resource cleanup: Automatic on application termination
+Used by: client.py (initialize_tray_manager, update_tray_icon, on_close)
+Depends on: client_constants, client_helpers, pystray, PIL
 """
 
 import os

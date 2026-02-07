@@ -1,10 +1,13 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT v2.9.3 - PERFORMANCE & STABILITY OVERHAUL
+🎯 CLOUD HONEYPOT CLIENT - MODULAR ARCHITECTURE
 =======================================================
 
 📊 VERSION HISTORY:
+├─ v2.9.6 (Feb 2026) - Task XML centralization, config constant extraction, version automation
+├─ v2.9.5 (Feb 2026) - Cross-codebase dead code removal & docstring cleanup (-851 lines)
+├─ v2.9.4 (Feb 2026) - GUI/tray dead code cleanup & simplification (-311 lines)
 ├─ v2.9.3 (Feb 2026) - Performance fixes: ThreadPoolExecutor, shared SSL, session API, GUI safety
 ├─ v2.9.2 (Feb 2026) - Installer overhaul, task name fixes, dead autostart code removal
 ├─ v2.9.1 (Feb 2026) - Dead code cleanup, 661 lines removed

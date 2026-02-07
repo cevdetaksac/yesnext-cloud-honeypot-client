@@ -1,5 +1,5 @@
-﻿; Cloud Honeypot Client Installer Script - v2.9.3
-; Robust process cleanup with verification loops
+﻿; Cloud Honeypot Client Installer Script
+; Version is injected by build.ps1 from client_constants.py
 !include "MUI2.nsh"
 !include "WinVer.nsh"
 !include "LogicLib.nsh"

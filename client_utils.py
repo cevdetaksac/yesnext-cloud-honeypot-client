@@ -925,12 +925,16 @@ class InstallerUpdateManager:
         self.base_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases/latest"
         
     def get_current_version(self) -> str:
-        """Mevcut sürümü al"""
+        """Mevcut sürümü al — constants'dan (config dosyası eski kalabilir)"""
         try:
-            config = load_config()
-            return config.get("application", {}).get("version", "1.0.0")
-        except:
-            return "1.0.0"
+            from client_constants import VERSION
+            return VERSION
+        except ImportError:
+            try:
+                config = load_config()
+                return config.get("application", {}).get("version", "1.0.0")
+            except:
+                return "1.0.0"
     
     def check_for_updates(self) -> Dict[str, Any]:
         """Güncelleme kontrolü yap"""

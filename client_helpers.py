@@ -4,7 +4,7 @@
 Cloud Honeypot Client - Helper Functions
 Yardımcı fonksiyonlar ve genel amaçlı utilities
 
-Version: 2.8.5 (Performance Optimized)
+Version: See client_constants.VERSION
 
 Features:
 - Public IP caching with 5-minute TTL (reduces HTTP calls)
@@ -12,7 +12,7 @@ Features:
 - GUI message utilities
 - Hash and checksum functions
 
-Performance Notes (v2.8.5):
+Performance Notes:
 - get_public_ip() now caches results for 300 seconds
 - Use force_refresh=True to bypass cache when needed
 """

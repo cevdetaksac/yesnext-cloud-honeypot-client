@@ -4,7 +4,7 @@
 Cloud Honeypot Client - Network and Tunneling
 Tunel sunucusu ve network baglanti yonetimi
 
-Version: 2.9.3 (Performance & Stability Overhaul)
+Version: See client_constants.VERSION
 
 Features:
 - Secure tunnel server with TLS (port 8443)
@@ -15,7 +15,7 @@ Features:
 - Shared SSL context (single allocation, reused across connections)
 - Connection semaphore to prevent OOM under attack
 
-Performance Notes (v2.9.3):
+Performance Notes:
 - ThreadPoolExecutor replaces unbounded thread-per-connection (max 200 workers)
 - Shared SSL context eliminates per-connection 2-5KB allocation
 - Connection semaphore prevents resource exhaustion under port scan attacks

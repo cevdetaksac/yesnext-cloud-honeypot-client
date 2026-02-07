@@ -721,7 +721,7 @@ def load_config() -> dict:
     default_config = {
         "application": {
             "name": "Cloud Honeypot Client",
-            "version": "2.2.1",
+            "version": "0.0.0",
             "author": "YesNext Technology"
         },
         "language": {

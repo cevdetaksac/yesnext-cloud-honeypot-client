@@ -4,10 +4,10 @@
 Cloud Honeypot Client - Constants and Configuration
 Tum uygulama sabitlerinin merkezi yonetimi
 
-Version: 2.8.5 (Performance Optimized)
+Version: Defined as VERSION constant below (single source of truth)
 
 Key Intervals (optimized for performance):
-- FILE_HEARTBEAT_INTERVAL: 60s (was 10s in v2.8.4)
+- FILE_HEARTBEAT_INTERVAL: 60s (server heartbeat interval)
 - API_HEARTBEAT_INTERVAL: 60s (server heartbeat)
 - ATTACK_COUNT_REFRESH: 15s (GUI attack counter)
 - DASHBOARD_SYNC_INTERVAL: 45s (dashboard sync)

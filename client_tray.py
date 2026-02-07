@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CLIENT TRAY MODULE - v2.8.5 (Performance Optimized)
-====================================================
+CLIENT TRAY MODULE
+==================
 
 SYSTEM TRAY INTEGRATION & NOTIFICATIONS
 ========================================
+Version: See client_constants.VERSION
 
-Performance Notes (v2.8.5):
+Performance Notes:
 - Added minimized_to_tray flag for state tracking
 - Fixed window auto-show issue when intentionally minimized
 - Proper tray state management across GUI refreshes

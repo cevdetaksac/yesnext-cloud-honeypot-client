@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER MODULE v2.7.5
-=======================================================
+🎯 CLOUD HONEYPOT CLIENT - TASK SCHEDULER MODULE
+==================================================
 
 📋 5-TASK SYSTEM ARCHITECTURE - SEPTEMBER 2025:
 ┌─────────────────────────────────────────────────────────────────┐
@@ -83,12 +83,13 @@
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
-💡 INTEGRATION STATUS: v2.7.5 (September 2025)
+💡 INTEGRATION STATUS:
 - ✅ Full modular integration with client.py
 - ✅ Installer-aware task management lifecycle  
 - ✅ Admin-optional task activation system
 - ✅ Comprehensive 5-task coverage
 - ✅ Production-ready deployment workflow
+- Version: See client_constants.VERSION
 """
 
 import os

@@ -1,4 +1,4 @@
-﻿; Cloud Honeypot Client Installer Script - v2.9.2
+﻿; Cloud Honeypot Client Installer Script - v2.9.3
 ; Robust process cleanup with verification loops
 !include "MUI2.nsh"
 !include "WinVer.nsh"
@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 2
 !define VERSIONMINOR 9
-!define VERSIONBUILD 2
+!define VERSIONBUILD 3
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 

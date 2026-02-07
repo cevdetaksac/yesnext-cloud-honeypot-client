@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CLIENT MONITORING MODULE - v2.8.5 (Performance Optimized)
-==========================================================
+CLIENT MONITORING MODULE
+========================
 
 SYSTEM HEALTH & HEARTBEAT MANAGEMENT
 =====================================
+Version: See client_constants.VERSION
 
-Performance Notes (v2.8.5):
+Performance Notes:
 - FILE_HEARTBEAT_INTERVAL increased to 60s (was 10s)
 - Reduced file I/O by 83%
 - Health checks now at 60s intervals

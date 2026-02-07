@@ -143,333 +143,173 @@ def is_admin():
     except:
         return False
 
-def create_background_task_xml():
-    """Create XML for background task (runs at startup)"""
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>{datetime.now().isoformat()}</Date>
-    <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Background Service</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-      <Delay>PT30S</Delay>
-    </BootTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--mode=daemon --silent</Arguments>
-      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>'''
-    return xml_content
+# ===================== CENTRALIZED TASK XML GENERATOR ===================== #
 
-def create_tray_task_xml():
-    """Create XML for tray task (runs at user logon)"""
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>{datetime.now().isoformat()}</Date>
-    <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Interactive Tray</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <Delay>PT15S</Delay>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <GroupId>Users</GroupId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--mode=tray --silent</Arguments>
-      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>'''
-    return xml_content
+# Task configuration registry — all 6 tasks defined declaratively
+TASK_CONFIGS = {
+    TASK_NAME_BACKGROUND: {
+        "description": "Cloud Honeypot Client - Background Service",
+        "trigger": "<BootTrigger><Enabled>true</Enabled><Delay>PT30S</Delay></BootTrigger>",
+        "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
+        "args": "--mode=daemon --silent",
+        "multi_instance": "IgnoreNew",
+        "hidden": False, "wake": False, "network_required": False,
+        "exec_limit": "PT0S", "priority": 7,
+    },
+    TASK_NAME_TRAY: {
+        "description": "Cloud Honeypot Client - Interactive Tray",
+        "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></LogonTrigger>",
+        "principal": "<GroupId>Users</GroupId><RunLevel>HighestAvailable</RunLevel>",
+        "args": "--mode=tray --silent",
+        "multi_instance": "StopExisting",
+        "hidden": False, "wake": False, "network_required": False,
+        "exec_limit": "PT0S", "priority": 7,
+    },
+    TASK_NAME_WATCHDOG: {
+        "description": "Cloud Honeypot Client - Hourly Watchdog Process Recovery",
+        "trigger": (
+            '<CalendarTrigger><StartBoundary>2025-01-01T00:00:00</StartBoundary>'
+            '<Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>'
+            '<Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
+            '</CalendarTrigger>'
+        ),
+        "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
+        "args": "--mode=watchdog",
+        "multi_instance": "IgnoreNew",
+        "hidden": True, "wake": True, "network_required": False,
+        "exec_limit": "PT10M", "priority": 7,
+    },
+    TASK_NAME_UPDATER: {
+        "description": "Cloud Honeypot Client - Weekly Update Check and Auto-Install",
+        "trigger": (
+            '<CalendarTrigger><StartBoundary>2025-01-01T02:00:00</StartBoundary>'
+            '<Enabled>true</Enabled><ScheduleByWeek><DaysOfWeek><Sunday /></DaysOfWeek>'
+            '<WeeksInterval>1</WeeksInterval></ScheduleByWeek></CalendarTrigger>'
+        ),
+        "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
+        "args": "--mode=updater",
+        "multi_instance": "IgnoreNew",
+        "hidden": True, "wake": True, "network_required": True,
+        "exec_limit": "PT30M", "priority": 7,
+    },
+    TASK_NAME_SILENT_UPDATER: {
+        "description": "Cloud Honeypot Client - Silent Update Check and Auto-Install (Every 2 hours)",
+        "trigger": (
+            '<TimeTrigger><Repetition><Interval>PT2H</Interval>'
+            '<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
+            '<StartBoundary>2025-01-01T01:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>'
+        ),
+        "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
+        "args": "--silent-update-check",
+        "multi_instance": "IgnoreNew",
+        "hidden": True, "wake": False, "network_required": True,
+        "exec_limit": "PT45M", "priority": 6,
+        "idle_settings": "<Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout>",
+    },
+    TASK_NAME_MEMORY_RESTART: {
+        "description": "Cloud Honeypot Client - Memory Restart (Every 8 hours for memory cleanup)",
+        "trigger": (
+            '<TimeTrigger><Repetition><Interval>PT8H</Interval>'
+            '<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
+            '<StartBoundary>2025-01-01T08:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>'
+        ),
+        "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
+        "command": "powershell",  # override: runs PowerShell script instead of CLIENT_EXE
+        "multi_instance": "IgnoreNew",
+        "hidden": False, "wake": False, "network_required": False,
+        "exec_limit": "PT30M", "priority": 7,
+        "extra_settings": (
+            "<DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>"
+            "<UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>"
+        ),
+    },
+}
 
-def create_watchdog_task_xml():
-    """Create XML for watchdog task (runs hourly to check and restart services)"""
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>{datetime.now().isoformat()}</Date>
-    <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Hourly Watchdog Process Recovery</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>2025-01-01T00:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-      <ScheduleByDay>
-        <DaysInterval>1</DaysInterval>
-      </ScheduleByDay>
-      <Repetition>
-        <Interval>PT15M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>true</WakeToRun>
-    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--mode=watchdog</Arguments>
-      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>'''
-    return xml_content
-
-def create_updater_task_xml():
-    """Create XML for updater task (runs weekly to check for updates)"""
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>{datetime.now().isoformat()}</Date>
-    <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Weekly Update Check and Auto-Install</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>2025-01-01T02:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-      <ScheduleByWeek>
-        <DaysOfWeek>
-          <Sunday />
-        </DaysOfWeek>
-        <WeeksInterval>1</WeeksInterval>
-      </ScheduleByWeek>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>true</WakeToRun>
-    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--mode=updater</Arguments>
-      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>'''
-    return xml_content
-
-def create_silent_updater_task_xml():
-    """Create XML for silent updater task (runs every 2 hours for silent updates)"""
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>{datetime.now().isoformat()}</Date>
-    <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Silent Update Check and Auto-Install (Every 2 hours)</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <TimeTrigger>
-      <Repetition>
-        <Interval>PT2H</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-      <StartBoundary>2025-01-01T01:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-    </TimeTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <Duration>PT10M</Duration>
-      <WaitTimeout>PT1H</WaitTimeout>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT45M</ExecutionTimeLimit>
-    <Priority>6</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{CLIENT_EXE}"</Command>
-      <Arguments>--silent-update-check</Arguments>
-      <WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>'''
-    return xml_content
-
-def create_memory_restart_task_xml():
-    """Create XML for memory restart task (runs every 8 hours)"""
+def _build_memory_restart_action() -> str:
+    """Build <Actions> block for memory restart task (PowerShell script)"""
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_restart.ps1")
-    
-    xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
+    return (
+        f'<Actions Context="Author"><Exec>'
+        f'<Command>PowerShell.exe</Command>'
+        f'<Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;{script_path}&quot;</Arguments>'
+        f'<WorkingDirectory>{os.path.dirname(script_path)}</WorkingDirectory>'
+        f'</Exec></Actions>'
+    )
+
+def _build_task_xml(cfg: dict) -> str:
+    """Generate schtasks-compatible XML from a task config dict."""
+    # Idle settings
+    idle_extra = cfg.get("idle_settings", "")
+    idle_block = (
+        f"<IdleSettings>{idle_extra}"
+        "<StopOnIdleEnd>false</StopOnIdleEnd>"
+        "<RestartOnIdle>false</RestartOnIdle>"
+        "</IdleSettings>"
+    )
+
+    # Extra settings (e.g. UseUnifiedSchedulingEngine)
+    extra = cfg.get("extra_settings", "")
+
+    # Action block
+    if cfg.get("command") == "powershell":
+        actions = _build_memory_restart_action()
+    else:
+        actions = (
+            f'<Actions Context="Author"><Exec>'
+            f'<Command>"{CLIENT_EXE}"</Command>'
+            f'<Arguments>{cfg["args"]}</Arguments>'
+            f'<WorkingDirectory>{os.path.dirname(CLIENT_EXE)}</WorkingDirectory>'
+            f'</Exec></Actions>'
+        )
+
+    return f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Date>{datetime.now().isoformat()}</Date>
     <Author>Cloud Honeypot Client</Author>
-    <Description>Cloud Honeypot Client - Memory Restart (Every 8 hours for memory cleanup)</Description>
+    <Description>{cfg["description"]}</Description>
   </RegistrationInfo>
   <Triggers>
-    <TimeTrigger>
-      <Repetition>
-        <Interval>PT8H</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-      <StartBoundary>2025-01-01T08:00:00</StartBoundary>
-      <Enabled>true</Enabled>
-    </TimeTrigger>
+    {cfg["trigger"]}
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
+      {cfg["principal"]}
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>{cfg["multi_instance"]}</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
+    <RunOnlyIfNetworkAvailable>{"true" if cfg["network_required"] else "false"}</RunOnlyIfNetworkAvailable>
+    {idle_block}
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <Hidden>{"true" if cfg["hidden"] else "false"}</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
-    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    {extra}
+    <WakeToRun>{"true" if cfg["wake"] else "false"}</WakeToRun>
+    <ExecutionTimeLimit>{cfg["exec_limit"]}</ExecutionTimeLimit>
+    <Priority>{cfg["priority"]}</Priority>
   </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>PowerShell.exe</Command>
-      <Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -File "{script_path}"</Arguments>
-      <WorkingDirectory>{os.path.dirname(script_path)}</WorkingDirectory>
-    </Exec>
-  </Actions>
+  {actions}
 </Task>'''
-    
-    return xml_content
+
+def create_task_xml(task_name: str) -> str:
+    """Create XML for any registered task by name."""
+    if task_name not in TASK_CONFIGS:
+        raise ValueError(f"Unknown task: {task_name}")
+    return _build_task_xml(TASK_CONFIGS[task_name])
+
+# Backward-compatible wrappers (one-liner delegates)
+def create_background_task_xml():     return create_task_xml(TASK_NAME_BACKGROUND)
+def create_tray_task_xml():           return create_task_xml(TASK_NAME_TRAY)
+def create_watchdog_task_xml():       return create_task_xml(TASK_NAME_WATCHDOG)
+def create_updater_task_xml():        return create_task_xml(TASK_NAME_UPDATER)
+def create_silent_updater_task_xml(): return create_task_xml(TASK_NAME_SILENT_UPDATER)
+def create_memory_restart_task_xml(): return create_task_xml(TASK_NAME_MEMORY_RESTART)
 
 def install_task(task_name: str, xml_content: str) -> bool:
     """Install a scheduled task using schtasks command"""
@@ -575,38 +415,13 @@ def install_all_tasks(include_silent_updater: bool = False) -> bool:
     """Install all Task Scheduler tasks - used by installer and updates"""
     try:
         print("Installing Task Scheduler tasks...")
-        
         success = True
-        
-        # Install Background Task
-        xml_content = create_background_task_xml()
-        success &= install_task(TASK_NAME_BACKGROUND, xml_content)
-        
-        # Install Tray Task
-        xml_content = create_tray_task_xml()
-        success &= install_task(TASK_NAME_TRAY, xml_content)
-        
-        # Install Watchdog Task
-        xml_content = create_watchdog_task_xml()
-        success &= install_task(TASK_NAME_WATCHDOG, xml_content)
-        
-        # Install Weekly Updater Task
-        xml_content = create_updater_task_xml()
-        success &= install_task(TASK_NAME_UPDATER, xml_content)
-        
-        # Install Silent Updater Task (every 2 hours) if requested
-        if include_silent_updater:
-            xml_content = create_silent_updater_task_xml()
-            success &= install_task(TASK_NAME_SILENT_UPDATER, xml_content)
-            print(f"[INFO] Silent updater task {'installed' if success else 'failed'}")
-        
-        # Install Memory Restart Task (every 8 hours)
-        xml_content = create_memory_restart_task_xml()
-        success &= install_task(TASK_NAME_MEMORY_RESTART, xml_content)
-        print(f"[INFO] Memory restart task {'installed' if success else 'failed'}")
-        
+        for name in TASK_CONFIGS:
+            if name == TASK_NAME_SILENT_UPDATER and not include_silent_updater:
+                continue
+            xml = create_task_xml(name)
+            success &= install_task(name, xml)
         return success
-        
     except Exception as e:
         print(f"[X] install_all_tasks error: {e}")
         return False
@@ -646,19 +461,7 @@ def main():
     print("Setting up scheduled tasks for Cloud Honeypot Client...")
     print(f"Client executable: {CLIENT_EXE}")
     
-    success = True
-    
-    # Install background task
-    background_xml = create_background_task_xml()
-    success &= install_task(TASK_NAME_BACKGROUND, background_xml)
-    
-    # Install tray task
-    tray_xml = create_tray_task_xml()
-    success &= install_task(TASK_NAME_TRAY, tray_xml)
-    
-    # Install watchdog task
-    watchdog_xml = create_watchdog_task_xml()
-    success &= install_task(TASK_NAME_WATCHDOG, watchdog_xml)
+    success = install_all_tasks(include_silent_updater=True)
     
     if success:
         print("\n[OK] All tasks installed successfully")

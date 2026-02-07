@@ -666,89 +666,90 @@ def get_config_file_path() -> str:
 
 CONFIG_FILE = get_config_file_path()
 
+# Default application configuration — single source of truth
+DEFAULT_CONFIG: dict = {
+    "application": {
+        "name": "Cloud Honeypot Client",
+        "version": "0.0.0",
+        "author": "YesNext Technology"
+    },
+    "language": {
+        "selected": "tr",
+        "selected_by_user": False,
+        "available_languages": ["tr", "en"],
+        "default": "tr"
+    },
+    "ui": {
+        "window_width": 900,
+        "window_height": 700,
+        "theme": "dark",
+        "show_loading_screen": True,
+        "loading_timeout": 30
+    },
+    "admin": {
+        "require_admin_privileges": True,
+        "auto_restart_as_admin": False,
+        "show_admin_dialog": True
+    },
+    "logging": {
+        "level": "INFO",
+        "max_file_size_mb": 10,
+        "backup_count": 5,
+        "debug_mode": False
+    },
+    "api": {
+        "base_url": "https://honeypot.yesnext.com.tr/api",
+        "timeout": 30,
+        "retry_count": 3
+    },
+    "honeypot": {
+        "server_ip": "194.5.236.181",
+        "tunnel_port": 4443,
+        "connect_timeout": 8,
+        "receive_buffer_size": 65536,
+        "server_name": None
+    },
+    "tunnels": {
+        "auto_start": False,
+        "rdp_port": 53389,
+        "default_ports": [
+            {"local": 3389, "remote": 53389, "service": "RDP", "enabled": True},
+            {"local": 1433, "remote": 0, "service": "MSSQL", "enabled": False},
+            {"local": 3306, "remote": 0, "service": "MySQL", "enabled": False},
+            {"local": 21, "remote": 0, "service": "FTP", "enabled": False},
+            {"local": 22, "remote": 2222, "service": "SSH", "enabled": False}
+        ]
+    },
+    "updates": {
+        "auto_check": True,
+        "check_interval_hours": 24,
+        "show_notifications": True
+    },
+    "advanced": {
+        "startup_delay": 0,
+        "minimize_to_tray": True,
+        "auto_start_with_windows": False,
+        "single_instance": True
+    }
+}
+
 def load_config() -> dict:
     """Load application configuration - single file system"""
-    default_config = {
-        "application": {
-            "name": "Cloud Honeypot Client",
-            "version": "0.0.0",
-            "author": "YesNext Technology"
-        },
-        "language": {
-            "selected": "tr",
-            "selected_by_user": False,
-            "available_languages": ["tr", "en"],
-            "default": "tr"
-        },
-        "ui": {
-            "window_width": 900,
-            "window_height": 700,
-            "theme": "dark",
-            "show_loading_screen": True,
-            "loading_timeout": 30
-        },
-        "admin": {
-            "require_admin_privileges": True,
-            "auto_restart_as_admin": False,
-            "show_admin_dialog": True
-        },
-        "logging": {
-            "level": "INFO",
-            "max_file_size_mb": 10,
-            "backup_count": 5,
-            "debug_mode": False
-        },
-        "api": {
-            "base_url": "https://honeypot.yesnext.com.tr/api",
-            "timeout": 30,
-            "retry_count": 3
-        },
-        "honeypot": {
-            "server_ip": "194.5.236.181",
-            "tunnel_port": 4443,
-            "connect_timeout": 8,
-            "receive_buffer_size": 65536,
-            "server_name": None
-        },
-        "tunnels": {
-            "auto_start": False,
-            "rdp_port": 53389,
-            "default_ports": [
-                {"local": 3389, "remote": 53389, "service": "RDP", "enabled": True},
-                {"local": 1433, "remote": 0, "service": "MSSQL", "enabled": False},
-                {"local": 3306, "remote": 0, "service": "MySQL", "enabled": False},
-                {"local": 21, "remote": 0, "service": "FTP", "enabled": False},
-                {"local": 22, "remote": 2222, "service": "SSH", "enabled": False}
-            ]
-        },
-        "updates": {
-            "auto_check": True,
-            "check_interval_hours": 24,
-            "show_notifications": True
-        },
-        "advanced": {
-            "startup_delay": 0,
-            "minimize_to_tray": True,
-            "auto_start_with_windows": False,
-            "single_instance": True
-        }
-    }
-    
     try:
         # Single config file system - no AppData
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
                 # Merge with defaults to ensure all keys exist
-                return merge_configs(default_config, config)
+                return merge_configs(DEFAULT_CONFIG, config)
         else:
             # Create default config file if not exists
-            save_config(default_config)
-            return default_config
+            save_config(DEFAULT_CONFIG)
+            return DEFAULT_CONFIG.copy()
             
     except Exception as e:
         print(f"[CONFIG] Error loading config: {e}")
-        return default_config
+        return DEFAULT_CONFIG.copy()
 
 def save_config(config: dict) -> bool:
     """Save application configuration to single config file"""

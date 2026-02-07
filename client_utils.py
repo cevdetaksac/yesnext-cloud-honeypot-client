@@ -6,17 +6,13 @@ Yardımcı fonksiyonlar ve araçlar modülü
 import os
 import sys
 import json
-import logging
 import hashlib
-import base64
-import uuid
 import socket
 import time
 import struct
 import ctypes
 import ctypes.wintypes as wintypes
 import subprocess
-from datetime import datetime
 from typing import Dict, Any, Optional
 
 def get_resource_path(relative_path: str) -> str:
@@ -37,296 +33,6 @@ def get_resource_path(relative_path: str) -> str:
             return fallback_path
     
     return full_path
-
-class ConfigManager:
-    """Konfigürasyon yönetimi sınıfı"""
-    
-    def __init__(self, config_file: str = "config.json", log_func=None):
-        self.config_file = config_file
-        self.log = log_func if log_func else print
-        self.config_data = {}
-        self.load_config()
-    
-    def load_config(self) -> bool:
-        """Konfigürasyonu yükle"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    self.config_data = json.load(f)
-                self.log(f"[CONFIG] Konfigürasyon yüklendi: {self.config_file}")
-                return True
-            else:
-                self.log(f"[CONFIG] Konfigürasyon dosyası bulunamadı: {self.config_file}")
-                self.config_data = self.get_default_config()
-                return self.save_config()
-        except Exception as e:
-            self.log(f"[CONFIG] Konfigürasyon yükleme hatası: {e}")
-            self.config_data = self.get_default_config()
-            return False
-    
-    def save_config(self) -> bool:
-        """Konfigürasyonu kaydet"""
-        try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.config_data, f, indent=2, ensure_ascii=False)
-            self.log(f"[CONFIG] Konfigürasyon kaydedildi: {self.config_file}")
-            return True
-        except Exception as e:
-            self.log(f"[CONFIG] Konfigürasyon kaydetme hatası: {e}")
-            return False
-    
-    def get_default_config(self) -> Dict[str, Any]:
-        """Varsayılan konfigürasyonu al"""
-        return {
-            "version": "1.0.0",
-            "language": "tr",
-            "theme": "dark",
-            "api_base_url": "https://honeypot.yesnext.com.tr",
-            "log_level": "INFO",
-            "auto_start": False,
-            "rdp_protection": False,
-            "tunnel_ports": [],
-            "first_run": True,
-            "token": "",
-            "pc_name": "",
-            "dashboard_url": "",
-            "window_geometry": "800x600+100+100",
-            "minimized_start": False,
-            "update_check": True,
-            "firewall_rules": [],
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-    
-    def get(self, key: str, default=None) -> Any:
-        """Konfigürasyon değeri al"""
-        return self.config_data.get(key, default)
-    
-    def set(self, key: str, value: Any) -> None:
-        """Konfigürasyon değeri ayarla"""
-        self.config_data[key] = value
-        self.config_data["updated_at"] = datetime.now().isoformat()
-    
-    def update(self, data: Dict[str, Any]) -> None:
-        """Birden çok değeri güncelle"""
-        self.config_data.update(data)
-        self.config_data["updated_at"] = datetime.now().isoformat()
-
-class LanguageManager:
-    """Dil yönetimi sınıfı"""
-    
-    def __init__(self, lang_file: str = "client_lang.json", log_func=None):
-        self.lang_file = lang_file
-        self.log = log_func if log_func else print
-        self.languages = {}
-        self.current_language = "tr"
-        self.load_languages()
-    
-    def load_languages(self) -> bool:
-        """Dil dosyasını yükle"""
-        try:
-            if os.path.exists(self.lang_file):
-                with open(self.lang_file, 'r', encoding='utf-8') as f:
-                    self.languages = json.load(f)
-                self.log(f"[LANG] Dil dosyası yüklendi: {self.lang_file}")
-                return True
-            else:
-                self.log(f"[LANG] Dil dosyası bulunamadı: {self.lang_file}")
-                self.languages = self.get_minimal_languages()
-                return False
-        except Exception as e:
-            self.log(f"[LANG] Dil yükleme hatası: {e}")
-            self.languages = self.get_minimal_languages()
-            return False
-    
-    def get_minimal_languages(self) -> Dict[str, Dict[str, str]]:
-        """Minimal dil verisi"""
-        return {
-            "tr": {
-                "error": "Hata",
-                "warning": "Uyarı", 
-                "info": "Bilgi",
-                "loading_title": "Yükleniyor...",
-                "admin_required_title": "Yönetici Yetkileri Gerekli"
-            },
-            "en": {
-                "error": "Error",
-                "warning": "Warning",
-                "info": "Info", 
-                "loading_title": "Loading...",
-                "admin_required_title": "Administrator Privileges Required"
-            }
-        }
-    
-    def set_language(self, lang_code: str) -> bool:
-        """Dili ayarla"""
-        if lang_code in self.languages:
-            self.current_language = lang_code
-            self.log(f"[LANG] Dil ayarlandı: {lang_code}")
-            return True
-        else:
-            self.log(f"[LANG] Desteklenmeyen dil: {lang_code}")
-            return False
-    
-    def get_text(self, key: str, default: str = None) -> str:
-        """Dil metnini al"""
-        try:
-            if self.current_language in self.languages:
-                return self.languages[self.current_language].get(key, default or key)
-            return default or key
-        except Exception:
-            return default or key
-    
-    def get_all_texts(self) -> Dict[str, str]:
-        """Mevcut dilin tüm metinlerini al"""
-        return self.languages.get(self.current_language, {})
-
-class LoggerManager:
-    """Log yönetimi sınıfı"""
-    
-    def __init__(self, log_file: str = "logs/client.log", log_level: str = "INFO"):
-        self.log_file = log_file
-        self.log_level = log_level
-        self.logger = None
-        self.setup_logger()
-    
-    def setup_logger(self) -> None:
-        """Logger'ı kur"""
-        try:
-            # Log dizinini oluştur
-            log_dir = os.path.dirname(self.log_file)
-            if log_dir and not os.path.exists(log_dir):
-                os.makedirs(log_dir)
-            
-            # Logger oluştur
-            self.logger = logging.getLogger('HoneypotClient')
-            self.logger.setLevel(getattr(logging, self.log_level.upper(), logging.INFO))
-            
-            # Formatı ayarla
-            formatter = logging.Formatter(
-                '%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
-            
-            # File handler
-            file_handler = logging.FileHandler(self.log_file, encoding='utf-8')
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-            
-            # Console handler (sadece ERROR ve yukarısı)
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.ERROR)
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-            
-            self.logger.info("Logging sistemi başlatıldı")
-            
-        except Exception as e:
-            print(f"Logger kurulum hatası: {e}")
-            # Fallback - basic logging
-            logging.basicConfig(
-                level=getattr(logging, self.log_level.upper(), logging.INFO),
-                format='%(asctime)s [%(levelname)s] %(message)s'
-            )
-            self.logger = logging.getLogger('HoneypotClient')
-    
-    def get_logger(self) -> logging.Logger:
-        """Logger'ı al"""
-        return self.logger
-    
-    def log(self, message: str, level: str = "INFO") -> None:
-        """Log mesajı yaz"""
-        if self.logger:
-            log_func = getattr(self.logger, level.lower(), self.logger.info)
-            log_func(message)
-
-class SecurityUtils:
-    """Güvenlik yardımcıları"""
-    
-    @staticmethod
-    def generate_token() -> str:
-        """Random token oluştur"""
-        return str(uuid.uuid4())
-    
-    @staticmethod
-    def hash_string(text: str, algorithm: str = "sha256") -> str:
-        """String'i hash'le"""
-        hash_obj = hashlib.new(algorithm)
-        hash_obj.update(text.encode('utf-8'))
-        return hash_obj.hexdigest()
-    
-    @staticmethod
-    def encode_base64(text: str) -> str:
-        """Base64 encode"""
-        return base64.b64encode(text.encode('utf-8')).decode('utf-8')
-    
-    @staticmethod
-    def decode_base64(encoded_text: str) -> str:
-        """Base64 decode"""
-        try:
-            return base64.b64decode(encoded_text).decode('utf-8')
-        except Exception:
-            return ""
-    
-    @staticmethod
-    def validate_token_format(token: str) -> bool:
-        """Token formatını doğrula (UUID4)"""
-        try:
-            uuid.UUID(token, version=4)
-            return True
-        except ValueError:
-            return False
-
-class FileUtils:
-    """Dosya yardımcıları"""
-    
-    @staticmethod
-    def ensure_directory(path: str) -> bool:
-        """Dizin var olduğundan emin ol"""
-        try:
-            os.makedirs(path, exist_ok=True)
-            return True
-        except Exception:
-            return False
-    
-    @staticmethod
-    def read_json_file(file_path: str) -> Optional[Dict]:
-        """JSON dosyası oku"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return None
-    
-    @staticmethod
-    def write_json_file(file_path: str, data: Dict) -> bool:
-        """JSON dosyası yaz"""
-        try:
-            # Dizin oluştur
-            FileUtils.ensure_directory(os.path.dirname(file_path))
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception:
-            return False
-    
-    @staticmethod
-    def get_file_size(file_path: str) -> int:
-        """Dosya boyutunu al"""
-        try:
-            return os.path.getsize(file_path)
-        except Exception:
-            return 0
-    
-    @staticmethod
-    def get_file_modified_time(file_path: str) -> Optional[datetime]:
-        """Dosya değiştirme zamanını al"""
-        try:
-            timestamp = os.path.getmtime(file_path)
-            return datetime.fromtimestamp(timestamp)
-        except Exception:
-            return None
 
 class SystemUtils:
     """Sistem yardımcıları"""
@@ -423,51 +129,6 @@ class SystemUtils:
             # Script olarak çalışıyor
             return os.path.dirname(os.path.abspath(__file__))
 
-class NetworkUtils:
-    """Ağ yardımcıları"""
-    
-    @staticmethod
-    def get_local_ip() -> str:
-        """Local IP adresini al"""
-        try:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
-    
-    @staticmethod
-    def is_port_open(host: str, port: int, timeout: int = 3) -> bool:
-        """Port açık mı kontrol et"""
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            return result == 0
-        except Exception:
-            return False
-    
-    @staticmethod
-    def ping_host(host: str, timeout: int = 3) -> bool:
-        """Host'u ping'le"""
-        try:
-            import subprocess
-            result = subprocess.run(
-                f"ping -n 1 -w {timeout * 1000} {host}",
-                shell=True,
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
 def load_i18n(lang_file: str = "client_lang.json", language: str = "tr") -> dict:
     """Load all language data from JSON file"""
     try:
@@ -483,34 +144,6 @@ def load_i18n(lang_file: str = "client_lang.json", language: str = "tr") -> dict
     except Exception as e:
         print(f"[LANG] Error loading language file: {e}")
         return {"tr": {}, "en": {}}
-
-if __name__ == "__main__":
-    # Test
-    print("Testing utility modules...")
-    
-    # Test config manager
-    config = ConfigManager("test_config.json")
-    print(f"Config loaded: {bool(config.config_data)} ✅")
-    
-    # Test language manager
-    lang = LanguageManager()
-    print(f"Language manager: {lang.current_language} ✅")
-    
-    # Test logger
-    logger_mgr = LoggerManager("test.log")
-    logger_mgr.log("Test mesajı")
-    print("Logger tested ✅")
-    
-    # Test security utils
-    token = SecurityUtils.generate_token()
-    is_valid = SecurityUtils.validate_token_format(token)
-    print(f"Security utils: {is_valid} ✅")
-    
-    # Test system utils
-    pc_name = SystemUtils.get_computer_name()
-    print(f"System utils: {pc_name} ✅")
-    
-    print("All utility modules tested successfully ✅")
 
 # ===================== TOKEN STORE ===================== #
 class TokenStore:
@@ -710,11 +343,10 @@ class ServiceController:
     def _check_port_in_use(port: int) -> bool:
         """Belirtilen portun kullanımda olup olmadığını kontrol eder"""
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(('127.0.0.1', port))
-            sock.close()
-            return result == 0
-        except:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                return s.connect_ex(('127.0.0.1', int(port))) == 0
+        except Exception:
             return False
 
     @staticmethod
@@ -982,42 +614,6 @@ def is_admin() -> bool:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except:
         return False
-
-def set_autostart(enable: bool = True, log_func=None):
-    """Windows autostart registry ayarı"""
-    if log_func is None:
-        log_func = print
-        
-    if os.name != 'nt':
-        return
-        
-    import winreg
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    value_name = "HoneypotClient"
-    
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-        
-        if enable:
-            exe_path = sys.executable
-            if exe_path.endswith('python.exe'):
-                script_path = os.path.abspath(__file__).replace('client_utils.py', 'client.py')
-                value = f'"{exe_path}" "{script_path}"'
-            else:
-                value = f'"{exe_path}"'
-            
-            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, value)
-            log_func("Autostart enabled")
-        else:
-            try:
-                winreg.DeleteValue(key, value_name)
-                log_func("Autostart disabled")
-            except FileNotFoundError:
-                pass
-                
-        winreg.CloseKey(key)
-    except Exception as e:
-        log_func(f"Autostart setting error: {e}")
 
 def watchdog_main(parent_pid: int, log_func=None):
     """Watchdog ana fonksiyonu - process izleme ve yeniden başlatma"""
@@ -1853,10 +1449,3 @@ def create_update_manager(github_owner: str = "cevdetaksac",
                          log_func=None) -> InstallerUpdateManager:
     """Update manager factory fonksiyonu"""
     return InstallerUpdateManager(github_owner, github_repo, log_func)
-
-
-
-# Module test
-if __name__ == "__main__":
-    print("Cloud Honeypot Client - Utils Module v2.7.5")
-    print("All utility classes and functions loaded successfully ✅")

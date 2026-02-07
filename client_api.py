@@ -22,7 +22,6 @@ except ImportError:
 
 import json
 import requests
-import threading
 import time
 from typing import Dict, Optional, Any, Union
 import urllib3
@@ -276,96 +275,6 @@ class HoneypotAPIClient:
         except Exception as e:
             self.log(f"[API] Saldırı sayısı alma hatası: {e}")
             return None
-    
-    def notify_rdp_status(self, token: str, is_active: bool) -> bool:
-        """RDP durumunu bildir"""
-        try:
-            data = {
-                'token': token,
-                'rdp_active': is_active
-            }
-            result = self.api_request('POST', 'agent/rdp-status', data=data)
-            return result is not None
-        except Exception as e:
-            self.log(f"[API] RDP durumu bildirme hatası: {e}")
-            return False
-
-class AsyncAttackCounter:
-    """Asenkron saldırı sayacı"""
-    
-    def __init__(self, api_client: HoneypotAPIClient, token: str, 
-                 update_callback=None, log_func=None):
-        self.api_client = api_client
-        self.token = token
-        self.update_callback = update_callback
-        self.log = log_func if log_func else print
-        self.running = False
-        self.thread = None
-        self.last_count = 0
-    
-    def start(self, interval: int = 10):
-        """Sayaç başlat"""
-        if self.running:
-            return
-            
-        self.running = True
-        self.thread = threading.Thread(target=self._counter_loop, args=(interval,))
-        self.thread.daemon = True
-        self.thread.start()
-        self.log("[GUI] Asenkron saldırı sayacı başlatıldı")
-    
-    def stop(self):
-        """Sayaç durdur"""
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=1)
-        self.log("[GUI] Asenkron saldırı sayacı durduruldu")
-    
-    def _counter_loop(self, interval: int):
-        """Sayaç döngüsü"""
-        while self.running:
-            try:
-                self.log("[API] Saldırı sayısı sorgulanıyor...")
-                self.log("[GUI] Asenkron saldırı sayacı güncelleme başlatıldı")
-                
-                count = self.api_client.get_attack_count(self.token)
-                
-                if count is not None and count != self.last_count:
-                    self.last_count = count
-                    if self.update_callback:
-                        self.update_callback(count)
-                    self.log(f"[GUI] Saldırı sayacı güncellendi: {count}")
-                
-            except Exception as e:
-                self.log(f"[API] Saldırı sayacı hatası: {e}")
-            
-            # Interval kadar bekle veya durdurulana kadar
-            for _ in range(interval * 10):  # 0.1 saniye aralıklarla
-                if not self.running:
-                    break
-                time.sleep(0.1)
-
-def test_api_connection(base_url: str, log_func=None) -> bool:
-    """API bağlantısını test et"""
-    client = HoneypotAPIClient(base_url, log_func)
-    return client.check_connection()
-
-if __name__ == "__main__":
-    # Test
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    
-    def test_log(msg):
-        print(f"[TEST] {msg}")
-    
-    # Test API client
-    client = HoneypotAPIClient("https://honeypot.yesnext.com.tr", test_log)
-    
-    # Test connection
-    if client.check_connection():
-        print("✅ API bağlantısı başarılı")
-    else:
-        print("❌ API bağlantısı başarısız")
 
 # ===================== API WRAPPER FUNCTIONS ===================== #
 # Purpose: High-level API request functions for client integration

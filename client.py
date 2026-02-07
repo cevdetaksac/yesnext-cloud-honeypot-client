@@ -2025,11 +2025,6 @@ class CloudHoneypotClient:
         from client_networking import TunnelManager
         return TunnelManager.is_service_running_by_port(self, listen_port, service_name)
 
-    def reconcile_remote_tunnels_loop(self):
-        """Remote tunnel reconciliation - delegates to TunnelManager"""
-        from client_networking import TunnelManager
-        TunnelManager.reconcile_remote_tunnels_loop(self)
-
     # ---------- Tray Management (Modularized) ---------- #
     def initialize_tray_manager(self):
         """Initialize tray management system"""

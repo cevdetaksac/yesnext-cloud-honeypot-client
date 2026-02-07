@@ -20,7 +20,6 @@ Performance Notes (v2.8.5):
 import os
 import sys
 import time
-import hashlib
 import requests
 import tkinter as tk
 from typing import Dict, Optional
@@ -72,31 +71,6 @@ class ClientHelpers:
     def current_executable() -> str:
         """Get current executable path"""
         return sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
-
-    @staticmethod
-    def http_get_json(url: str, timeout: int = 8) -> Dict:
-        """HTTP GET request that returns JSON"""
-        r = requests.get(url, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-
-    @staticmethod
-    def http_download(url: str, dest_path: str, timeout: int = 30):
-        """Download file from URL to destination path"""
-        with requests.get(url, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            with open(dest_path, 'wb') as f:
-                for chunk in iter(lambda: r.read(65536), b''):
-                    f.write(chunk)
-
-    @staticmethod
-    def sha256_file(path: str) -> str:
-        """Calculate SHA256 hash of file"""
-        h = hashlib.sha256()
-        with open(path, 'rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''):
-                h.update(chunk)
-        return h.hexdigest()
 
     @staticmethod
     def get_public_ip(force_refresh: bool = False) -> str:

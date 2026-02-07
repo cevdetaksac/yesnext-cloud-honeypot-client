@@ -775,13 +775,8 @@ class CloudHoneypotClient:
             
             # Windows Server optimizasyonları - PERFORMANCE: Removed gc.collect() and update()
             # These were causing GUI freezes of 50-200ms
-            from client_utils import get_from_config
-            if get_from_config("advanced.windows_server_mode", False):
-                # Window state validation - BUT RESPECT TRAY MODE!
-                # Only restore window if NOT intentionally minimized to tray
-                if self.root.state() == 'withdrawn' and not self._tray_mode.is_set():
-                    log("[GUI_HEALTH] Pencere gizli durumda (tray mode değil), görünür hale getiriliyor")
-                    self.root.deiconify()
+            # NOTE: Auto-deiconify REMOVED (v2.9.4) — was causing tray-mode window to pop up
+            # The window should ONLY be shown by explicit user action (tray click, show_window)
             
             # Tray ikonunu güncelle - only if state changed
             if hasattr(self, 'tray_manager') and hasattr(self, '_last_tray_state'):
@@ -2240,7 +2235,7 @@ class CloudHoneypotClient:
             self.first_run_notice()
             
             # Continue building actual UI below (root will be reconfigured)
-            if not minimized:
+            if not minimized and not self._tray_mode.is_set():
                 try:
                     self.root.deiconify()  # Pencereyi göster
                     self.root.lift()  # Öne getir
@@ -2282,10 +2277,12 @@ class CloudHoneypotClient:
         if not self.root:
             self.root = tk.Tk()
         else:
-            try:
-                self.root.deiconify()
-            except Exception:
-                pass
+            # Only show window if NOT in minimized/tray startup mode
+            if startup_mode != "minimized" and not self._tray_mode.is_set():
+                try:
+                    self.root.deiconify()
+                except Exception:
+                    pass
         self.root.title(f"{self.t('app_title')} v{__version__}")
         
         # Window icon ayarla
@@ -2581,10 +2578,12 @@ class CloudHoneypotClient:
         # ===== BASIT STARTUP MODE ===== #
         # Basit startup mode uygulama
         if startup_mode == "minimized":
-            self.root.iconify()
+            self._tray_mode.set()  # Mark as intentionally in tray
+            self.root.withdraw()   # Fully hide (not just iconify)
         else:
-            # Normal GUI mode
-            self.root.deiconify()
+            # Normal GUI mode - only show if not already in tray
+            if not self._tray_mode.is_set():
+                self.root.deiconify()
 
         def _show_window():
             try:

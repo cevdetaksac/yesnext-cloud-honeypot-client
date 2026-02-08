@@ -36,10 +36,10 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page - "Run after install" checkbox (checked by default)
-!define MUI_FINISHPAGE_TITLE "Kurulum Tamamlandı / Installation Complete"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} başarıyla kuruldu.$\r$\n$\r$\nMasaüstü kısayolu oluşturuldu.$\r$\nSistem güvenlik izlemesi için hazır.$\r$\n$\r$\nUygulamayı hemen başlatmak için aşağıdaki kutuyu işaretli bırakın."
+!define MUI_FINISHPAGE_TITLE "Setup Complete"
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} has been installed successfully.$\r$\n$\r$\nDesktop shortcut has been created.$\r$\nSystem is ready for security monitoring.$\r$\n$\r$\nCheck the box below to launch the application now."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Cloud Honeypot Client'ı şimdi başlat / Launch now"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Cloud Honeypot Client now"
 !define MUI_FINISHPAGE_RUN_CHECKED
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 !insertmacro MUI_PAGE_FINISH

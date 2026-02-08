@@ -13,7 +13,7 @@ import threading
 import webbrowser
 import subprocess
 from tkinter import messagebox
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 import customtkinter as ctk
 
@@ -69,7 +69,6 @@ class ModernGUI:
         """
         self.app = app
         self.row_controls: Dict[str, dict] = {}
-        self._ip_entry: Optional[ctk.CTkEntry] = None
 
     # ─── Yardımcılar ─── #
     def t(self, key: str) -> str:
@@ -103,8 +102,8 @@ class ModernGUI:
         # ── İkon ── #
         self._set_window_icon(root)
 
-        # ── Custom Menü Barı (dark mode uyumlu) ── #
-        self._build_menu(root)
+        # ── Birleşik Üst Bar (Kimlik + Menü) ── #
+        self._build_top_bar(root)
 
         # ── Kapatma → tray ── #
         root.protocol("WM_DELETE_WINDOW", self.app.on_close)
@@ -113,20 +112,18 @@ class ModernGUI:
         container = ctk.CTkScrollableFrame(root, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=16, pady=(4, 16))
 
-        # ── Kimlik Bandı (PC/IP + Token — tek satır) ── #
-        self._build_identity_bar(container)
-
         # ── Başlık Bandı ── #
         self._build_header(container)
 
         # ── Dashboard İstatistik Kartları ── #
         self._build_dashboard(container)
 
-        # ── Sunucu Bilgileri ── #
-        self._build_info_section(container)
-
         # ── Honeypot Servisleri ── #
         self._build_services_section(container)
+
+        # ── app referansları (eski alanlar artık yok) ── #
+        self.app.ip_entry = None
+        self.app.attack_entry = None
 
         # ── Periyodik Dashboard Güncelleme (her 5 sn) ── #
         self._schedule_dashboard_refresh()
@@ -140,61 +137,99 @@ class ModernGUI:
                 root.deiconify()
 
     # ═══════════════════════════════════════════════════════════════
-    #  KİMLİK BANDI (PC/IP + Token — tek satır, en üstte)
+    #  BİRLEŞİK ÜST BAR  (Kimlik + Dashboard + Menü — tek satır)
     # ═══════════════════════════════════════════════════════════════
-    def _build_identity_bar(self, parent):
-        """PC Adı/IP ve Token bilgisini kompakt tek satırda gösterir."""
-        bar = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=8, height=40)
-        bar.pack(fill="x", pady=(0, 6))
+    def _build_top_bar(self, root):
+        """Sol: PC/IP | Token  —  Sağ: v3.0 | Dashboard | Ayarlar | Yardım"""
+        bar = ctk.CTkFrame(root, fg_color=COLORS["card"], corner_radius=0, height=36)
+        bar.pack(fill="x", side="top")
         bar.pack_propagate(False)
 
         # Token & IP yükle
         token = self.app.state.get("token", "")
         public_ip = self.app.state.get("public_ip", "")
         from client_constants import SERVER_NAME
+        dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token or ''}"
 
-        # ── Sol: PC / IP ── #
+        # ════════ SOL TARAF ════════ #
+        # PC Adı
         ctk.CTkLabel(
             bar, text=f"💻 {SERVER_NAME}",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
-        ).pack(side="left", padx=(12, 4))
+        ).pack(side="left", padx=(10, 2))
 
+        # IP
         ip_lbl = ctk.CTkLabel(
             bar, text=f"({public_ip})" if public_ip else "",
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_dim"],
         )
-        ip_lbl.pack(side="left", padx=(0, 10))
+        ip_lbl.pack(side="left", padx=(0, 6))
         self._identity_ip_lbl = ip_lbl
 
-        # Separator dikey çizgi
+        # Separator
         ctk.CTkFrame(bar, width=1, fg_color=COLORS["border"]).pack(
-            side="left", fill="y", padx=6, pady=8
+            side="left", fill="y", padx=4, pady=7
         )
 
-        # ── Orta: Token ── #
+        # Token
+        token_short = token[:16] + "…" if len(token) > 16 else token
         ctk.CTkLabel(
-            bar, text="🔑",
-            font=ctk.CTkFont(size=12),
-            text_color=COLORS["text_dim"],
-        ).pack(side="left", padx=(4, 2))
-
-        token_display = token[:12] + "…" if len(token) > 12 else token
-        token_lbl = ctk.CTkLabel(
-            bar, text=token_display,
+            bar, text=f"Token: {token_short}",
             font=ctk.CTkFont(size=11, family="Consolas"),
             text_color=COLORS["text_dim"],
-        )
-        token_lbl.pack(side="left", padx=(0, 4))
+        ).pack(side="left", padx=(6, 2))
 
-        # Kopyala butonu (token)
+        # Kopyala
         ctk.CTkButton(
-            bar, text="📋", width=28, height=24,
-            font=ctk.CTkFont(size=11),
+            bar, text="📋", width=26, height=22,
+            font=ctk.CTkFont(size=10),
             fg_color="transparent", hover_color=COLORS["accent"],
+            corner_radius=4,
             command=lambda: self._copy_to_clipboard(token),
-        ).pack(side="left", padx=(0, 6))
+        ).pack(side="left", padx=(0, 4))
+
+        # ════════ SAĞ TARAF ════════ #
+        # Yardım butonu
+        help_btn = ctk.CTkButton(
+            bar, text=f"❓ {self.t('menu_help')}",
+            font=ctk.CTkFont(size=11), width=70, height=26,
+            fg_color="transparent", hover_color=COLORS["accent"],
+            text_color=COLORS["text"], corner_radius=5,
+        )
+        help_btn.pack(side="right", padx=(2, 8), pady=5)
+        help_btn.configure(command=lambda: self._show_popup_menu(help_btn, "help"))
+
+        # Ayarlar butonu
+        settings_btn = ctk.CTkButton(
+            bar, text=f"⚙ {self.t('menu_settings')}",
+            font=ctk.CTkFont(size=11), width=76, height=26,
+            fg_color="transparent", hover_color=COLORS["accent"],
+            text_color=COLORS["text"], corner_radius=5,
+        )
+        settings_btn.pack(side="right", padx=2, pady=5)
+        settings_btn.configure(command=lambda: self._show_popup_menu(settings_btn, "settings"))
+
+        # Dashboard butonu
+        ctk.CTkButton(
+            bar, text="📊 Dashboard",
+            font=ctk.CTkFont(size=11), width=90, height=26,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=5,
+            command=lambda: webbrowser.open(dashboard_url),
+        ).pack(side="right", padx=2, pady=5)
+
+        # Separator
+        ctk.CTkFrame(bar, width=1, fg_color=COLORS["border"]).pack(
+            side="right", fill="y", padx=4, pady=7
+        )
+
+        # Versiyon (text)
+        ctk.CTkLabel(
+            bar, text=f"v{__version__}",
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+        ).pack(side="right", padx=(4, 4))
 
     def _copy_to_clipboard(self, text: str):
         """Metni panoya kopyala ve bildirim göster."""
@@ -459,83 +494,6 @@ class ModernGUI:
             return self.t("dash_ago").format(val=f"{s // 86400}{self.t('dash_days')}")
 
     # ═══════════════════════════════════════════════════════════════
-    #  SUNUCU BİLGİLERİ
-    # ═══════════════════════════════════════════════════════════════
-    def _build_info_section(self, parent):
-        """Sunucu Bilgileri — sadece Dashboard URL (PC/IP ve Token üst banda taşındı)."""
-        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
-        sec.pack(fill="x", pady=(0, 12))
-
-        # Başlık
-        ctk.CTkLabel(
-            sec, text=f"📊  {self.t('server_info')}",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(anchor="w", padx=16, pady=(12, 8))
-
-        # Separator
-        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
-        sep.pack(fill="x", padx=16, pady=(0, 8))
-
-        # Dashboard URL
-        token = self.app.state.get("token", "")
-        dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token or ''}"
-
-        grid = ctk.CTkFrame(sec, fg_color="transparent")
-        grid.pack(fill="x", padx=16, pady=(0, 12))
-        grid.columnconfigure(1, weight=1)
-
-        # Dashboard satırı
-        ctk.CTkLabel(
-            grid, text=self.t("lbl_dashboard") + ":",
-            font=ctk.CTkFont(size=13),
-            text_color=COLORS["text_dim"],
-            width=140, anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=4)
-
-        dash_entry = ctk.CTkEntry(
-            grid, font=ctk.CTkFont(size=12),
-            fg_color=COLORS["entry_bg"],
-            border_color=COLORS["border"],
-            text_color=COLORS["text"],
-            state="normal",
-        )
-        dash_entry.insert(0, dashboard_url)
-        dash_entry.configure(state="disabled")
-        dash_entry.grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=4)
-
-        # Kopyala butonu
-        ctk.CTkButton(
-            grid, text="📋", width=36, height=32,
-            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
-            command=lambda e=dash_entry: self._copy_entry(e),
-        ).grid(row=0, column=2, padx=2, pady=4)
-
-        # Aç butonu
-        ctk.CTkButton(
-            grid, text="🌐 " + self.t("open"), width=80, height=32,
-            fg_color=COLORS["blue"], hover_color=COLORS["blue_hover"],
-            command=lambda: webbrowser.open(dashboard_url),
-        ).grid(row=0, column=3, padx=2, pady=4)
-
-        # app referanslarını bağla (attack_entry artık yok)
-        self.app.ip_entry = None  # IP artık identity bar label
-        self.app.attack_entry = None  # attack count artık sadece dashboard kart
-
-    def _copy_entry(self, entry: ctk.CTkEntry):
-        """Entry içeriğini panoya kopyala"""
-        try:
-            entry.configure(state="normal")
-            value = entry.get()
-            entry.configure(state="disabled")
-            self.root.clipboard_clear()
-            self.root.clipboard_append(value)
-            self.root.update()
-            messagebox.showinfo(self.t("copy"), value)
-        except Exception as e:
-            log(f"copy error: {e}")
-
-    # ═══════════════════════════════════════════════════════════════
     #  HONEYPOT SERVİSLERİ
     # ═══════════════════════════════════════════════════════════════
     def _build_services_section(self, parent):
@@ -568,15 +526,15 @@ class ModernGUI:
         svc_upper = service.upper()
         icon = SERVICE_ICONS.get(svc_upper, "⚙️")
 
-        # ── Kart Frame (pack-based layout — hizalama sorunu çözer) ── #
+        # ── Kart Frame ── #
         card_color = COLORS["card_active"] if initially_active else COLORS["bg"]
         card = ctk.CTkFrame(parent, fg_color=card_color, corner_radius=10,
-                            border_width=1, border_color=COLORS["border"], height=56)
-        card.pack(fill="x", padx=16, pady=4)
+                            border_width=1, border_color=COLORS["border"])
+        card.pack(fill="x", padx=16, pady=3)
 
         # ── İç container: sol / sağ ayrımı ── #
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=12, pady=8)
+        inner.pack(fill="x", padx=12, pady=10)
 
         # ── Sol: İkon + İsim ── #
         left = ctk.CTkFrame(inner, fg_color="transparent")
@@ -611,36 +569,25 @@ class ModernGUI:
         status_color = COLORS["status_dot_on"] if initially_active else COLORS["status_dot_off"]
 
         status_frame = ctk.CTkFrame(right, fg_color="transparent")
-        status_frame.pack(side="left", padx=(0, 12), fill="y")
-
-        # Durum ortalama için spacer
-        ctk.CTkFrame(status_frame, fg_color="transparent").pack(expand=True)
-        status_inner = ctk.CTkFrame(status_frame, fg_color="transparent")
-        status_inner.pack()
-        ctk.CTkFrame(status_frame, fg_color="transparent").pack(expand=True)
+        status_frame.pack(side="left", padx=(0, 12))
 
         status_dot = ctk.CTkLabel(
-            status_inner, text="●",
+            status_frame, text="●",
             font=ctk.CTkFont(size=14),
             text_color=status_color,
         )
         status_dot.pack(side="left", padx=(0, 4))
 
         status_lbl = ctk.CTkLabel(
-            status_inner, text=status_text,
+            status_frame, text=status_text,
             font=ctk.CTkFont(size=12),
             text_color=COLORS["text_dim"],
         )
         status_lbl.pack(side="left")
 
         # ── Buton grubu ── #
-        btn_group = ctk.CTkFrame(right, fg_color="transparent")
-        btn_group.pack(side="left", fill="y")
-        # Butonları dikeyde ortala
-        ctk.CTkFrame(btn_group, fg_color="transparent").pack(expand=True)
-        btn_inner = ctk.CTkFrame(btn_group, fg_color="transparent")
-        btn_inner.pack()
-        ctk.CTkFrame(btn_group, fg_color="transparent").pack(expand=True)
+        btn_inner = ctk.CTkFrame(right, fg_color="transparent")
+        btn_inner.pack(side="left")
 
         # RDP özel butonu
         rdp_btn = None
@@ -790,41 +737,6 @@ class ModernGUI:
                                   fg_color=COLORS["blue"], hover_color=COLORS["blue_hover"])
         except Exception as e:
             log(f"RDP buton güncelleme hatası: {e}")
-
-    # ═══════════════════════════════════════════════════════════════
-    #  MENÜ (Custom dark-themed — tk.Menu yerine CTkFrame)
-    # ═══════════════════════════════════════════════════════════════
-    def _build_menu(self, root):
-        """tk.Menu dark-mode uyumsuz — CTkFrame tabanlı custom menü barı."""
-        menu_bar = ctk.CTkFrame(root, fg_color=COLORS["card"], corner_radius=0, height=32)
-        menu_bar.pack(fill="x", side="top")
-        menu_bar.pack_propagate(False)
-
-        # ── Ayarlar butonu ── #
-        settings_btn = ctk.CTkButton(
-            menu_bar, text=f"⚙ {self.t('menu_settings')}",
-            font=ctk.CTkFont(size=12), width=90, height=28,
-            fg_color="transparent", hover_color=COLORS["accent"],
-            text_color=COLORS["text"], corner_radius=6,
-        )
-        settings_btn.pack(side="left", padx=(8, 2), pady=2)
-        settings_btn.configure(command=lambda: self._show_popup_menu(settings_btn, "settings"))
-
-        # ── Yardım butonu ── #
-        help_btn = ctk.CTkButton(
-            menu_bar, text=f"❓ {self.t('menu_help')}",
-            font=ctk.CTkFont(size=12), width=90, height=28,
-            fg_color="transparent", hover_color=COLORS["accent"],
-            text_color=COLORS["text"], corner_radius=6,
-        )
-        help_btn.pack(side="left", padx=2, pady=2)
-        help_btn.configure(command=lambda: self._show_popup_menu(help_btn, "help"))
-
-        # ── Sağ taraf: versiyon ── #
-        ctk.CTkLabel(
-            menu_bar, text=f"v{__version__}",
-            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
-        ).pack(side="right", padx=12)
 
     def _show_popup_menu(self, anchor_widget, menu_type: str):
         """CTkToplevel popup menü — dark mode uyumlu."""

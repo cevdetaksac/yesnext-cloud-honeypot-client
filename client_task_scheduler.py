@@ -670,9 +670,7 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
     Returns:
         dict: Management results with success status and activated task count
     """
-    if log_func is None:
-        log_func = print
-        
+    if log_func is None: log_func = print
     try:
         log_func("🔧 Performing comprehensive Task Scheduler management...")
         

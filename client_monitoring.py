@@ -69,9 +69,7 @@ def _atomic_write_json(filepath: str, data: dict):
 
 def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
     """Update heartbeat file with current timestamp and status (atomic write)"""
-    if not heartbeat_path or not os.path.exists(heartbeat_path):
-        return False
-    
+    if not heartbeat_path or not os.path.exists(heartbeat_path): return False
     try:
         # Read existing data
         with open(heartbeat_path, 'r', encoding='utf-8') as f:

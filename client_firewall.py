@@ -470,8 +470,7 @@ class FirewallAgent:
                 self.logger.error(f"Invalid block item: {e}")
                 continue
             cidrs = self._expand_ip_or_cidr(spec)
-            if not cidrs:
-                continue
+            if not cidrs: continue
             ok = self.backend.apply_block(block_id, cidrs)
             if ok:
                 self.logger.info(f"Applied block {block_id} ({spec})")

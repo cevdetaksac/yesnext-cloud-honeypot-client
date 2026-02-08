@@ -84,9 +84,7 @@ def tray_make_image(active: bool) -> Image.Image:
 
 def update_window_icon(root, is_active: bool):
     """Update window icon based on protection status"""
-    if not root:
-        return
-        
+    if not root: return
     try:
         from client_utils import get_resource_path
         
@@ -282,9 +280,7 @@ class TrayManager:
     
     def tray_loop(self):
         """Main tray loop - runs in background thread"""
-        if not TRY_TRAY:
-            return
-            
+        if not TRY_TRAY: return
         # Tray ikonu oluştur
         icon = pystray.Icon("honeypot_client")
         self.tray_icon = icon

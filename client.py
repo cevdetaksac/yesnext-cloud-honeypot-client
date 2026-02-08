@@ -1,108 +1,24 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-🎯 CLOUD HONEYPOT CLIENT - MODULAR ARCHITECTURE
-=======================================================
+"""Cloud Honeypot Client — main application orchestrator.
 
-📊 VERSION HISTORY:
-├─ v2.9.6 (Feb 2026) - Task XML centralization, config constant extraction, version automation
-├─ v2.9.5 (Feb 2026) - Cross-codebase dead code removal & docstring cleanup (-851 lines)
-├─ v2.9.4 (Feb 2026) - GUI/tray dead code cleanup & simplification (-311 lines)
-├─ v2.9.3 (Feb 2026) - Performance fixes: ThreadPoolExecutor, shared SSL, session API, GUI safety
-├─ v2.9.2 (Feb 2026) - Installer overhaul, task name fixes, dead autostart code removal
-├─ v2.9.1 (Feb 2026) - Dead code cleanup, 661 lines removed
-├─ v2.9.0 (Feb 2026) - Stability fixes, thread-safety, graceful exit
-├─ v2.8.5 (Dec 2025) - Performance optimizations, thread reduction
-├─ v2.8.4 (Dec 2025) - Task Scheduler memory restart (95% code reduction)
-├─ v2.8.0 (Sep 2025) - Modular architecture implementation
-└─ v1.x.x (2024)     - Initial release
+Coordinates GUI/tray display, API communication, tunnel management,
+RDP operations, and background health monitoring. Runs in two modes:
 
-🚀 PERFORMANCE OPTIMIZATIONS (v2.8.5):
-┌─────────────────────────────────────────────────────────────────┐
-│  ⚡ Thread Optimization    → Reduced ~8,640 threads/day        │
-│  📁 I/O Optimization       → 92% reduction in file operations  │
-│  🌐 Network Optimization   → 80% reduction in HTTP calls       │
-│  🖼️ GUI Optimization       → Removed blocking gc.collect()     │
-│  🔄 Loop Consolidation     → Merged watchdog into sync loop    │
-│  💾 IP Caching             → 5 minute cache for public IP      │
-└─────────────────────────────────────────────────────────────────┘
+  GUI mode  — Tkinter window + system tray, update watchdog thread (1 hr)
+  Daemon    — Headless via Task Scheduler, auto-updates every 2 hrs
 
-🏗️ MODULAR SYSTEM ARCHITECTURE:
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│  📦 CORE APPLICATION (client.py)                               │
-│  ├─ Main application orchestrator and GUI                      │
-│  ├─ Business logic coordination                                │
-│  ├─ Tunnel management and RDP operations                       │
-│  └─ API communication and data synchronization                 │
-│                                                                 │
-│  📦 MODULAR COMPONENTS:                                         │
-│  ├─ client_monitoring.py    → Health/Heartbeat systems         │
-│  ├─ client_instance.py      → Singleton control                │
-│  ├─ client_logging.py       → Centralized logging              │
-│  ├─ client_security.py      → Windows Defender compatibility   │
-│  ├─ client_updater.py       → Update management                │
-│  ├─ client_tray.py          → System tray integration          │
-│  ├─ client_api.py           → API communication layer          │
-│  ├─ client_networking.py    → Tunnel/network operations        │
-│  ├─ client_rdp.py           → RDP port management              │
-│  ├─ client_firewall.py      → Firewall automation             │
-│  ├─ client_tokens.py        → Token management                 │
-│  ├─ client_task_scheduler.py → Windows Task Scheduler          │
-│  ├─ client_memory_restart.py → Memory management (simple)      │
-│  ├─ client_utils.py         → Utility functions               │
-│  ├─ client_helpers.py       → Helper functions + IP cache      │
-│  └─ client_constants.py     → Configuration constants          │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ 🔄 AUTO-UPDATE SYSTEM:                                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  GUI/Tray Mode: UpdateWatchdog thread (every 1 hour)           │
-│  Daemon Mode: Task Scheduler (every 2 hours, no login needed)  │
-│  Silent Update: Background download & install                  │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ 🏗️ MANAGER PATTERN IMPLEMENTATION:                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  📊 MonitoringManager  → Heartbeat & health monitoring         │
-│  🔒 InstanceManager    → Singleton & process control           │
-│  📝 LoggingManager     → Centralized logging system            │
-│  🛡️ SecurityManager    → Windows Defender & trust signals      │
-│  🔄 UpdateManager      → Automated update system               │
-│  📱 TrayManager        → System tray & notifications           │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+Modules:
+  client_api / client_networking  — API layer, tunnel operations
+  client_rdp / client_firewall    — RDP port mgmt, firewall rules
+  client_monitoring / client_security — Health checks, Defender compat
+  client_updater / client_tray    — Auto-update, system tray
+  client_instance / client_logging — Singleton control, log setup
+  client_tokens / client_task_scheduler — Auth tokens, scheduled tasks
+  client_memory_restart           — Memory-threshold restart
+  client_helpers / client_utils / client_constants — Shared utilities
 
-EXIT CODES:
-┌──────────┬─────────────────────────────────────────────────────┐
-│ Code     │ Meaning                                             │
-├──────────┼─────────────────────────────────────────────────────┤
-│ 0        │ Normal exit                                         │
-│ 1        │ Unhandled exception / critical error               │
-│ 2        │ Mutex taken (another instance running)             │
-│ 3        │ Health check failed                                │
-└──────────┴─────────────────────────────────────────────────────┘
-
-INSTALLATION & SETUP:
-1. Run installer → Sets up Task Scheduler rules & registry entries
-2. Daemon task → Auto-starts on boot for background operation
-3. GUI task → Auto-starts on user logon for desktop interaction
-4. Singleton protection → Prevents conflicts between instances
-
-DEVELOPMENT NOTES:
-- Migrated from monolithic 3097-line file to 14+ modular components
-- Manager pattern ensures clean separation of concerns
-- All legacy Windows Service code removed (Task Scheduler preferred)
-- Backward compatibility maintained for existing configurations
-- Plugin architecture ready for future extensions
-
-MIGRATION STATUS: COMPLETE (September 2025)
-- Core functionality: Fully modularized
-- Manager patterns: Implemented across all subsystems  
-- Testing: All modules validated and working
-- Performance: 15% memory reduction, improved startup time
+Exit codes: 0 normal, 1 critical error, 2 another instance running, 3 health-check fail.
 """
 
 # Standard library imports
@@ -148,8 +64,6 @@ from client_security import SecurityManager
 from client_updater import UpdateManager
 from client_tray import TrayManager
 
-# ===================== SIMPLE MEMORY MANAGEMENT ===================== #
-# Basit memory restart sistemi
 try:
     from client_memory_restart import enable_simple_memory_restart, get_current_memory_mb, check_previous_restart_state
     MEMORY_RESTART_AVAILABLE = True
@@ -160,25 +74,16 @@ except ImportError:
     def get_current_memory_mb(): return 0
     def check_previous_restart_state(): return None
 
-# ===================== MODULAR SYSTEM INITIALIZED ===================== #
-# Heartbeat, Singleton, Logging systems moved to separate modules
-
 def get_operation_mode(args) -> str:
-    """Determine operation mode from arguments - SIMPLIFIED"""
+    """Determine operation mode from arguments."""
     if getattr(args, 'mode', None) == "daemon" or getattr(args, 'daemon', False):
         return DAEMON_MODE
     elif getattr(args, 'mode', None) == "watchdog" or getattr(args, 'watchdog', False):
         return "watchdog"
     else:
-        # Both default and tray mode use GUI_MODE
-        # The difference is handled in the tray_mode flag
         return GUI_MODE
 
-# ===================== SINGLETON SYSTEM END ===================== #
-
-# ===================== MODULAR INITIALIZATION ===================== #
-
-# Initialize global logger
+# Global logger
 LOGGER = None
 
 # Initialize logging through modular system
@@ -186,26 +91,15 @@ logging_manager = LoggingManager()
 if logging_manager.initialize():
     LOGGER = logging_manager.get_logger()
 
-# Initialize tray system (handled by TrayManager)
-# Tray setup moved to client_tray module
-
-# ===================== WINDOWS DEFENDER COMPATIBILITY ===================== #
-# Windows Defender compatibility moved to client_security module
-
-# ===================== INTERNATIONALIZATION ===================== #
-# Purpose: Load and manage multi-language support
-
-# Load I18N messages from JSON
 I18N = load_i18n()
 
-# ===================== ANA UYGULAMA ===================== #
+
 class CloudHoneypotClient:
     # Port mappings loaded from configuration
     @property
     def PORT_TABLOSU(self):
         """Get port table from configuration file"""
-        if not hasattr(self, '_port_table_cache'):
-            self._port_table_cache = get_port_table()
+        if not hasattr(self, '_port_table_cache'): self._port_table_cache = get_port_table()
         return self._port_table_cache
 
     def log(self, message: str):
@@ -270,9 +164,7 @@ class CloudHoneypotClient:
         token_file_new, token_file_old = get_token_file_paths(APP_DIR)
         self.token_manager = create_token_manager(str(API_URL), SERVER_NAME, token_file_new, token_file_old)
         
-        # Set global logger for helper functions
-        if LOGGER:
-            client_helpers.set_logger(LOGGER)
+        if LOGGER: client_helpers.set_logger(LOGGER)
         self.reconciliation_lock = threading.Lock()
         self.rdp_transition_complete = threading.Event()
         
@@ -333,12 +225,11 @@ class CloudHoneypotClient:
         # Registry'ye current mode'u kaydet (Task Scheduler için)
         self._update_registry_mode()
         
-        # Comprehensive Task Scheduler management - delegated to modular system
+        # Comprehensive Task Scheduler management
         from client_task_scheduler import perform_comprehensive_task_management
         task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
         
-        # ===================== SIMPLE MEMORY RESTART ===================== #
-        # Basit memory management - 8 saatte bir restart
+        # Memory management — restart every 8 hours if threshold exceeded
         if MEMORY_RESTART_AVAILABLE:
             try:
                 # Check if this is a restart from previous session
@@ -514,9 +405,7 @@ class CloudHoneypotClient:
                 
             # Get language dictionary
             lang_dict = I18N.get(lang, I18N.get("tr", {}))
-            if not isinstance(lang_dict, dict):
-                lang_dict = I18N.get("tr", {})
-                
+            if not isinstance(lang_dict, dict): lang_dict = I18N.get("tr", {})
             result = lang_dict.get(key, key)
             return result
         except Exception as e:
@@ -526,9 +415,7 @@ class CloudHoneypotClient:
     # ---------- Helper Methods ---------- #
     def require_admin_for_operation(self, operation_name: str) -> bool:
         """Check and request admin privileges for critical operations"""
-        if ctypes.windll.shell32.IsUserAnAdmin():
-            return True
-            
+        if ctypes.windll.shell32.IsUserAnAdmin(): return True
         log(f"'{operation_name}' işlemi admin yetkisi gerektiriyor ama mevcut değil")
         
         try:
@@ -545,9 +432,7 @@ class CloudHoneypotClient:
     def ensure_admin(self, force_request: bool = False) -> Union[bool, str]:
         """Ensure admin privileges with optional elevation request"""
         try:
-            if os.name != "nt" or ctypes.windll.shell32.IsUserAnAdmin():
-                return True
-            
+            if os.name != "nt" or ctypes.windll.shell32.IsUserAnAdmin(): return True
             if force_request:
                 log("🔧 Security monitoring requires elevated privileges...")
                 try:
@@ -618,10 +503,7 @@ class CloudHoneypotClient:
         # Program açık olduğu kesin (çünkü bu kod çalışıyor)
         active_servers = self.state.get("servers", {})
         
-        # En az bir tunnel aktifse → online
-        if active_servers:
-            return "online"
-        
+        if active_servers: return "online"  # en az bir tunnel aktif
         # Program açık ama tunnel yok → idle
         return "idle"
 
@@ -631,10 +513,7 @@ class CloudHoneypotClient:
         if token:
             ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
             
-            # Status override yoksa akıllı status belirle
-            if status_override is None:
-                status_override = self.get_intelligent_status()
-            
+            if status_override is None: status_override = self.get_intelligent_status()
             self.api_client.send_heartbeat(
                 token, ip, SERVER_NAME,
                 self.state.get("running", False), status_override
@@ -681,9 +560,7 @@ class CloudHoneypotClient:
 
     def check_gui_health(self):
         """Periodic GUI health check — tray icon sync & session monitoring"""
-        if not self.root:
-            return
-            
+        if not self.root: return
         try:
             self.root.winfo_exists()
             self.gui_health['update_count'] += 1
@@ -699,9 +576,7 @@ class CloudHoneypotClient:
             if self.gui_health['update_count'] % 5 == 0:
                 self.check_windows_session_state()
             
-            # Prevent integer overflow
-            if self.gui_health['update_count'] > 1000:
-                self.gui_health['update_count'] = 0
+            if self.gui_health['update_count'] > 1000: self.gui_health['update_count'] = 0
                 
         except Exception as e:
             log(f"[GUI_HEALTH] Sağlık kontrolü hatası: {e}")
@@ -740,20 +615,14 @@ class CloudHoneypotClient:
     def refresh_attack_count(self, async_thread=True):
         """GUI'deki saldırı sayacını günceller"""
         token = self.state.get("token")
-        if not token:
-            return
-        if not self.root or not self.attack_entry:
-            return
-            
+        if not token: return
+        if not self.root or not self.attack_entry: return
+
         def worker():
             try:
                 cnt = self.fetch_attack_count_sync(token)
-                if cnt is None:
-                    return
-                    
-                # Skip update if value unchanged (performance optimization)
-                if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt:
-                    return
+                if cnt is None: return
+                if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt: return
                     
                 self._last_attack_count = cnt
                     
@@ -772,9 +641,7 @@ class CloudHoneypotClient:
 
     def poll_attack_count(self):
         """Poll attack count with single-chain scheduling guard"""
-        # Prevent double scheduling chains
-        if hasattr(self, '_poll_chain_active') and self._poll_chain_active:
-            return
+        if hasattr(self, '_poll_chain_active') and self._poll_chain_active: return
         self._poll_chain_active = True
         
         self.refresh_attack_count(async_thread=True)
@@ -1186,8 +1053,7 @@ class CloudHoneypotClient:
             lp = int(cfg["listen_port"])
             running = self._is_service_running(lp, svc)
             item = {"status": "started" if running else "stopped", "listen_port": lp}
-            if svc == "RDP":
-                item["new_port"] = ServiceController.get_rdp_port()
+            if svc == "RDP": item["new_port"] = ServiceController.get_rdp_port()
             state[svc] = item
         return state
 
@@ -1816,9 +1682,7 @@ class CloudHoneypotClient:
                                     new_port: Optional[Union[str, int]] = None) -> bool:
         """Report tunnel action to API using modular API function"""
         token = self.state.get("token")
-        if not token:
-            return False
-        
+        if not token: return False
         result = report_tunnel_action_api(self.api_request, token, service, action, new_port, log)
         
         # Local cache removed - TunnelManager handles state tracking
@@ -1966,9 +1830,7 @@ class CloudHoneypotClient:
         """Merkezi temiz çıkış — tüm kaynakları serbest bırakır"""
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
-            # Heartbeat cleanup
-            if hasattr(self, 'monitoring_manager'):
-                self.monitoring_manager.stop_heartbeat_system()
+            if hasattr(self, 'monitoring_manager'): self.monitoring_manager.stop_heartbeat_system()
             # Tray cleanup
             if hasattr(self, 'tray_manager') and self.tray_manager:
                 try: self.tray_manager.stop_tray_system()

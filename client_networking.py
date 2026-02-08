@@ -219,8 +219,7 @@ class NetworkingHelpers:
         try:
             while True:
                 data = src.recv(RECV_SIZE)
-                if not data: 
-                    break
+                if not data: break
                 dst.sendall(data)
         except:
             pass
@@ -370,9 +369,7 @@ class TunnelManager:
     def _do_watchdog_check(app):
         """Internal watchdog check - monitors and restarts dead tunnels"""
         try:
-            if not app.state.get("running"):
-                return
-                
+            if not app.state.get("running"): return
             # Güvenli desired set oluşturma
             desired = set()
             for row in app.state.get("selected_rows", []):
@@ -428,9 +425,7 @@ class TunnelManager:
             remote = app.api_request("GET", "premium/tunnel-status") or {}
             local  = app.get_local_tunnel_state()
             
-            if not remote:
-                return  # Silent skip - no log spam
-
+            if not remote: return
             changes_made = False
             for service, remote_cfg in remote.items():
                 if service not in DEFAULT_TUNNELS: 

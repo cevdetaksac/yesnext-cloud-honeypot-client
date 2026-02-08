@@ -711,7 +711,7 @@ class CloudHoneypotClient:
 
     def write_status(self, active_rows, running: bool = True):
         """Write current status to persistent storage"""
-        self.state["selected_rows"] = [(str(a[0]), str(a[1]), str(a[2])) for a in active_rows]
+        self.state["selected_rows"] = [(str(a[0]), str(a[1])) for a in active_rows]
         data = self._read_status_raw()
         data.update({"active_ports": self.state["selected_rows"], "running": running, "fresh_install": False})
         self._write_status_raw(data)
@@ -728,7 +728,13 @@ class CloudHoneypotClient:
                 return [], False
             rows = data.get("active_ports", [])
             running = bool(data.get("running", False))
-            norm = [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+            # Normalize: support both legacy 3-tuple and new 2-tuple
+            norm = []
+            for r in rows:
+                if len(r) >= 3:
+                    norm.append((str(r[0]), str(r[2])))  # skip middle element
+                elif len(r) == 2:
+                    norm.append((str(r[0]), str(r[1])))
             return norm, running
         except Exception as e:
             log(f"read_status error: {e}")
@@ -857,11 +863,11 @@ class CloudHoneypotClient:
         """Apply selected service configurations via ServiceManager"""
         started = 0
         clean_rows = []
-        for (listen_port, new_port, service) in selected_rows:
+        for (listen_port, service) in selected_rows:
             port = int(listen_port)
             svc = str(service).upper()
             if self.service_manager.start_service(svc, port):
-                clean_rows.append((str(listen_port), str(new_port), str(service)))
+                clean_rows.append((str(listen_port), str(service)))
                 self._update_row_ui(str(listen_port), str(service), True)
                 started += 1
 
@@ -885,7 +891,7 @@ class CloudHoneypotClient:
         self.state["running"] = False
         
         # GUI'deki tüm satırları pasif olarak güncelle
-        for (p1, p2, svc) in self.PORT_TABLOSU:
+        for (p1, svc) in self.PORT_TABLOSU:
             self._update_row_ui(str(p1), str(svc), False)
         
         self.update_tray_icon()
@@ -1051,19 +1057,18 @@ class CloudHoneypotClient:
         rows = []
         try:
             running = self.service_manager.running_services
-            for (p1, p2, svc) in self.PORT_TABLOSU:
+            for (p1, svc) in self.PORT_TABLOSU:
                 if str(svc).upper() in running:
-                    rows.append((str(p1), str(p2), str(svc)))
+                    rows.append((str(p1), str(svc)))
         except Exception as e:
             log(f"Exception: {e}")
         return rows
 
-    def start_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
+    def start_single_row(self, p1: str, service: str, manual_action: bool = False) -> bool:
         """Tek bir honeypot servisini ServiceManager üzerinden başlatır.
         
         Args:
             p1: Dinleme portu
-            p2: Hedef port (eski mimari uyumluluğu, kullanılmıyor)
             service: Servis adı
             manual_action: Kullanıcı tarafından tetiklenip tetiklenmediği
         """
@@ -1136,7 +1141,7 @@ class CloudHoneypotClient:
         except: pass
         return False
 
-    def stop_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
+    def stop_single_row(self, p1: str, service: str, manual_action: bool = False) -> bool:
         """Tek bir honeypot servisini ServiceManager üzerinden durdurur."""
         service_upper = str(service).upper()
         listen_port = 3389 if service_upper == 'RDP' else int(p1)
@@ -1439,8 +1444,8 @@ class CloudHoneypotClient:
             return
 
         saved_rows, saved_running = self.read_status()
-        rows = saved_rows if saved_rows else [(p1, p2, s) for (p1, p2, s) in self.PORT_TABLOSU]
-        self.state["selected_rows"] = [(str(a[0]), str(a[1]), str(a[2])) for a in rows]
+        rows = saved_rows if saved_rows else [(p1, s) for (p1, s) in self.PORT_TABLOSU]
+        self.state["selected_rows"] = [(str(a[0]), str(a[1])) for a in rows]
 
         if not rows:
             log("Daemon: aktif port yok, beklemede.")
@@ -1736,7 +1741,7 @@ class CloudHoneypotClient:
         self.row_controls = {}
         saved_rows, saved_running = self.read_status()
 
-        def make_row(parent, p1, p2, servis):
+        def make_row(parent, p1, servis):
             fr = tk.Frame(parent, bg="#ffffff", padx=8, pady=8, highlightbackground="#ddd", highlightthickness=1)
             fr.pack(fill="x", pady=6)
             # Columns grow: make the middle space flexible so the button sticks right
@@ -1747,7 +1752,6 @@ class CloudHoneypotClient:
             # Labels
             tk.Label(fr, text=f"{self.t('col_service')}: {servis}", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
             tk.Label(fr, text=f"{self.t('col_listen')}: {p1}", bg="#ffffff", anchor="w").grid(row=1, column=0, sticky="w")
-            tk.Label(fr, text=f"{self.t('col_new')}: {p2}", bg="#ffffff", anchor="w").grid(row=1, column=1, sticky="w", padx=10)
             # Status label
             status_lbl = tk.Label(fr, text=f"{self.t('status')}: {self.t('status_stopped')}", bg="#ffffff", anchor="w")
             status_lbl.grid(row=1, column=2, sticky="w", padx=10)
@@ -1765,7 +1769,7 @@ class CloudHoneypotClient:
                     cur = btn["text"].lower()
                     if cur == self.t('btn_row_start').lower():
                         # Pass manual_action=True for GUI-initiated actions
-                        if self.start_single_row(str(p1), str(p2), str(servis), manual_action=True):
+                        if self.start_single_row(str(p1), str(servis), manual_action=True):
                             # For non-RDP, the UI updates instantly.
                             # For RDP, the popup handles the flow, but we can preemptively update the UI.
                             if not is_rdp:
@@ -1774,7 +1778,7 @@ class CloudHoneypotClient:
                                 status_lbl.config(text=f"{self.t('status')}: {self.t('status_running')}")
                     else:
                         # Pass manual_action=True for GUI-initiated actions
-                        if self.stop_single_row(str(p1), str(p2), str(servis), manual_action=True):
+                        if self.stop_single_row(str(p1), str(servis), manual_action=True):
                             if not is_rdp:
                                 btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
                                 fr.configure(bg="#ffffff")
@@ -1823,12 +1827,12 @@ class CloudHoneypotClient:
                 btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=10)
                 self.row_controls[(str(p1), str(servis).upper())] = {"frame": fr, "button": btn, "status": status_lbl}
 
-        for (p1, p2, servis) in self.PORT_TABLOSU:
-            make_row(frame2, p1, p2, servis)
+        for (p1, servis) in self.PORT_TABLOSU:
+            make_row(frame2, p1, servis)
 
         # Apply previous state to UI
         if saved_rows:
-            for (sp1, sp2, ssvc) in saved_rows:
+            for (sp1, ssvc) in saved_rows:
                 key = (str(sp1), str(ssvc).upper())
                 rc = self.row_controls.get(key)
                 if rc:

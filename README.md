@@ -1,6 +1,6 @@
 Cloud Honeypot Client
 =====================
-**Current Version: 2.9.6**
+**Current Version: 3.0.0**
 
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 

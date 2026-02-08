@@ -788,8 +788,7 @@ def get_port_table():
     """Get service/port table from configuration file
     
     Returns:
-        List[Tuple[str, str, str]]: Port table in format [(port, "-", service), ...]
-        The middle element is kept as "-" for backward compatibility with GUI code.
+        List[Tuple[str, str]]: Port table in format [(port, service), ...]
     """
     try:
         config = load_config()
@@ -801,7 +800,7 @@ def get_port_table():
             service = str(svc_cfg.get("service", ""))
             
             if port and service:
-                port_table.append((port, "-", service))
+                port_table.append((port, service))
         
         print(f"[CONFIG] Service table loaded from config: {len(port_table)} entries")
         return port_table

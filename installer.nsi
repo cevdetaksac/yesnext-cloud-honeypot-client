@@ -1,4 +1,4 @@
-﻿; Cloud Honeypot Client Installer Script
+; Cloud Honeypot Client Installer Script
 ; Version is injected by build.ps1 from client_constants.py
 !include "MUI2.nsh"
 !include "WinVer.nsh"
@@ -10,9 +10,9 @@ OutFile "cloud-client-installer.exe"
 !define APPNAME "Cloud Honeypot Client"
 !define COMPANYNAME "YesNext"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
-!define VERSIONMAJOR 2
-!define VERSIONMINOR 9
-!define VERSIONBUILD 3
+!define VERSIONMAJOR 3
+!define VERSIONMINOR 0
+!define VERSIONBUILD 0
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 

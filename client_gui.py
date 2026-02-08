@@ -438,19 +438,30 @@ class ModernGUI:
             else:
                 self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
 
-            # Pulse animasyonu
-            self._pulse_visible = not self._pulse_visible
-            if hasattr(self, '_pulse_dot'):
-                pulse_color = COLORS["green"] if active_count > 0 else COLORS["text_dim"]
-                self._pulse_dot.configure(
-                    text_color=pulse_color if self._pulse_visible else COLORS["bg"]
-                )
-
             # Header badge senkronizasyonu
             self.update_header_status(active_count > 0)
 
         except Exception:
             pass
+
+    def _start_pulse_blink(self):
+        """Header pulse dot'u 800ms aralıkla yanıp söndürür."""
+        def _blink():
+            try:
+                if not self.root or not self.root.winfo_exists():
+                    return
+                self._pulse_visible = not self._pulse_visible
+                if hasattr(self, '_pulse_dot'):
+                    any_active = len(getattr(self.app, 'service_manager', None) and
+                                     self.app.service_manager.running_services or []) > 0
+                    pulse_color = COLORS["green"] if any_active else COLORS["text_dim"]
+                    self._pulse_dot.configure(
+                        text_color=pulse_color if self._pulse_visible else COLORS["card"]
+                    )
+                self.root.after(800, _blink)
+            except Exception:
+                pass
+        _blink()
 
     def _update_card(self, key: str, value: str, color: str):
         """Bir dashboard kartının değerini güncelle."""
@@ -517,6 +528,13 @@ class ModernGUI:
         for (port, service) in self.app.PORT_TABLOSU:
             is_active = str(service).upper() in running_names
             self._build_service_card(sec, str(port), str(service), is_active)
+
+        # İlk açılışta header durumunu doğru set et
+        any_active = len(running_names) > 0
+        self.update_header_status(any_active)
+
+        # Hızlı blink timer başlat (800ms)
+        self._start_pulse_blink()
 
         # Alt padding
         ctk.CTkFrame(sec, height=8, fg_color="transparent").pack()

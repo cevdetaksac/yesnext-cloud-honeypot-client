@@ -188,9 +188,6 @@ class HoneypotAPIClient:
         except Exception as e:
             self.log(f"Servis eylemi raporlama hatası: {e}")
             return False
-
-    # Backward compatibility alias
-    report_tunnel_action = report_service_action
     
     def check_connection(self, max_attempts: int = 5, delay: int = 5) -> bool:
         """API bağlantısını kontrol et - orijinal try_api_connection mantığına uygun"""
@@ -244,9 +241,6 @@ class HoneypotAPIClient:
             self.log(f"[API] Servis durumu alma hatası: {e}")
             return None
     
-    # Backward compatibility alias
-    get_tunnel_statuses = get_service_statuses
-    
     def update_service_statuses(self, token: str, statuses: list) -> bool:
         """Servis durumlarını güncelle"""
         try:
@@ -259,9 +253,6 @@ class HoneypotAPIClient:
         except Exception as e:
             self.log(f"[API] Servis durumu güncelleme hatası: {e}")
             return False
-    
-    # Backward compatibility alias
-    update_tunnel_statuses = update_service_statuses
     
     def report_attack(self, token: str, attacker_ip: str, target_ip: str,
                        username: str, password: str, service: str, port: int) -> bool:
@@ -405,9 +396,6 @@ def report_service_action_api(api_request_func, token: str, service: str, action
     except Exception as e:
         if log_func: log_func(f"Servis eylemi raporlanırken hata: {e}")
         return False
-
-# Backward compatibility alias
-report_tunnel_action_api = report_service_action_api
 
 # ===================== CLIENT REGISTRATION ===================== #
 

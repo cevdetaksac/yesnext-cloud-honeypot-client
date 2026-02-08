@@ -20,6 +20,7 @@ Performance Notes:
 import os
 import sys
 import time
+import socket
 import requests
 import tkinter as tk
 from typing import Dict, Optional
@@ -61,6 +62,16 @@ def log(msg: str) -> None:
 def run_cmd(cmd, timeout: int = 20, suppress_rc_log: bool = False):
     """Execute system commands using modular SystemUtils"""
     return SystemUtils.run_cmd(cmd, timeout, suppress_rc_log, log)
+
+def is_port_in_use(port: int) -> bool:
+    """Check if a TCP port is currently in use (native socket — no subprocess)"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            result = s.connect_ex(("127.0.0.1", int(port)))
+            return result == 0  # 0 = connected = port in use
+    except Exception:
+        return False
 
 # ===================== HELPER FUNCTIONS CLASS ===================== #
 

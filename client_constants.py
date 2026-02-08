@@ -58,12 +58,6 @@ CONTROL_PORT = 58632
 SERVER_NAME = socket.gethostname()
 CONNECT_TIMEOUT = 8
 
-# Deprecated relay server constants — kept as stubs for backward compatibility
-# TODO: Remove these once client.py and client_networking.py are fully refactored (Phase 6)
-HONEYPOT_IP = ""           # No longer used — was relay server IP
-HONEYPOT_TUNNEL_PORT = 0   # No longer used — was relay tunnel port
-RECV_SIZE = 65536          # No longer used — kept for networking module compat
-
 # ===================== SECURITY CONFIGURATION ===================== #
 
 # Admin elevation control - TEST MODE
@@ -178,10 +172,6 @@ def get_service_table():
 DEFAULT_SERVICES = get_default_services()
 SERVICE_TABLE = get_service_table()
 
-# Backward compatibility aliases
-DEFAULT_TUNNELS = DEFAULT_SERVICES
-PORT_TABLOSU = [(p, "-", s) for (p, s) in SERVICE_TABLE]
-
 # ===================== WINDOWS INTEGRATION ===================== #
 
 # Registry
@@ -214,11 +204,6 @@ PORT_REPORT_INTERVAL = 300           # Open port reporting interval
 API_STARTUP_DELAY = 5                # API startup delay
 RDP_TRANSITION_TIMEOUT = 120         # RDP transition timeout
 SERVICE_WATCHDOG_INTERVAL = 15       # Service watchdog check interval (was WATCHDOG_INTERVAL)
-
-# Backward compatibility aliases for timing
-DASHBOARD_SYNC_INTERVAL = SERVICE_SYNC_INTERVAL
-DASHBOARD_SYNC_CHECK = SERVICE_SYNC_CHECK
-WATCHDOG_INTERVAL = SERVICE_WATCHDOG_INTERVAL
 
 # ===================== LOGGING CONFIGURATION ===================== #
 
@@ -295,7 +280,6 @@ __all__ = [
     
     # Network configuration  
     'API_URL', 'CONTROL_HOST', 'CONTROL_PORT', 'SERVER_NAME', 'CONNECT_TIMEOUT',
-    'HONEYPOT_IP', 'HONEYPOT_TUNNEL_PORT', 'RECV_SIZE',  # deprecated stubs
     
     # Honeypot service definitions
     'HONEYPOT_SERVICES', 'SSH_BANNER', 'FTP_BANNER', 'MYSQL_VERSION', 'MSSQL_VERSION', 'RDP_CERT_CN',
@@ -305,7 +289,6 @@ __all__ = [
     
     # Service configuration (loaded from config)
     'DEFAULT_SERVICES', 'SERVICE_TABLE',
-    'DEFAULT_TUNNELS', 'PORT_TABLOSU',  # backward compat aliases
     
     # Security
     'RDP_SECURE_PORT', 'DEFENDER_MARKERS', 'SECURITY_METADATA', 'LEGITIMATE_DOMAINS', 'RESTRICTED_PATHS',
@@ -324,7 +307,6 @@ __all__ = [
     'ATTACK_COUNT_REFRESH',
     'SERVICE_SYNC_INTERVAL', 'SERVICE_SYNC_CHECK', 'SERVICE_WATCHDOG_INTERVAL',
     'BLOCK_POLL_INTERVAL', 'PORT_REPORT_INTERVAL',
-    'DASHBOARD_SYNC_INTERVAL', 'DASHBOARD_SYNC_CHECK', 'WATCHDOG_INTERVAL',  # backward compat
     'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
     
     # Logging

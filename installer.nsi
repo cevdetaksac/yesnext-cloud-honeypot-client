@@ -61,10 +61,12 @@ Var LogFile
 ; UTILITY FUNCTIONS
 ; ===================================================================
 
-; Launch app as current (non-elevated) user via explorer shell
+; Launch app as current (non-elevated) user
 Function LaunchAsCurrentUser
-    ; Use explorer.exe to launch as the logged-in user (de-elevated)
-    Exec '"$WINDIR\explorer.exe" "$INSTDIR\honeypot-client.exe"'
+    ; Set working directory to install dir first
+    SetOutPath "$INSTDIR"
+    ; ExecShell 'open' uses Windows shell — launches as the interactive user
+    ExecShell "open" "$INSTDIR\honeypot-client.exe"
 FunctionEnd
 
 ; Simple log function

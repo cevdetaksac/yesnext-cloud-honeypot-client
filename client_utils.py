@@ -82,14 +82,16 @@ class SystemUtils:
 def load_i18n(lang_file: str = "client_lang.json", language: str = "tr") -> dict:
     """Load all language data from JSON file"""
     try:
-        if os.path.exists(lang_file):
-            with open(lang_file, "r", encoding="utf-8") as f:
+        # Use get_resource_path for PyInstaller compatibility
+        resolved = get_resource_path(lang_file)
+        if os.path.exists(resolved):
+            with open(resolved, "r", encoding="utf-8") as f:
                 all_languages = json.load(f)
-                print(f"[LANG] All languages loaded from {lang_file}")
+                print(f"[LANG] All languages loaded from {resolved}")
                 print(f"[LANG] Available languages: {list(all_languages.keys())}")
                 return all_languages
         else:
-            print(f"[LANG] Language file not found: {lang_file}")
+            print(f"[LANG] Language file not found: {resolved} (original: {lang_file})")
             return {"tr": {}, "en": {}}
     except Exception as e:
         print(f"[LANG] Error loading language file: {e}")

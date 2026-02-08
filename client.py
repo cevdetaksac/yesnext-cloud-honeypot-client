@@ -1679,6 +1679,7 @@ if __name__ == "__main__":
     parser.add_argument("--healthcheck", action="store_true", help="Perform health check and exit")
     parser.add_argument("--silent-update-check", action="store_true", help="Silent update check mode - check for updates and install automatically")
     parser.add_argument("--create-tasks", action="store_true", help="Create Task Scheduler tasks and exit (for installer)")
+    parser.add_argument("--show-gui", action="store_true", help="Force show GUI window (used by installer launch)")
     args = parser.parse_args()
     
     # Set global silent mode if requested
@@ -1830,7 +1831,8 @@ if __name__ == "__main__":
                 log("Normal user mode - Task Scheduler will be configured later")
             
             # Check if started with --mode=tray for tray-minimized startup
-            tray_mode = getattr(args, 'mode', None) == 'tray'
+            # --show-gui overrides tray mode (used by installer finish page)
+            tray_mode = getattr(args, 'mode', None) == 'tray' and not getattr(args, 'show_gui', False)
             
             # Build GUI in both cases
             log("Building main GUI...")

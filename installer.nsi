@@ -66,7 +66,7 @@ Function LaunchAsCurrentUser
     ; Set working directory to install dir first
     SetOutPath "$INSTDIR"
     ; ExecShell 'open' uses Windows shell — launches as the interactive user
-    ExecShell "open" "$INSTDIR\honeypot-client.exe"
+    ExecShell "open" "$INSTDIR\honeypot-client.exe" "--show-gui"
 FunctionEnd
 
 ; Simple log function

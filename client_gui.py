@@ -7,11 +7,9 @@ CloudHoneypotClient instance'ı üzerinden veri ve aksiyonlara erişir.
 """
 
 import os
-import sys
 import time
 import threading
 import webbrowser
-import subprocess
 from tkinter import messagebox
 from typing import Dict, Any
 
@@ -851,20 +849,38 @@ class ModernGUI:
         except Exception:
             pass
 
+    def _rebuild_gui(self):
+        """Tüm widget'ları yıkıp GUI'yi yeniden oluşturur (dil değişimi vb.)."""
+        try:
+            # Mevcut dashboard refresh / pulse timer'ları widget yıkılınca
+            # winfo_exists() == False olacak ve doğal olarak duracak.
+            # Tüm root children'ları yık
+            for child in list(self.root.winfo_children()):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+            # Dahili referansları temizle
+            self._dash_cards = {}
+            self.row_controls = {}
+            self.app.row_controls = {}
+            self._active_popup = None
+            # Yeniden oluştur (mevcut modda — görünürse gui, gizliyse minimized)
+            mode = "minimized" if self.app._tray_mode.is_set() else "gui"
+            self.build(self.root, mode)
+            log("[GUI] GUI rebuilt successfully (hot-reload)")
+        except Exception as e:
+            log(f"[GUI] Rebuild error: {e}")
+
     def _set_lang(self, code: str):
         try:
             update_language_config(code, True)
             log(f"[CONFIG] Language changed to: {code}")
         except Exception as e:
             log(f"[CONFIG] Language change error: {e}")
-        messagebox.showinfo(self.t("info"), self.t("restart_needed_lang"))
-        exe = ClientHelpers.current_executable()
-        try:
-            subprocess.Popen([exe] + sys.argv[1:], shell=False,
-                             creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception:
-            pass
-        sys.exit(0)
+        # Dili anında değiştir ve GUI'yi yeniden oluştur (restart gerekmez)
+        self.app.lang = code
+        self._rebuild_gui()
 
     def _open_logs(self):
         try:

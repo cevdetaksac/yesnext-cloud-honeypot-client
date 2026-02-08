@@ -10,8 +10,9 @@ Key Intervals (optimized for performance):
 - FILE_HEARTBEAT_INTERVAL: 60s (server heartbeat interval)
 - API_HEARTBEAT_INTERVAL: 60s (server heartbeat)
 - ATTACK_COUNT_REFRESH: 15s (GUI attack counter)
-- DASHBOARD_SYNC_INTERVAL: 45s (dashboard sync)
-- IP_CACHE_TTL: 300s (public IP cache lifetime)
+- SERVICE_SYNC_INTERVAL: 45s (honeypot service sync with dashboard)
+- BLOCK_POLL_INTERVAL: 30s (firewall block rule polling)
+- PORT_REPORT_INTERVAL: 300s (open port reporting)
 
 Notes:
 - Intervals are tuned to reduce CPU/network usage
@@ -49,18 +50,19 @@ GITHUB_REPO = "yesnext-cloud-honeypot-client"
 # API Configuration
 API_URL = get_from_config("api.base_url", "https://honeypot.yesnext.com.tr/api")
 
-# Honeypot server configuration
-HONEYPOT_IP = get_from_config("honeypot.server_ip", "194.5.236.181") 
-HONEYPOT_TUNNEL_PORT = get_from_config("honeypot.tunnel_port", 4443)
-
 # Local control server for single instance
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 58632
 
 # Network settings
 SERVER_NAME = socket.gethostname()
-RECV_SIZE = 65536
 CONNECT_TIMEOUT = 8
+
+# Deprecated relay server constants — kept as stubs for backward compatibility
+# TODO: Remove these once client.py and client_networking.py are fully refactored (Phase 6)
+HONEYPOT_IP = ""           # No longer used — was relay server IP
+HONEYPOT_TUNNEL_PORT = 0   # No longer used — was relay tunnel port
+RECV_SIZE = 65536          # No longer used — kept for networking module compat
 
 # ===================== SECURITY CONFIGURATION ===================== #
 
@@ -70,7 +72,7 @@ TEST_MODE = False  # Set to True for enhanced debugging and no admin requirement
 FORCE_NO_EXIT = True  # Prevent any early exits during testing
 
 # RDP secure port configuration
-RDP_SECURE_PORT = get_from_config("tunnels.rdp_port", 53389)
+RDP_SECURE_PORT = get_from_config("services.rdp_port", 53389)
 
 # Windows Defender compatibility metadata
 DEFENDER_MARKERS = {
@@ -125,34 +127,60 @@ WINDOW_TITLE = APP_NAME
 # Tray configuration
 TRY_TRAY = get_from_config("advanced.minimize_to_tray", True)
 
-# ===================== TUNNEL CONFIGURATION ===================== #
+# ===================== HONEYPOT SERVICE CONFIGURATION ===================== #
 
-def get_default_tunnels():
-    """Get default tunnel configuration from config"""
+# Service definitions — each honeypot service the client can run locally
+HONEYPOT_SERVICES = {
+    "RDP":   {"port": 3389, "protocol": "tcp", "description": "Remote Desktop Protocol"},
+    "SSH":   {"port": 22,   "protocol": "tcp", "description": "Secure Shell"},
+    "FTP":   {"port": 21,   "protocol": "tcp", "description": "File Transfer Protocol"},
+    "MYSQL": {"port": 3306, "protocol": "tcp", "description": "MySQL Database"},
+    "MSSQL": {"port": 1433, "protocol": "tcp", "description": "Microsoft SQL Server"},
+}
+
+# Honeypot service banners (realistic decoys)
+SSH_BANNER = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1"
+FTP_BANNER = "220 (vsFTPd 3.0.5)"
+MYSQL_VERSION = "5.7.38-0ubuntu0.22.04.2"
+MSSQL_VERSION = "Microsoft SQL Server 2019 (RTM-CU18)"
+RDP_CERT_CN = "WIN-HONEYPOT"
+
+# Credential capture limits (anti-abuse / rate limiting)
+MAX_CREDENTIAL_LENGTH = 256           # Max length for captured username/password
+MAX_ATTEMPTS_PER_IP_PER_MIN = 10      # Rate limit: max reports per IP+service per minute
+CREDENTIAL_BATCH_SIZE = 10            # Send credentials in batches of this size
+CREDENTIAL_BATCH_INTERVAL = 5         # Seconds between batch sends
+HONEYPOT_AUTO_RESTART_MAX = 3         # Max auto-restart attempts for crashed services
+HONEYPOT_RESTART_BACKOFF = [5, 15, 60]  # Seconds: exponential backoff for restarts
+
+def get_default_services():
+    """Get default service configuration from config file"""
     config = get_app_config()
-    default_ports = config.get("tunnels", {}).get("default_ports", [])
-    tunnels = {}
-    for port_config in default_ports:
-        service = port_config["service"]
-        local_port = port_config["local"]
-        tunnels[service] = {"listen_port": local_port}
-    return tunnels
+    services_cfg = config.get("services", {}).get("honeypots", [])
+    services = {}
+    for svc_cfg in services_cfg:
+        service = svc_cfg["service"].upper()
+        services[service] = {"listen_port": svc_cfg["port"]}
+    return services
 
-def get_port_table():
-    """Get port table from config for GUI display"""
+def get_service_table():
+    """Get service table for GUI display"""
     config = get_app_config()
-    default_ports = config.get("tunnels", {}).get("default_ports", [])
-    port_table = []
-    for port_config in default_ports:
-        local_port = str(port_config["local"])
-        remote_port = str(port_config["remote"]) if port_config["remote"] > 0 else "-"
-        service = port_config["service"]
-        port_table.append((local_port, remote_port, service))
-    return port_table
+    services_cfg = config.get("services", {}).get("honeypots", [])
+    table = []
+    for svc_cfg in services_cfg:
+        port = str(svc_cfg["port"])
+        service = svc_cfg["service"]
+        table.append((port, service))
+    return table
 
-# Tunnel configurations
-DEFAULT_TUNNELS = get_default_tunnels()
-PORT_TABLOSU = get_port_table()
+# Service configurations (loaded from config)
+DEFAULT_SERVICES = get_default_services()
+SERVICE_TABLE = get_service_table()
+
+# Backward compatibility aliases
+DEFAULT_TUNNELS = DEFAULT_SERVICES
+PORT_TABLOSU = [(p, "-", s) for (p, s) in SERVICE_TABLE]
 
 # ===================== WINDOWS INTEGRATION ===================== #
 
@@ -176,14 +204,21 @@ SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
 # ===================== TIMING CONFIGURATION ===================== #
 
 # API and sync intervals (in seconds)
-API_RETRY_INTERVAL = 60          # API connection retry interval
-API_HEARTBEAT_INTERVAL = 60      # API heartbeat send interval
-ATTACK_COUNT_REFRESH = 15        # Attack count refresh interval (was 10s, optimized to 15s)
-DASHBOARD_SYNC_INTERVAL = 45     # Dashboard tunnel sync interval (was 30s, optimized to 45s)
-DASHBOARD_SYNC_CHECK = 10        # Dashboard sync check frequency (was 5s, optimized to 10s)
-API_STARTUP_DELAY = 5            # API startup delay (5 seconds)
-RDP_TRANSITION_TIMEOUT = 120     # RDP transition timeout
-WATCHDOG_INTERVAL = 15           # Tunnel watchdog check interval (was 10s, optimized to 15s)
+API_RETRY_INTERVAL = 60              # API connection retry interval
+API_HEARTBEAT_INTERVAL = 60          # API heartbeat send interval
+ATTACK_COUNT_REFRESH = 15            # Attack count refresh interval
+SERVICE_SYNC_INTERVAL = 45           # Service sync with dashboard (was DASHBOARD_SYNC_INTERVAL)
+SERVICE_SYNC_CHECK = 10              # Service sync check frequency (was DASHBOARD_SYNC_CHECK)
+BLOCK_POLL_INTERVAL = 30             # Firewall block rule polling interval
+PORT_REPORT_INTERVAL = 300           # Open port reporting interval
+API_STARTUP_DELAY = 5                # API startup delay
+RDP_TRANSITION_TIMEOUT = 120         # RDP transition timeout
+SERVICE_WATCHDOG_INTERVAL = 15       # Service watchdog check interval (was WATCHDOG_INTERVAL)
+
+# Backward compatibility aliases for timing
+DASHBOARD_SYNC_INTERVAL = SERVICE_SYNC_INTERVAL
+DASHBOARD_SYNC_CHECK = SERVICE_SYNC_CHECK
+WATCHDOG_INTERVAL = SERVICE_WATCHDOG_INTERVAL
 
 # ===================== LOGGING CONFIGURATION ===================== #
 
@@ -259,8 +294,18 @@ __all__ = [
     '__version__', 'APP_NAME', 'GITHUB_OWNER', 'GITHUB_REPO',
     
     # Network configuration  
-    'API_URL', 'HONEYPOT_IP', 'HONEYPOT_TUNNEL_PORT', 'CONTROL_HOST', 'CONTROL_PORT',
-    'SERVER_NAME', 'RECV_SIZE', 'CONNECT_TIMEOUT',
+    'API_URL', 'CONTROL_HOST', 'CONTROL_PORT', 'SERVER_NAME', 'CONNECT_TIMEOUT',
+    'HONEYPOT_IP', 'HONEYPOT_TUNNEL_PORT', 'RECV_SIZE',  # deprecated stubs
+    
+    # Honeypot service definitions
+    'HONEYPOT_SERVICES', 'SSH_BANNER', 'FTP_BANNER', 'MYSQL_VERSION', 'MSSQL_VERSION', 'RDP_CERT_CN',
+    'MAX_CREDENTIAL_LENGTH', 'MAX_ATTEMPTS_PER_IP_PER_MIN',
+    'CREDENTIAL_BATCH_SIZE', 'CREDENTIAL_BATCH_INTERVAL',
+    'HONEYPOT_AUTO_RESTART_MAX', 'HONEYPOT_RESTART_BACKOFF',
+    
+    # Service configuration (loaded from config)
+    'DEFAULT_SERVICES', 'SERVICE_TABLE',
+    'DEFAULT_TUNNELS', 'PORT_TABLOSU',  # backward compat aliases
     
     # Security
     'RDP_SECURE_PORT', 'DEFENDER_MARKERS', 'SECURITY_METADATA', 'LEGITIMATE_DOMAINS', 'RESTRICTED_PATHS',
@@ -271,17 +316,16 @@ __all__ = [
     # GUI configuration
     'WINDOW_WIDTH', 'WINDOW_HEIGHT', 'WINDOW_TITLE', 'TRY_TRAY',
     
-    # Tunnel configuration  
-    'DEFAULT_TUNNELS', 'PORT_TABLOSU',
-    
     # Windows integration
     'APP_STARTUP_KEY', 'REGISTRY_KEY_PATH',
     
     # Timing
-    'API_RETRY_INTERVAL', 'API_HEARTBEAT_INTERVAL', 'FILE_HEARTBEAT_INTERVAL', 
-    'ATTACK_COUNT_REFRESH', 'DASHBOARD_SYNC_INTERVAL',
-    'DASHBOARD_SYNC_CHECK', 'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
-    'WATCHDOG_INTERVAL',
+    'API_RETRY_INTERVAL', 'API_HEARTBEAT_INTERVAL', 'FILE_HEARTBEAT_INTERVAL',
+    'ATTACK_COUNT_REFRESH',
+    'SERVICE_SYNC_INTERVAL', 'SERVICE_SYNC_CHECK', 'SERVICE_WATCHDOG_INTERVAL',
+    'BLOCK_POLL_INTERVAL', 'PORT_REPORT_INTERVAL',
+    'DASHBOARD_SYNC_INTERVAL', 'DASHBOARD_SYNC_CHECK', 'WATCHDOG_INTERVAL',  # backward compat
+    'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
     
     # Logging
     'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT', 'LOG_ENCODING', 'LOG_TIME_FORMAT',
@@ -294,5 +338,6 @@ __all__ = [
     'DEBUG_MODE', 'VERBOSE_LOGGING', 'SILENT_ADMIN_ELEVATION', 'SKIP_USER_DIALOGS',
     
     # Helper functions
-    'get_app_config', 'get_app_directory', 'get_window_dimensions', 'get_default_tunnels', 'get_port_table'
+    'get_app_config', 'get_app_directory', 'get_window_dimensions',
+    'get_default_services', 'get_service_table',
 ]

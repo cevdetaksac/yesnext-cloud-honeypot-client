@@ -36,44 +36,32 @@
         "timeout": 30,
         "retry_count": 3
     },
-    "honeypot": {
-        "_comment": "Honeypot server network configuration - can be updated via API in future",
-        "server_ip": "194.5.236.181",
-        "tunnel_port": 4443,
-        "connect_timeout": 8,
-        "receive_buffer_size": 65536,
-        "server_name": null
-    },
-    "tunnels": {
+    "services": {
         "auto_start": false,
         "rdp_port": 53389,
-        "default_ports": [{
-                "local": 3389,
-                "remote": 53389,
+        "honeypots": [
+            {
+                "port": 3389,
                 "service": "RDP",
                 "enabled": true
             },
             {
-                "local": 1433,
-                "remote": 0,
+                "port": 1433,
                 "service": "MSSQL",
                 "enabled": false
             },
             {
-                "local": 3306,
-                "remote": 0,
+                "port": 3306,
                 "service": "MySQL",
                 "enabled": false
             },
             {
-                "local": 21,
-                "remote": 0,
+                "port": 21,
                 "service": "FTP",
                 "enabled": false
             },
             {
-                "local": 22,
-                "remote": 2222,
+                "port": 22,
                 "service": "SSH",
                 "enabled": true
             }

@@ -702,22 +702,15 @@ DEFAULT_CONFIG: dict = {
         "timeout": 30,
         "retry_count": 3
     },
-    "honeypot": {
-        "server_ip": "194.5.236.181",
-        "tunnel_port": 4443,
-        "connect_timeout": 8,
-        "receive_buffer_size": 65536,
-        "server_name": None
-    },
-    "tunnels": {
+    "services": {
         "auto_start": False,
         "rdp_port": 53389,
-        "default_ports": [
-            {"local": 3389, "remote": 53389, "service": "RDP", "enabled": True},
-            {"local": 1433, "remote": 0, "service": "MSSQL", "enabled": False},
-            {"local": 3306, "remote": 0, "service": "MySQL", "enabled": False},
-            {"local": 21, "remote": 0, "service": "FTP", "enabled": False},
-            {"local": 22, "remote": 2222, "service": "SSH", "enabled": False}
+        "honeypots": [
+            {"port": 3389, "service": "RDP", "enabled": True},
+            {"port": 1433, "service": "MSSQL", "enabled": False},
+            {"port": 3306, "service": "MySQL", "enabled": False},
+            {"port": 21, "service": "FTP", "enabled": False},
+            {"port": 22, "service": "SSH", "enabled": False}
         ]
     },
     "updates": {
@@ -792,32 +785,32 @@ def get_from_config(key_path: str, fallback):
     return get_config_value(key_path, fallback)
 
 def get_port_table():
-    """Get port table from configuration file
+    """Get service/port table from configuration file
     
     Returns:
-        List[Tuple[str, str, str]]: Port table in format [(listen_port, new_port, service), ...]
+        List[Tuple[str, str, str]]: Port table in format [(port, "-", service), ...]
+        The middle element is kept as "-" for backward compatibility with GUI code.
     """
     try:
         config = load_config()
-        default_ports = config.get("tunnels", {}).get("default_ports", [])
+        honeypots = config.get("services", {}).get("honeypots", [])
         
         port_table = []
-        for port_config in default_ports:
-            listen_port = str(port_config.get("local", ""))
-            remote_port = str(port_config.get("remote", 0)) if port_config.get("remote", 0) > 0 else "-"
-            service = str(port_config.get("service", ""))
+        for svc_cfg in honeypots:
+            port = str(svc_cfg.get("port", ""))
+            service = str(svc_cfg.get("service", ""))
             
-            if listen_port and service:
-                port_table.append((listen_port, remote_port, service))
+            if port and service:
+                port_table.append((port, "-", service))
         
-        print(f"[CONFIG] Port table loaded from config: {len(port_table)} entries")
+        print(f"[CONFIG] Service table loaded from config: {len(port_table)} entries")
         return port_table
         
     except Exception as e:
-        print(f"[CONFIG] Error loading port table: {e}")
+        print(f"[CONFIG] Error loading service table: {e}")
         # Fallback to default table
         return [
-            ("3389", "53389", "RDP"),
+            ("3389", "-", "RDP"),
             ("1433", "-", "MSSQL"),
             ("3306", "-", "MySQL"),
             ("21", "-", "FTP"),
@@ -831,7 +824,7 @@ def get_rdp_secure_port():
         int: RDP secure port number
     """
     try:
-        return get_config_value("tunnels.rdp_port", 53389)
+        return get_config_value("services.rdp_port", 53389)
     except Exception:
         return 53389
 

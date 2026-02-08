@@ -3,15 +3,16 @@
 Cloud Honeypot Client - API Management Module
 
 Bu modül, Cloud Honeypot sunucusu ile olan tüm API iletişimini yönetir.
-İstemci kaydı, IP güncellemeleri, heartbeat gönderimi, tünel durumu raporlama
-ve saldırı sayısı sorgulama gibi işlemleri merkezileştirir.
+İstemci kaydı, IP güncellemeleri, heartbeat gönderimi, servis durumu raporlama,
+saldırı bildirim (credential capture) ve saldırı sayısı sorgulama işlemlerini
+merkezileştirir.
 
 Sınıflar:
     - HoneypotAPIClient: API ile etkileşim kurmak için ana sınıf.
 
 Fonksiyonlar:
     - api_request_with_token: Token ile API isteği wrapper.
-    - report_tunnel_action_api: Tünel eylemlerini raporlar.
+    - report_service_action_api: Servis eylemlerini raporlar.
 """
 
 # Import constants for timeout values
@@ -71,7 +72,7 @@ class HoneypotAPIClient:
             
             # Sık çağrılan endpointler için sessiz mod
             from client_constants import VERBOSE_LOGGING
-            is_frequent_endpoint = endpoint in ['attack-count', 'agent/heartbeat', 'agent/tunnel-status']
+            is_frequent_endpoint = endpoint in ['attack-count', 'agent/heartbeat', 'agent/service-status']
             show_logs = (verbose_logging or VERBOSE_LOGGING) and not is_frequent_endpoint
             
             if show_logs:
@@ -166,27 +167,30 @@ class HoneypotAPIClient:
             self.log(f"[API] Açık portları raporlama hatası: {e}")
             return False
 
-    def report_tunnel_action(self, token: str, service: str, action: str, new_port: Optional[int] = None) -> bool:
-        """Bir tünel eylemini (başlatma/durdurma) API'ye bildirir."""
+    def report_service_action(self, token: str, service: str, action: str, port: Optional[int] = None) -> bool:
+        """Bir servis eylemini (başlatma/durdurma) API'ye bildirir."""
         try:
             payload = {
                 "token": token,
                 "service": str(service or "").upper(),
                 "action": "start" if action == "start" else "stop",
             }
-            if new_port and str(new_port) != '-':
-                payload["new_port"] = int(str(new_port))
+            if port and str(port) != '-':
+                payload["port"] = int(str(port))
 
             response = self.api_request("POST", "premium/tunnel-set", data=payload)
             if isinstance(response, dict) and response.get("status") in ("queued", "ok", "success"):
-                self.log(f"Tünel eylemi bildirildi: {payload}")
+                self.log(f"Servis eylemi bildirildi: {payload}")
                 return True
             
-            self.log(f"Tünel eylemi bildirimi başarısız: {response}")
+            self.log(f"Servis eylemi bildirimi başarısız: {response}")
             return False
         except Exception as e:
-            self.log(f"Tünel eylemi raporlama hatası: {e}")
+            self.log(f"Servis eylemi raporlama hatası: {e}")
             return False
+
+    # Backward compatibility alias
+    report_tunnel_action = report_service_action
     
     def check_connection(self, max_attempts: int = 5, delay: int = 5) -> bool:
         """API bağlantısını kontrol et - orijinal try_api_connection mantığına uygun"""
@@ -210,15 +214,7 @@ class HoneypotAPIClient:
                         health_data = response.json()
                         if health_data.get("status") == "ok":
                             client_count = health_data.get("clients", 0)
-                            
-                            # OpenCanary servis durumunu da kontrol et
-                            canary_status = health_data.get("opencanary_status", "unknown")
-                            self.log(f"API connection successful - {client_count} clients registered, OpenCanary: {canary_status}")
-                            
-                            # Eğer OpenCanary çalışmıyorsa uyarı ver
-                            if canary_status != "running":
-                                self.log(f"⚠️ WARNING: OpenCanary service is not running! Status: {canary_status}")
-                                
+                            self.log(f"API connection successful - {client_count} clients registered")
                             return True
                     except ValueError:
                         self.log("API health check succeeded but returned invalid JSON")
@@ -239,17 +235,20 @@ class HoneypotAPIClient:
         self.log("[API] Bağlantı kurulamadı!")
         return False
     
-    def get_tunnel_statuses(self, token: str) -> Optional[Dict]:
-        """Tünel durumlarını al"""
+    def get_service_statuses(self, token: str) -> Optional[Dict]:
+        """Servis durumlarını al"""
         try:
             params = {'token': token}
             return self.api_request('GET', 'premium/tunnel-status', params=params)
         except Exception as e:
-            self.log(f"[API] Tünel durumu alma hatası: {e}")
+            self.log(f"[API] Servis durumu alma hatası: {e}")
             return None
     
-    def update_tunnel_statuses(self, token: str, statuses: list) -> bool:
-        """Tünel durumlarını güncelle"""
+    # Backward compatibility alias
+    get_tunnel_statuses = get_service_statuses
+    
+    def update_service_statuses(self, token: str, statuses: list) -> bool:
+        """Servis durumlarını güncelle"""
         try:
             data = {
                 'token': token,
@@ -258,9 +257,89 @@ class HoneypotAPIClient:
             result = self.api_request('POST', 'agent/tunnel-status', data=data)
             return result is not None
         except Exception as e:
-            self.log(f"[API] Tünel durumu güncelleme hatası: {e}")
+            self.log(f"[API] Servis durumu güncelleme hatası: {e}")
             return False
     
+    # Backward compatibility alias
+    update_tunnel_statuses = update_service_statuses
+    
+    def report_attack(self, token: str, attacker_ip: str, target_ip: str,
+                       username: str, password: str, service: str, port: int) -> bool:
+        """Yakalanan saldırı (credential) bilgisini API'ye raporlar.
+        
+        Args:
+            token: Client authentication token
+            attacker_ip: Saldırganın IP adresi
+            target_ip: Hedef (yerel) IP adresi
+            username: Yakalanan kullanıcı adı
+            password: Yakalanan şifre
+            service: Servis türü (RDP, SSH, FTP, MYSQL, MSSQL)
+            port: Hedef port numarası
+            
+        Returns:
+            bool: Raporlama başarılı ise True
+        """
+        try:
+            from client_constants import MAX_CREDENTIAL_LENGTH
+            # Truncate credentials to max length
+            username = str(username or "")[:MAX_CREDENTIAL_LENGTH]
+            password = str(password or "")[:MAX_CREDENTIAL_LENGTH]
+            
+            payload = {
+                "token": token,
+                "attacker_ip": attacker_ip,
+                "target_ip": target_ip,
+                "username": username,
+                "password": password,
+                "service": str(service or "").upper(),
+                "port": int(port),
+            }
+            response = self.api_request("POST", "attack", data=payload)
+            if isinstance(response, dict) and response.get("status") in ("ok", "success", "created"):
+                self.log(f"[API] Saldırı raporlandı: {service}:{port} <- {attacker_ip}")
+                return True
+            
+            self.log(f"[API] Saldırı raporlama başarısız: {response}")
+            return False
+        except Exception as e:
+            self.log(f"[API] Saldırı raporlama hatası: {e}")
+            return False
+    
+    def report_attack_batch(self, token: str, attacks: list) -> bool:
+        """Birden fazla saldırıyı toplu olarak raporlar.
+        
+        Args:
+            token: Client authentication token
+            attacks: Liste of attack dicts with keys:
+                     attacker_ip, target_ip, username, password, service, port
+        Returns:
+            bool: Raporlama başarılı ise True
+        """
+        try:
+            from client_constants import MAX_CREDENTIAL_LENGTH
+            sanitized = []
+            for atk in attacks:
+                sanitized.append({
+                    "attacker_ip": atk.get("attacker_ip", ""),
+                    "target_ip": atk.get("target_ip", ""),
+                    "username": str(atk.get("username", ""))[:MAX_CREDENTIAL_LENGTH],
+                    "password": str(atk.get("password", ""))[:MAX_CREDENTIAL_LENGTH],
+                    "service": str(atk.get("service", "")).upper(),
+                    "port": int(atk.get("port", 0)),
+                })
+            
+            payload = {"token": token, "attacks": sanitized}
+            response = self.api_request("POST", "attacks/batch", data=payload)
+            if isinstance(response, dict) and response.get("status") in ("ok", "success", "created"):
+                self.log(f"[API] {len(sanitized)} saldırı toplu raporlandı")
+                return True
+            
+            self.log(f"[API] Toplu saldırı raporlama başarısız: {response}")
+            return False
+        except Exception as e:
+            self.log(f"[API] Toplu saldırı raporlama hatası: {e}")
+            return False
+
     def get_attack_count(self, token: str) -> Optional[int]:
         """Saldırı sayısını al"""
         try:
@@ -297,12 +376,12 @@ def api_request_with_token(api_client, token: str, method: str, endpoint: str,
             api_client.log(f"[API] Wrapper hatası: {e}")
         return None
 
-# ===================== TUNNEL ACTION REPORTING ===================== #
-# Purpose: Report tunnel state changes to honeypot server
+# ===================== SERVICE ACTION REPORTING ===================== #
+# Purpose: Report service state changes to honeypot server
 
-def report_tunnel_action_api(api_request_func, token: str, service: str, action: str,
-                           new_port: Optional[Union[str, int]] = None, log_func=None) -> bool:
-    """Report tunnel action to API using provided api_request function"""
+def report_service_action_api(api_request_func, token: str, service: str, action: str,
+                           port: Optional[Union[str, int]] = None, log_func=None) -> bool:
+    """Report service action to API using provided api_request function"""
     try:
         if not token:
             if log_func: log_func("Token yok; eylem bildirilemedi")
@@ -313,19 +392,22 @@ def report_tunnel_action_api(api_request_func, token: str, service: str, action:
             "service": str(service or "").upper(),
             "action": action if action in ("start", "stop") else "stop",
         }
-        if new_port and str(new_port) != '-':
-            payload["new_port"] = int(str(new_port))
+        if port and str(port) != '-':
+            payload["port"] = int(str(port))
 
         resp = api_request_func("POST", "premium/tunnel-set", json=payload)
         if isinstance(resp, dict) and resp.get("status") in ("queued", "ok", "success"):
-            if log_func: log_func(f"Tünel eylemi bildirildi: {payload}")
+            if log_func: log_func(f"Servis eylemi bildirildi: {payload}")
             return True
 
-        if log_func: log_func(f"Tünel eylemi bildirimi başarısız: {resp}")
+        if log_func: log_func(f"Servis eylemi bildirimi başarısız: {resp}")
         return False
     except Exception as e:
-        if log_func: log_func(f"Tünel eylemi raporlanırken hata: {e}")
+        if log_func: log_func(f"Servis eylemi raporlanırken hata: {e}")
         return False
+
+# Backward compatibility alias
+report_tunnel_action_api = report_service_action_api
 
 # ===================== CLIENT REGISTRATION ===================== #
 

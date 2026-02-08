@@ -541,9 +541,9 @@ class CloudHoneypotClient:
                     self.state["public_ip"] = ip
                     
                     # GUI update only if IP actually changed (performance optimization)
-                    if ip != last_gui_ip and self.ip_entry:
+                    if ip != last_gui_ip and self.gui:
                         last_gui_ip = ip
-                        self._gui_safe(lambda i=ip: ClientHelpers.safe_set_entry(self.ip_entry, f"{SERVER_NAME} ({i})"))
+                        self._gui_safe(lambda i=ip: self._update_identity_ip(i))
                     
                     # Akıllı heartbeat gönder (online/idle/offline)
                     self.send_heartbeat_once()
@@ -614,11 +614,19 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"[GUI_HEALTH] Session kontrolü hatası: {e}")
 
+    def _update_identity_ip(self, ip: str):
+        """Identity bar IP label'ını güncelle (thread-safe çağrı için)."""
+        try:
+            if self.gui and hasattr(self.gui, '_identity_ip_lbl'):
+                self.gui._identity_ip_lbl.configure(text=f"({ip})")
+        except Exception:
+            pass
+
     def refresh_attack_count(self, async_thread=True):
-        """GUI'deki saldırı sayacını günceller"""
+        """Dashboard kartındaki saldırı sayacını günceller"""
         token = self.state.get("token")
         if not token: return
-        if not self.root or not self.attack_entry: return
+        if not self.root: return
 
         def worker():
             try:
@@ -627,9 +635,7 @@ class CloudHoneypotClient:
                 if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt: return
                     
                 self._last_attack_count = cnt
-                    
-                # GUI thread-safe güncelleme
-                self._gui_safe(lambda c=cnt: ClientHelpers.safe_set_entry(self.attack_entry, str(c)))
+                # Dashboard kart güncelleme (attack_entry kaldırıldı)
             except Exception:
                 pass
                 

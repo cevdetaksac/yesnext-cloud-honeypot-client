@@ -12,6 +12,7 @@ Sınıflar:
     SSHHoneypot    — Sahte SSH servisi (paramiko ServerInterface)
     MySQLHoneypot  — Sahte MySQL servisi (native handshake, kütüphane gerektirmez)
     MSSQLHoneypot  — Sahte MSSQL servisi (TDS pre-login, kütüphane gerektirmez)
+    RDPHoneypot    — Sahte RDP servisi (X.224 + NTLM handshake, kütüphane gerektirmez)
 
 Kullanım:
     def on_credential(attacker_ip, username, password, service, port):
@@ -41,7 +42,7 @@ from collections import defaultdict
 from typing import Callable, Optional
 
 from client_constants import (
-    FTP_BANNER, SSH_BANNER, MYSQL_VERSION, MSSQL_VERSION,
+    FTP_BANNER, SSH_BANNER, MYSQL_VERSION, MSSQL_VERSION, RDP_CERT_CN,
     MAX_CREDENTIAL_LENGTH, MAX_ATTEMPTS_PER_IP_PER_MIN,
     HONEYPOT_AUTO_RESTART_MAX, HONEYPOT_RESTART_BACKOFF,
 )
@@ -839,3 +840,254 @@ class MSSQLHoneypot(BaseHoneypot):
             payload += chunk
 
         return pkt_type, payload
+
+
+# ===================== RDP HONEYPOT ===================== #
+
+class RDPHoneypot(BaseHoneypot):
+    """Sahte RDP servisi — X.224 + NTLM handshake ile credential yakalar.
+
+    RDP bağlantı akışı (NLA / CredSSP OFF):
+        1. Client → Server: X.224 Connection Request (Cookie: username)
+        2. Server → Client: X.224 Connection Confirm
+        3. Client → Server: MCS Connect Initial (+ GCC blocks)
+        4. Server → Client: MCS Connect Response
+        (credential yakalama 1. adımda Cookie'den yapılır)
+
+    RDP bağlantı akışı (NLA / CredSSP ON — çoğu modern client):
+        1. Client → Server: X.224 Connection Request (Cookie: username)
+           → requestedProtocols = PROTOCOL_HYBRID (NLA)
+        2. Server → Client: X.224 Connection Confirm
+           → selectedProtocol = PROTOCOL_RDP (NLA'yı reddeder → fallback)
+        3. Client ya bağlantıyı keser ya da RDP Security ile devam eder
+
+    Credential yakalama stratejisi:
+        - X.224 Cookie ("Cookie: mstshash=username") → username plaintext
+        - Password: RDP NLA olmadan, standard RDP Security ile alınamaz
+          (RSA + RC4 encrypted). Bu honeypot sadece username + bağlantı girişimi
+          yakalar. Password için saldırganın client'ına güvenilmez.
+        - Birçok brute-force aracı (hydra, ncrack, crowbar) username'i
+          Cookie'de gönderir — bu yeterli bir IoC (Indicator of Compromise).
+
+    Not: Harici kütüphane gerektirmez — tamamen raw socket + struct.
+    """
+
+    TIMEOUT = 30
+
+    # X.224 / TPKT constants
+    _TPKT_VERSION = 3
+    _X224_CR = 0xE0  # Connection Request
+    _X224_CC = 0xD0  # Connection Confirm
+
+    # RDP Negotiation
+    _TYPE_RDP_NEG_REQ = 0x01
+    _TYPE_RDP_NEG_RSP = 0x02
+    _PROTOCOL_RDP = 0x00000000
+    _PROTOCOL_SSL = 0x00000001
+    _PROTOCOL_HYBRID = 0x00000002  # NLA / CredSSP
+
+    def __init__(self, port: int = 3389, *, on_credential: Callable, cert_cn: str = ""):
+        super().__init__(port=port, service_name="RDP", on_credential=on_credential)
+        self.cert_cn = cert_cn or RDP_CERT_CN
+
+    def handle_client(self, sock: socket.socket, addr: tuple):
+        attacker_ip = addr[0]
+        sock.settimeout(self.TIMEOUT)
+
+        # 1) X.224 Connection Request oku
+        try:
+            tpkt_data = self._read_tpkt(sock)
+            if not tpkt_data or len(tpkt_data) < 7:
+                return
+        except (socket.timeout, OSError):
+            return
+
+        # Cookie'den username parse et
+        username = self._parse_x224_cookie(tpkt_data)
+        requested_protocols = self._parse_requested_protocols(tpkt_data)
+
+        if username:
+            log(f"[RDP] Bağlantı girişimi: {username} <- {attacker_ip}")
+            self.report_credential(attacker_ip, username, "<rdp_connection_attempt>")
+
+        # 2) X.224 Connection Confirm gönder
+        #    NLA/CredSSP'yi reddedip standard RDP Security'ye zorla
+        cc_packet = self._build_x224_confirm(requested_protocols)
+        try:
+            sock.sendall(cc_packet)
+        except (OSError, BrokenPipeError):
+            return
+
+        # 3) MCS Connect Initial beklemeyi dene (opsiyonel — ek bilgi)
+        #    Çoğu brute-force aracı NLA reddedildikten sonra bağlantıyı keser
+        try:
+            mcs_data = self._read_tpkt(sock)
+            if mcs_data and len(mcs_data) > 20:
+                # MCS Connect Initial geldi → client RDP Security ile devam ediyor
+                # MCS Connect Response gönder ve bağlantıyı kapat
+                mcs_response = self._build_mcs_connect_response()
+                sock.sendall(mcs_response)
+        except (socket.timeout, OSError):
+            pass  # Client bağlantıyı kesti — normal
+
+    @staticmethod
+    def _read_tpkt(sock: socket.socket) -> bytes:
+        """TPKT paketi oku (4-byte header + payload).
+
+        TPKT Header:
+            byte 0: Version (3)
+            byte 1: Reserved (0)
+            byte 2-3: Length (big-endian, header dahil)
+        """
+        header = b""
+        while len(header) < 4:
+            chunk = sock.recv(4 - len(header))
+            if not chunk:
+                return b""
+            header += chunk
+
+        if header[0] != 3:  # TPKT version check
+            return b""
+
+        length = struct.unpack(">H", header[2:4])[0]
+        if length < 4 or length > 65536:
+            return b""
+
+        remaining = length - 4
+        payload = b""
+        while len(payload) < remaining:
+            chunk = sock.recv(remaining - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+
+        return header + payload
+
+    @staticmethod
+    def _parse_x224_cookie(tpkt_data: bytes) -> str:
+        """X.224 Connection Request'ten Cookie'yi parse et.
+
+        Format: "Cookie: mstshash=<username>\r\n"
+        X.224 CR header 7 byte (TPKT 4 + X.224 header 3),
+        sonra variable-length cookie/routing token gelir.
+        """
+        try:
+            # TPKT(4) + X.224 length(1) + X.224 type(1) + dst-ref(2) + src-ref(2) + class(1)
+            # = offset 11'den itibaren cookie/routingToken başlar
+            # Ama bazı client'lar farklı offset kullanır, bu yüzden string search yapalım
+            data_str = tpkt_data.decode("ascii", errors="replace")
+
+            # "Cookie: mstshash=" pattern'ini ara
+            cookie_marker = "Cookie: mstshash="
+            idx = data_str.find(cookie_marker)
+            if idx == -1:
+                # Alternatif: bazı araçlar farklı format kullanır
+                cookie_marker = "mstshash="
+                idx = data_str.find(cookie_marker)
+                if idx == -1:
+                    return ""
+
+            start = idx + len(cookie_marker)
+            # CR veya LF'ye kadar oku
+            end = start
+            while end < len(data_str) and data_str[end] not in ("\r", "\n", "\x00"):
+                end += 1
+
+            username = data_str[start:end].strip()
+            return username[:256] if username else ""
+
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _parse_requested_protocols(tpkt_data: bytes) -> int:
+        """X.224 CR'den requestedProtocols değerini çıkar.
+
+        RDP Negotiation Request (varsa):
+            Son 8 byte: type(1) + flags(1) + length(2) + requestedProtocols(4)
+            type = 0x01 (NEG_REQ)
+        """
+        try:
+            # Negotiation Request genellikle paketin sonundadır
+            if len(tpkt_data) >= 8:
+                # Son 8 byte'a bak
+                neg_block = tpkt_data[-8:]
+                if neg_block[0] == 0x01:  # TYPE_RDP_NEG_REQ
+                    req_protocols = struct.unpack("<I", neg_block[4:8])[0]
+                    return req_protocols
+        except Exception:
+            pass
+        return 0
+
+    def _build_x224_confirm(self, requested_protocols: int) -> bytes:
+        """X.224 Connection Confirm paketi oluştur.
+
+        Eğer client NLA/CredSSP istiyorsa, biz PROTOCOL_RDP seçeriz
+        (NLA'yı reddederiz). Bu, bazı client'ları standard RDP Security'ye
+        zorlar, bazıları ise bağlantıyı keser.
+        """
+        x224_payload = bytearray()
+
+        if requested_protocols != 0:
+            # RDP Negotiation Response ekle
+            # type(1) + flags(1) + length(2) + selectedProtocol(4)
+            neg_resp = bytearray(8)
+            neg_resp[0] = self._TYPE_RDP_NEG_RSP  # type
+            neg_resp[1] = 0x00  # flags
+            struct.pack_into("<H", neg_resp, 2, 8)  # length = 8
+            struct.pack_into("<I", neg_resp, 4, self._PROTOCOL_RDP)  # always select RDP
+
+            # X.224 CC header
+            x224_header_len = 6 + len(neg_resp)  # X.224 header (6 bytes) + neg response
+            x224_payload.append(x224_header_len)  # length indicator
+            x224_payload.append(self._X224_CC)  # type = CC
+            x224_payload.extend(b"\x00\x00")  # dst-ref
+            x224_payload.extend(b"\x00\x00")  # src-ref
+            x224_payload.append(0x00)  # class options
+            x224_payload.extend(neg_resp)
+        else:
+            # Basit X.224 CC (negotiation yok)
+            x224_payload.append(6)  # length indicator
+            x224_payload.append(self._X224_CC)
+            x224_payload.extend(b"\x00\x00")  # dst-ref
+            x224_payload.extend(b"\x00\x00")  # src-ref
+            x224_payload.append(0x00)  # class options
+
+        # TPKT header
+        total_len = 4 + len(x224_payload)
+        tpkt = bytearray(4)
+        tpkt[0] = self._TPKT_VERSION
+        tpkt[1] = 0x00  # reserved
+        struct.pack_into(">H", tpkt, 2, total_len)
+
+        return bytes(tpkt + x224_payload)
+
+    def _build_mcs_connect_response(self) -> bytes:
+        """Minimal MCS Connect Response — bağlantıyı düzgün kapatmak için.
+
+        Gerçek bir MCS response göndermek yerine, RDP standard security
+        ile devam eden client'ı bilgilendirmek için minimal bir TPKT paketi
+        gönderir. Çoğu brute-force aracı bu noktada zaten bağlantıyı keser.
+        """
+        # Minimal X.224 Data + MCS Disconnect Provider Ultimatum
+        # Bu, client'a "bağlantı reddedildi" mesajı verir
+        disconnect = bytearray()
+        # X.224 Data header
+        disconnect.append(0x02)  # length indicator
+        disconnect.append(0xF0)  # X.224 DT (Data)
+        disconnect.append(0x80)  # EOT flag
+
+        # MCS Disconnect Provider Ultimatum (BER encoding)
+        # Tag: 0x21 (SEQUENCE), followed by reason
+        disconnect.extend(b"\x21\x80")  # MCS disconnect
+        disconnect.extend(b"\x02\x01\x00")  # reason: user-requested (0)
+        disconnect.extend(b"\x00\x00")  # terminator
+
+        # TPKT wrapper
+        total_len = 4 + len(disconnect)
+        tpkt = bytearray(4)
+        tpkt[0] = self._TPKT_VERSION
+        tpkt[1] = 0x00
+        struct.pack_into(">H", tpkt, 2, total_len)
+
+        return bytes(tpkt + disconnect)

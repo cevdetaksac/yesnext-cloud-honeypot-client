@@ -38,8 +38,9 @@ RequestExecutionLevel admin
 ; Finish page - "Run after install" checkbox (checked by default)
 !define MUI_FINISHPAGE_TITLE "Setup Complete"
 !define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} has been installed successfully.$\r$\n$\r$\nDesktop shortcut has been created.$\r$\nSystem is ready for security monitoring.$\r$\n$\r$\nCheck the box below to launch the application now."
-!define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
+!define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Launch Cloud Honeypot Client now"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchAsCurrentUser
 !define MUI_FINISHPAGE_RUN_CHECKED
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 !insertmacro MUI_PAGE_FINISH
@@ -59,6 +60,12 @@ Var LogFile
 ; ===================================================================
 ; UTILITY FUNCTIONS
 ; ===================================================================
+
+; Launch app as current (non-elevated) user via explorer shell
+Function LaunchAsCurrentUser
+    ; Use explorer.exe to launch as the logged-in user (de-elevated)
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\honeypot-client.exe"'
+FunctionEnd
 
 ; Simple log function
 Function WriteLog

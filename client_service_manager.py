@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Cloud Honeypot Client - Service Manager
+
+Tüm honeypot servislerinin yaşam döngüsünü yönetir:
+    - Dashboard config ile senkronizasyon (start/stop reconciliation)
+    - Credential yakalama → queue → batch API reporting
+    - Watchdog: çökmüş servisleri otomatik yeniden başlatma
+    - RDP özel yönetimi (port migration ile koordinasyon)
+
+Thread yapısı (3 daemon thread):
+    _batch_reporter_loop  — Queue'dan credential'ları topla, API'ye batch gönder
+    _sync_loop            — Dashboard'dan istenen durumları al, reconcile et
+    _watchdog_loop        — Servis sağlığını kontrol et, auto-restart
+
+Kullanım:
+    from client_service_manager import ServiceManager
+    from client_api import ClientAPI
+
+    api = ClientAPI(token="...", target_ip="...")
+    mgr = ServiceManager(api_client=api)
+    mgr.start()
+    ...
+    mgr.shutdown()
+"""
+
+import queue
+import threading
+import time
+from typing import Callable, Dict, Optional
+
+from client_constants import (
+    HONEYPOT_SERVICES,
+    CREDENTIAL_BATCH_SIZE, CREDENTIAL_BATCH_INTERVAL,
+    SERVICE_SYNC_INTERVAL, SERVICE_SYNC_CHECK,
+    SERVICE_WATCHDOG_INTERVAL,
+    HONEYPOT_AUTO_RESTART_MAX, HONEYPOT_RESTART_BACKOFF,
+)
+from client_helpers import log
+from client_honeypots import (
+    BaseHoneypot,
+    FTPHoneypot,
+    SSHHoneypot,
+    MySQLHoneypot,
+    MSSQLHoneypot,
+    RDPHoneypot,
+)
+
+
+# ===================== SERVICE FACTORY ===================== #
+
+_HONEYPOT_CLASSES: Dict[str, type] = {
+    "FTP":   FTPHoneypot,
+    "SSH":   SSHHoneypot,
+    "MYSQL": MySQLHoneypot,
+    "MSSQL": MSSQLHoneypot,
+    "RDP":   RDPHoneypot,
+}
+
+
+def _create_honeypot(service_name: str, port: int,
+                     on_credential: Callable) -> BaseHoneypot:
+    """Factory: servis adına göre doğru honeypot sınıfını oluşturur."""
+    cls = _HONEYPOT_CLASSES.get(service_name.upper())
+    if cls is None:
+        raise ValueError(f"Bilinmeyen honeypot servisi: {service_name}")
+    return cls(port=port, on_credential=on_credential)
+
+
+# ===================== SERVICE MANAGER ===================== #
+
+class ServiceManager:
+    """Tüm honeypot servislerinin merkezi yöneticisi.
+
+    Sorumluluklar:
+        1. Honeypot instance oluşturma / başlatma / durdurma
+        2. Credential callback → queue → batch API reporting
+        3. Dashboard reconciliation (istenen durum vs gerçek durum)
+        4. Watchdog: çökmüş servisleri auto-restart (exponential backoff)
+    """
+
+    def __init__(self, api_client, rdp_manager=None):
+        """
+        Args:
+            api_client: ClientAPI instance — report_attack_batch, get_service_statuses,
+                        update_service_statuses, report_service_action metodlarını sağlar
+            rdp_manager: RDPManager instance (opsiyonel) — RDP port migration koordinasyonu
+        """
+        self._api = api_client
+        self._rdp_manager = rdp_manager
+
+        # Honeypot instances: {"SSH": SSHHoneypot(...), "FTP": FTPHoneypot(...), ...}
+        self._honeypots: Dict[str, BaseHoneypot] = {}
+        self._lock = threading.Lock()
+
+        # Attack queue — honeypot callback'leri buraya yazar, batch thread okur
+        self._attack_queue: queue.Queue = queue.Queue(maxsize=10000)
+
+        # Auto-restart tracking
+        self._restart_counts: Dict[str, int] = {}
+        self._restart_timestamps: Dict[str, float] = {}
+
+        # Reconciliation pause flag (RDP transition sırasında)
+        self.reconciliation_paused = False
+
+        # Shutdown signal
+        self._stop_evt = threading.Event()
+
+        # Daemon threads
+        self._threads: list[threading.Thread] = []
+
+    # ==================== PUBLIC API ==================== #
+
+    def start(self):
+        """3 daemon thread'i başlat — non-blocking."""
+        if self._stop_evt.is_set():
+            self._stop_evt.clear()
+
+        threads_spec = [
+            ("SvcMgr-BatchReporter", self._batch_reporter_loop),
+            ("SvcMgr-Sync", self._sync_loop),
+            ("SvcMgr-Watchdog", self._watchdog_loop),
+        ]
+        for name, target in threads_spec:
+            t = threading.Thread(target=target, daemon=True, name=name)
+            t.start()
+            self._threads.append(t)
+        log("[ServiceManager] Başlatıldı (3 thread)")
+
+    def shutdown(self):
+        """Tüm servisleri durdur, queue'yu flush et, thread'leri sonlandır."""
+        log("[ServiceManager] Kapatılıyor...")
+        self._stop_evt.set()
+
+        # Tüm honeypotları durdur
+        with self._lock:
+            for name, hp in list(self._honeypots.items()):
+                try:
+                    hp.stop()
+                    log(f"[ServiceManager] {name} durduruldu")
+                except Exception as exc:
+                    log(f"[ServiceManager] {name} durdurma hatası: {exc}")
+            self._honeypots.clear()
+
+        # Kalan credential'ları flush et
+        self._flush_queue()
+
+        log("[ServiceManager] Kapatıldı")
+
+    def start_service(self, service_name: str, port: int) -> bool:
+        """Bir honeypot servisini başlat.
+
+        Returns:
+            True  — başarıyla başlatıldı
+            False — hata (port çakışması, bilinmeyen servis, vb.)
+        """
+        service_name = service_name.upper()
+
+        with self._lock:
+            # Zaten çalışıyorsa skip
+            existing = self._honeypots.get(service_name)
+            if existing and existing.running:
+                log(f"[ServiceManager] {service_name} zaten çalışıyor (port {existing.port})")
+                return True
+
+            # Eski instance varsa temizle
+            if existing:
+                try:
+                    existing.stop()
+                except Exception:
+                    pass
+
+        try:
+            hp = _create_honeypot(service_name, port, self._on_credential)
+            hp.start()
+
+            # Kısa süre bekle — bind hatası olup olmadığını kontrol et
+            time.sleep(0.5)
+            if hp.error:
+                log(f"[ServiceManager] {service_name} başlatma hatası: {hp.error}")
+                return False
+
+            with self._lock:
+                self._honeypots[service_name] = hp
+                self._restart_counts[service_name] = 0  # Reset restart counter
+
+            log(f"[ServiceManager] {service_name} başlatıldı (port {port})")
+            self._report_action(service_name, port, "started")
+            return True
+
+        except Exception as exc:
+            log(f"[ServiceManager] {service_name} oluşturma hatası: {exc}")
+            return False
+
+    def stop_service(self, service_name: str) -> bool:
+        """Bir honeypot servisini durdur."""
+        service_name = service_name.upper()
+
+        with self._lock:
+            hp = self._honeypots.pop(service_name, None)
+
+        if hp is None:
+            log(f"[ServiceManager] {service_name} zaten durmuş")
+            return True
+
+        port = hp.port
+        try:
+            hp.stop()
+        except Exception as exc:
+            log(f"[ServiceManager] {service_name} durdurma hatası: {exc}")
+
+        self._report_action(service_name, port, "stopped")
+        return True
+
+    def restart_service(self, service_name: str, port: int) -> bool:
+        """Servisi dur-kalk ile yeniden başlat."""
+        self.stop_service(service_name)
+        time.sleep(1)
+        return self.start_service(service_name, port)
+
+    def get_status(self, service_name: str) -> str:
+        """Tek bir servisin durumunu döndür: started | stopped | error."""
+        with self._lock:
+            hp = self._honeypots.get(service_name.upper())
+        if hp is None:
+            return "stopped"
+        return hp.get_status()
+
+    def get_all_statuses(self) -> Dict[str, dict]:
+        """Tüm servislerin durumlarını döndür.
+
+        Returns:
+            {"SSH": {"status": "started", "port": 22}, ...}
+        """
+        result = {}
+        with self._lock:
+            for name, hp in self._honeypots.items():
+                result[name] = {
+                    "status": hp.get_status(),
+                    "port": hp.port,
+                    "error": hp.error,
+                }
+        # Çalışmayan servisleri de ekle
+        for name in HONEYPOT_SERVICES:
+            if name not in result:
+                result[name] = {
+                    "status": "stopped",
+                    "port": HONEYPOT_SERVICES[name]["port"],
+                    "error": None,
+                }
+        return result
+
+    @property
+    def running_services(self) -> list[str]:
+        """Çalışan servis adlarının listesi."""
+        with self._lock:
+            return [n for n, hp in self._honeypots.items() if hp.running]
+
+    # ==================== CREDENTIAL CALLBACK ==================== #
+
+    def _on_credential(self, *, attacker_ip: str, username: str,
+                       password: str, service: str, port: int):
+        """Her honeypot bu callback'i çağırır — queue'ya yazar."""
+        entry = {
+            "attacker_ip": attacker_ip,
+            "username": username,
+            "password": password,
+            "service": service,
+            "port": port,
+            "timestamp": time.time(),
+        }
+        try:
+            self._attack_queue.put_nowait(entry)
+        except queue.Full:
+            log(f"[ServiceManager] Attack queue dolu — credential atılıyor ({service})")
+
+    # ==================== BATCH REPORTER THREAD ==================== #
+
+    def _batch_reporter_loop(self):
+        """Queue'dan credential'ları topla, batch olarak API'ye gönder."""
+        log("[BatchReporter] Başlatıldı")
+        while not self._stop_evt.is_set():
+            try:
+                batch = self._drain_queue(max_items=CREDENTIAL_BATCH_SIZE)
+                if batch:
+                    self._send_batch(batch)
+            except Exception as exc:
+                log(f"[BatchReporter] Hata: {exc}")
+
+            # CREDENTIAL_BATCH_INTERVAL kadar bekle (stop event ile kesilebilir)
+            self._stop_evt.wait(timeout=CREDENTIAL_BATCH_INTERVAL)
+
+    def _drain_queue(self, max_items: int) -> list[dict]:
+        """Queue'dan max_items kadar credential çek."""
+        items = []
+        for _ in range(max_items):
+            try:
+                item = self._attack_queue.get_nowait()
+                items.append(item)
+            except queue.Empty:
+                break
+        return items
+
+    def _send_batch(self, batch: list[dict]):
+        """Credential batch'ini API'ye gönder."""
+        try:
+            attacks = []
+            for entry in batch:
+                attacks.append({
+                    "attacker_ip": entry["attacker_ip"],
+                    "username": entry["username"],
+                    "password": entry["password"],
+                    "service": entry["service"],
+                    "port": entry["port"],
+                })
+            success = self._api.report_attack_batch(attacks)
+            if success:
+                log(f"[BatchReporter] {len(attacks)} credential gönderildi")
+            else:
+                log(f"[BatchReporter] API batch gönderimi başarısız ({len(attacks)} kayıt)")
+        except Exception as exc:
+            log(f"[BatchReporter] API hatası: {exc}")
+
+    def _flush_queue(self):
+        """Kalan tüm credential'ları gönder (shutdown sırasında)."""
+        remaining = self._drain_queue(max_items=1000)
+        if remaining:
+            log(f"[ServiceManager] Flush: {len(remaining)} kalan credential gönderiliyor")
+            self._send_batch(remaining)
+
+    # ==================== SYNC THREAD ==================== #
+
+    def _sync_loop(self):
+        """Dashboard'dan istenen durumları al, yerel durumla karşılaştır."""
+        log("[SyncLoop] Başlatıldı")
+        last_sync = 0
+
+        while not self._stop_evt.is_set():
+            now = time.time()
+
+            if now - last_sync >= SERVICE_SYNC_INTERVAL:
+                if not self.reconciliation_paused:
+                    self._do_reconcile()
+                    self._report_statuses()
+                last_sync = now
+
+            self._stop_evt.wait(timeout=SERVICE_SYNC_CHECK)
+
+    def _do_reconcile(self):
+        """Dashboard desired state vs local actual state → start/stop."""
+        try:
+            desired = self._api.get_service_statuses()
+            if not desired:
+                return  # API hatası veya boş yanıt
+
+            for service_name, info in desired.items():
+                service_name = service_name.upper()
+                want_running = info.get("status") == "started"
+                port = info.get("port", HONEYPOT_SERVICES.get(service_name, {}).get("port", 0))
+
+                current_status = self.get_status(service_name)
+                is_running = current_status == "started"
+
+                if want_running and not is_running:
+                    log(f"[Reconcile] {service_name} başlatılıyor (dashboard isteği)")
+                    self.start_service(service_name, port)
+
+                elif not want_running and is_running:
+                    log(f"[Reconcile] {service_name} durduruluyor (dashboard isteği)")
+                    self.stop_service(service_name)
+
+        except Exception as exc:
+            log(f"[Reconcile] Hata: {exc}")
+
+    def _report_statuses(self):
+        """Güncel durumları API'ye bildir."""
+        try:
+            statuses = self.get_all_statuses()
+            status_list = []
+            for name, info in statuses.items():
+                status_list.append({
+                    "service": name,
+                    "port": info["port"],
+                    "status": info["status"],
+                })
+            self._api.update_service_statuses(status_list)
+        except Exception as exc:
+            log(f"[StatusReport] Hata: {exc}")
+
+    # ==================== WATCHDOG THREAD ==================== #
+
+    def _watchdog_loop(self):
+        """Servis sağlığını kontrol et, çökmüş servisleri yeniden başlat."""
+        log("[Watchdog] Başlatıldı")
+        while not self._stop_evt.is_set():
+            self._stop_evt.wait(timeout=SERVICE_WATCHDOG_INTERVAL)
+            if self._stop_evt.is_set():
+                break
+
+            with self._lock:
+                services_snapshot = list(self._honeypots.items())
+
+            for name, hp in services_snapshot:
+                # Thread alive ama running=False → çökmüş olabilir
+                if not hp.is_alive() or hp.error:
+                    self._handle_crashed_service(name, hp.port)
+
+    def _handle_crashed_service(self, service_name: str, port: int):
+        """Çökmüş bir servisi exponential backoff ile yeniden başlat."""
+        count = self._restart_counts.get(service_name, 0)
+
+        if count >= HONEYPOT_AUTO_RESTART_MAX:
+            log(f"[Watchdog] {service_name} max restart sınırına ulaştı ({HONEYPOT_AUTO_RESTART_MAX})")
+            # Honeypot'u temizle — artık otomatik başlatılmayacak
+            with self._lock:
+                self._honeypots.pop(service_name, None)
+            self._report_action(service_name, port, "stopped")
+            return
+
+        # Backoff süresi hesapla
+        backoff_idx = min(count, len(HONEYPOT_RESTART_BACKOFF) - 1)
+        backoff_secs = HONEYPOT_RESTART_BACKOFF[backoff_idx]
+
+        # Son restart'tan yeterli süre geçti mi?
+        last_restart = self._restart_timestamps.get(service_name, 0)
+        elapsed = time.time() - last_restart
+        if elapsed < backoff_secs:
+            return  # Henüz backoff süresi dolmadı
+
+        log(f"[Watchdog] {service_name} yeniden başlatılıyor (deneme {count + 1}/{HONEYPOT_AUTO_RESTART_MAX}, backoff={backoff_secs}s)")
+
+        self._restart_counts[service_name] = count + 1
+        self._restart_timestamps[service_name] = time.time()
+
+        # Eski instance'ı temizle
+        with self._lock:
+            old = self._honeypots.pop(service_name, None)
+            if old:
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+
+        # Yeni instance başlat
+        self.start_service(service_name, port)
+
+    # ==================== HELPERS ==================== #
+
+    def _report_action(self, service_name: str, port: int, action: str):
+        """Servis durum değişikliğini API'ye bildir."""
+        try:
+            self._api.report_service_action(service_name, port, action)
+        except Exception as exc:
+            log(f"[ServiceManager] Action report hatası ({service_name}): {exc}")

@@ -41,7 +41,7 @@ def create_heartbeat_file(app_dir: str) -> str:
             "last_heartbeat": dt.datetime.now().isoformat(),
             "status": "initializing",
             "admin_privileges": ctypes.windll.shell32.IsUserAnAdmin() if os.name == 'nt' else False,
-            "active_tunnels": 0,
+            "active_services": 0,
             "api_connected": False
         }
         
@@ -81,7 +81,11 @@ def update_heartbeat_file(heartbeat_path: str, app_instance=None) -> bool:
         # Update status information if app instance is available
         if app_instance:
             heartbeat_data["status"] = "running"
-            heartbeat_data["active_tunnels"] = len(app_instance.state.get("servers", {}))
+            # ServiceManager üzerinden aktif servis sayısını al
+            if hasattr(app_instance, 'service_manager'):
+                heartbeat_data["active_services"] = len(app_instance.service_manager.running_services)
+            else:
+                heartbeat_data["active_services"] = 0
             heartbeat_data["api_connected"] = bool(app_instance.state.get("token"))
         else:
             heartbeat_data["status"] = "running"

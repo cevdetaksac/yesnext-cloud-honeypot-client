@@ -2,20 +2,22 @@
 # -*- coding: utf-8 -*-
 """Cloud Honeypot Client — main application orchestrator.
 
-Coordinates GUI/tray display, API communication, tunnel management,
+Coordinates GUI/tray display, API communication, honeypot service management,
 RDP operations, and background health monitoring. Runs in two modes:
 
   GUI mode  — Tkinter window + system tray, update watchdog thread (1 hr)
   Daemon    — Headless via Task Scheduler, auto-updates every 2 hrs
 
 Modules:
-  client_api / client_networking  — API layer, tunnel operations
-  client_rdp / client_firewall    — RDP port mgmt, firewall rules
+  client_api                     — API layer
+  client_honeypots               — Honeypot service implementations (FTP, SSH, MySQL, MSSQL, RDP)
+  client_service_manager         — Central service lifecycle manager
+  client_rdp / client_firewall   — RDP port mgmt, firewall rules
   client_monitoring / client_security — Health checks, Defender compat
-  client_updater / client_tray    — Auto-update, system tray
+  client_updater / client_tray   — Auto-update, system tray
   client_instance / client_logging — Singleton control, log setup
   client_tokens / client_task_scheduler — Auth tokens, scheduled tasks
-  client_memory_restart           — Memory-threshold restart
+  client_memory_restart          — Memory-threshold restart
   client_helpers / client_utils / client_constants — Shared utilities
 
 Exit codes: 0 normal, 1 critical error, 2 another instance running, 3 health-check fail.
@@ -32,8 +34,9 @@ import webbrowser, logging
 from client_firewall import FirewallAgent
 from client_helpers import log, ClientHelpers, run_cmd
 import client_helpers
-from client_networking import TunnelServerThread, NetworkingHelpers, TunnelManager, set_config_function, load_network_config
-from client_api import HoneypotAPIClient, api_request_with_token, report_tunnel_action_api
+from client_service_manager import ServiceManager
+from client_api import HoneypotAPIClient, api_request_with_token
+from client_helpers import is_port_in_use
 from client_tokens import create_token_manager, get_token_file_paths
 from client_task_scheduler import perform_comprehensive_task_management
 from client_utils import (ServiceController, load_i18n, install_excepthook, 
@@ -44,8 +47,8 @@ from client_utils import (ServiceController, load_i18n, install_excepthook,
 # Import constants from central configuration
 from client_constants import (
     GUI_MODE, DAEMON_MODE, API_URL, APP_DIR, LOG_FILE,
-    TRY_TRAY, RDP_SECURE_PORT, HONEYPOT_IP, 
-    HONEYPOT_TUNNEL_PORT, SERVER_NAME, DEFAULT_TUNNELS,
+    TRY_TRAY, RDP_SECURE_PORT,
+    SERVER_NAME, HONEYPOT_SERVICES,
     API_STARTUP_DELAY, API_RETRY_INTERVAL, API_SLOW_RETRY_DELAY,
     API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH,
     CONSENT_FILE, STATUS_FILE,
@@ -145,11 +148,6 @@ class CloudHoneypotClient:
         # Load configuration directly - pure config-driven architecture
         self.config = load_config()
         
-        # Initialize networking configuration
-        set_config_function(get_from_config)
-        load_network_config()
-        log(f"Network configuration loaded: {HONEYPOT_IP}:{HONEYPOT_TUNNEL_PORT}")
-        
         # Initialize language with safe fallback from config
         try:
             lang = self.config["language"]["selected"]
@@ -170,15 +168,17 @@ class CloudHoneypotClient:
         
         # Initialize application state FIRST
         self.state = {
-            "running": False, "servers": {}, "token": None,
+            "running": False, "token": None,
             "public_ip": None, "tray": None, "selected_rows": [],
             "selected_ports_map": None, "ctrl_sock": None,
-            "reconciliation_paused": False, "remote_desired": {}
         }
         
         # Initialize RDP Management modules
         self.rdp_manager = RDPManager(main_app=self)
         self.rdp_popup_manager = RDPPopupManager(main_app=self, translation_func=self.t)
+        
+        # Initialize Service Manager — central lifecycle manager for all honeypots
+        self.service_manager = ServiceManager(api_client=self.api_client, rdp_manager=self.rdp_manager)
         
         # Load token early - before any API operations
         try:
@@ -355,11 +355,9 @@ class CloudHoneypotClient:
             # API retry thread'ini başlat
             threading.Thread(target=self.api_retry_loop, daemon=True).start()
             
-            # Dashboard tunnel sync başlat
-            if not any(t.name == "tunnel_sync_loop" and t.is_alive() for t in threading.enumerate()):
-                from client_networking import TunnelManager
-                threading.Thread(target=TunnelManager.tunnel_sync_loop, args=(self,), name="tunnel_sync_loop", daemon=True).start()
-                log("Dashboard tunnel sync loop başlatıldı (8s interval, 3s check)")
+            # ServiceManager daemon thread'lerini başlat (sync, watchdog, batch reporter)
+            self.service_manager.start()
+            log("ServiceManager başlatıldı (sync + watchdog + batch reporter)")
 
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
@@ -499,12 +497,12 @@ class CloudHoneypotClient:
             self.api_client.update_client_ip(token, new_ip)
 
     def get_intelligent_status(self) -> str:
-        """Determine intelligent status based on program and tunnel state"""
+        """Determine intelligent status based on program and service state"""
         # Program açık olduğu kesin (çünkü bu kod çalışıyor)
-        active_servers = self.state.get("servers", {})
+        active_services = self.service_manager.running_services
         
-        if active_servers: return "online"  # en az bir tunnel aktif
-        # Program açık ama tunnel yok → idle
+        if active_services: return "online"  # en az bir servis aktif
+        # Program açık ama servis yok → idle
         return "idle"
 
     def send_heartbeat_once(self, status_override: Optional[str] = None):
@@ -565,9 +563,9 @@ class CloudHoneypotClient:
             self.root.winfo_exists()
             self.gui_health['update_count'] += 1
             
-            # Tray icon update — only if tunnel state changed
+            # Tray icon update — only if service state changed
             if hasattr(self, 'tray_manager'):
-                current_state = bool(self.state.get("servers"))
+                current_state = len(self.service_manager.running_services) > 0
                 if not hasattr(self, '_last_tray_state') or current_state != self._last_tray_state:
                     self._last_tray_state = current_state
                     self.update_tray_icon()
@@ -821,21 +819,21 @@ class CloudHoneypotClient:
         """Show RDP port change confirmation popup using modular RDP system"""
         # mode: "secure" (3389->53389) or "rollback" (53389->3389)
         with self.reconciliation_lock:
-            self.state["reconciliation_paused"] = True
-            log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.RDP geçişi için API senkronizasyonu duraklatıldı.")
+            self.service_manager.reconciliation_paused = True
+            log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
         
         def on_confirm_wrapped():
             """Wrapper for confirmation callback with additional handling"""
             try:
                 log("✅ Kullanıcı RDP geçişini onayladı, işlem tamamlanıyor...")
                 
-                # Callback'i çağır (tünelleri başlat vs.)
+                # Callback'i çağır (servisleri başlat vs.)
                 on_confirm()
                 
                 # Update GUI state
                 if hasattr(self, 'btn_primary') and self.btn_primary:
                     self.btn_primary.after(0, lambda: ClientHelpers.set_primary_button(
-                        self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935"
+                        self.btn_primary, self.t('btn_stop'), self.remove_services, "#E53935"
                     ))
                 
                 # Update internal state
@@ -848,20 +846,23 @@ class CloudHoneypotClient:
             finally:
                 # Resume reconciliation
                 with self.reconciliation_lock:
-                    self.state["reconciliation_paused"] = False
+                    self.service_manager.reconciliation_paused = False
                 log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
         
         # Use RDP popup manager from module
         self.rdp_popup_manager.show_rdp_popup(mode, on_confirm_wrapped)
 
     # ---------- Application Control ---------- #
-    def apply_tunnels(self, selected_rows):
-        """Apply selected tunnel configurations"""
+    def apply_services(self, selected_rows):
+        """Apply selected service configurations via ServiceManager"""
         started = 0
         clean_rows = []
         for (listen_port, new_port, service) in selected_rows:
-            if self.start_single_row(str(listen_port), str(new_port), str(service), manual_action=True):
+            port = int(listen_port)
+            svc = str(service).upper()
+            if self.service_manager.start_service(svc, port):
                 clean_rows.append((str(listen_port), str(new_port), str(service)))
+                self._update_row_ui(str(listen_port), str(service), True)
                 started += 1
 
         if started == 0:
@@ -875,16 +876,17 @@ class CloudHoneypotClient:
         self.send_heartbeat_once("online")
         
         # GUI buton durumunu güncelle
-        self.sync_gui_with_tunnel_state()
+        self.sync_gui_with_service_state()
         return True
 
-    def remove_tunnels(self):
-        # Normal tünelleri durdur
-        for p, st in list(self.state["servers"].items()):
-            try: st.stop()
-            except: pass
-        self.state["servers"].clear()
+    def remove_services(self):
+        """Stop all running honeypot services"""
+        self.service_manager.shutdown()
         self.state["running"] = False
+        
+        # GUI'deki tüm satırları pasif olarak güncelle
+        for (p1, p2, svc) in self.PORT_TABLOSU:
+            self._update_row_ui(str(p1), str(svc), False)
         
         self.update_tray_icon()
         try:
@@ -893,7 +895,7 @@ class CloudHoneypotClient:
         self.send_heartbeat_once("offline")
         
         # GUI buton durumunu güncelle
-        self.sync_gui_with_tunnel_state()
+        self.sync_gui_with_service_state()
     
     def toggle_rdp_protection(self):
         """RDP koruma durumunu tersine çevir - popup ile onay alır"""
@@ -910,7 +912,7 @@ class CloudHoneypotClient:
                     
                     # GUI'yi güncelle
                     self.update_rdp_button()
-                    self.sync_gui_with_tunnel_state()
+                    self.sync_gui_with_service_state()
                     self.update_tray_icon()
                     
                     # Heartbeat gönder
@@ -929,7 +931,7 @@ class CloudHoneypotClient:
                     
                     # GUI'yi güncelle
                     self.update_rdp_button()
-                    self.sync_gui_with_tunnel_state()
+                    self.sync_gui_with_service_state()
                     self.update_tray_icon()
                     
                     # Heartbeat gönder
@@ -970,8 +972,8 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"❌ RDP buton güncelleme hatası: {e}")
 
-    def sync_gui_with_tunnel_state(self):
-        """GUI buton durumunu gerçek tunnel durumu ile senkronize et - HER SATIRIN KENDİ BUTONLARI"""
+    def sync_gui_with_service_state(self):
+        """GUI buton durumunu gerçek servis durumu ile senkronize et"""
         try:
             # RDP butonunu güncelle
             self.update_rdp_button()
@@ -984,89 +986,16 @@ class CloudHoneypotClient:
             import traceback
             log(f"[GUI_SYNC] Traceback: {traceback.format_exc()}")
 
-    # ---------- Tünel Durum Yönetimi ---------- #
-    def get_tunnel_state(self) -> Dict[str, Any]:
-        # API'den güncel tünel durumlarını alır (/api/premium/tunnel-status)
-        # Returns:
-        #     Dict[str, Any]: Her servis için durum bilgileri
-        #     Format: {'RDP': {'desired': 'started', 'new_port': 53389}, ...}
-        try:
-            token = self.state.get("token")
-            if not token:
-                log("[TunnelState] Token bulunamadı")
-                return {}
+    # ---------- Servis Durum Yönetimi ---------- #
+    def get_service_state(self) -> Dict[str, Any]:
+        """ServiceManager'dan güncel servis durumlarını al."""
+        return self.service_manager.get_all_statuses()
 
-            log("[TunnelState] API'den durum bilgisi alınıyor...")
-            
-            # API'den durumları al
-            response = self.api_request(
-                method="GET",
-                endpoint="premium/tunnel-status",  # /api prefix api_request'te ekleniyor
-                params={"token": token}
-            )
+    def get_active_services(self) -> list:
+        """Get list of currently active services for tray status detection"""
+        return self.service_manager.running_services
 
-            if not response:
-                log("[TunnelState] API yanıt vermedi")
-                return {}
-                
-            if not isinstance(response, dict):
-                log(f"[TunnelState] Geçersiz API yanıtı: {type(response)}")
-                return {}
-                
-            # API yanıtını detaylı logla
-            log("[TunnelState] -------- Güncel Durum --------")
-            for service, info in response.items():
-                status_str = (
-                    f"Servis: {service}\n"
-                    f"  Durum: {info.get('status', 'unknown')}\n"
-                    f"  İstenen: {info.get('desired', 'unknown')}\n"
-                    f"  Port: {info.get('listen_port', 'N/A')}\n"
-                    f"  Yeni Port: {info.get('new_port', 'N/A')}"
-                )
-                log(f"[TunnelState] {status_str}")
-            log("[TunnelState] ------------------------------")
-                    
-            return response
-                
-        except Exception as e:
-            log(f"Tünel durumu alınırken hata: {e}")
-            return {}
-
-    def save_tunnel_state(self, tunnels: Dict[str, Any]):
-        """Save tunnel states to central config"""
-        try:
-            for service, config in tunnels.items():
-                if service in DEFAULT_TUNNELS:
-                    # Save tunnel config to central config
-                    tunnel_path = f"tunnels.{service}"
-                    if 'desired' in config:
-                        set_config_value(f"{tunnel_path}.desired", config['desired'])
-                    if 'new_port' in config:
-                        set_config_value(f"{tunnel_path}.new_port", config['new_port'])
-                    log(f"[CONFIG] Saved tunnel state for {service}: {config}")
-        except Exception as e:
-            log(f"Tünel durumu kaydedilirken hata: {e}")
-
-    def get_local_tunnel_state(self) -> Dict[str, Any]:
-        state = {}
-        for svc, cfg in DEFAULT_TUNNELS.items():
-            lp = int(cfg["listen_port"])
-            running = self._is_service_running(lp, svc)
-            item = {"status": "started" if running else "stopped", "listen_port": lp}
-            if svc == "RDP": item["new_port"] = ServiceController.get_rdp_port()
-            state[svc] = item
-        return state
-
-    def get_active_tunnels(self) -> list:
-        """Get list of currently active tunnels for tray status detection"""
-        from client_networking import TunnelManager
-        return TunnelManager.get_active_tunnels(self)
-
-        # Tunnel state sync moved to TunnelManager
-
-
-# ---------- Per-row helpers ---------- #
-        # Port checking moved to NetworkingHelpers
+    # ---------- Per-row helpers ---------- #
 
     def _find_tree_item(self, listen_port: str, service_name: str):
         try:
@@ -1083,10 +1012,10 @@ class CloudHoneypotClient:
             # RDP için ana butonu da güncelle ve logla
             if service_name.upper() == 'RDP':
                 if active:
-                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_services, "#E53935")
                     log(f"[UI] Updating row UI for {service_name}: btn_stop")
                 else:
-                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_row_start'), self.apply_tunnels, "#4CAF50")
+                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_row_start'), self.apply_services, "#4CAF50")
                     log(f"[UI] Updating row UI for {service_name}: btn_row_start")
             # Prefer new stacked UI controls
             try:
@@ -1117,584 +1046,188 @@ class CloudHoneypotClient:
                 pass
         self._gui_safe(apply)
 
-    def _active_rows_from_servers(self):
+    def _active_rows_from_services(self):
+        """Build active rows list from ServiceManager's running services"""
         rows = []
         try:
+            running = self.service_manager.running_services
             for (p1, p2, svc) in self.PORT_TABLOSU:
-                lp = int(str(p1))
-                if self.state["servers"].get(lp):
+                if str(svc).upper() in running:
                     rows.append((str(p1), str(p2), str(svc)))
         except Exception as e:
             log(f"Exception: {e}")
         return rows
 
     def start_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
-        # Tek bir tünel servisini başlatır
-        # 
-        # Args:
-        #     p1: Dinleme portu
-        #     p2: Hedef port
-        #     service: Servis adı
-        #     manual_action: Kullanıcı tarafından tetiklenip tetiklenmediği
+        """Tek bir honeypot servisini ServiceManager üzerinden başlatır.
         
-        # RDP için her zaman 3389 tünellenir, koruma aktif olsa bile
-        if service.upper() == 'RDP':
-            listen_port = '3389'
-        else:
-            listen_port = str(p1)
+        Args:
+            p1: Dinleme portu
+            p2: Hedef port (eski mimari uyumluluğu, kullanılmıyor)
+            service: Servis adı
+            manual_action: Kullanıcı tarafından tetiklenip tetiklenmediği
+        """
         service_upper = str(service).upper()
-
-        if service_upper == 'RDP' and listen_port == '3389':
-            # RDP özel durumu
-            with self.reconciliation_lock:
-                self.state["reconciliation_paused"] = True
-                log("RDP geçişi için API senkronizasyonu duraklatıldı.")
+        listen_port = int(p1)
+        
+        # RDP özel durumu — port 3389 honeypot başlatmadan önce RDP'nin güvenli porta taşınması gerekir
+        if service_upper == 'RDP':
+            listen_port = 3389  # RDP honeypot her zaman 3389 dinler
             
-            # RDP port durumunu kontrol et ve tünel mantığını belirle
+            # Reconciliation'ı duraklat
+            self.service_manager.reconciliation_paused = True
+            
             current_rdp_port = ServiceController.get_rdp_port()
-            is_3389_in_use = NetworkingHelpers.is_port_in_use(3389)
+            port_in_use = is_port_in_use(3389)
             
-            log(f"🔍 RDP DURUM: current_port={current_rdp_port}, secure_port={RDP_SECURE_PORT}, 3389_in_use={is_3389_in_use}, manual_action={manual_action}")
+            log(f"🔍 RDP DURUM: current_port={current_rdp_port}, secure_port={RDP_SECURE_PORT}, 3389_in_use={port_in_use}, manual_action={manual_action}")
             
             if current_rdp_port == RDP_SECURE_PORT:
-                # RDP güvenli portta - 3389'da tünel başlatılabilir
-                if not is_3389_in_use:
-                    log(f"✅ RDP güvenli portta ({RDP_SECURE_PORT}), 3389 boş - tünel başlatılıyor...")
-                    
-                    # 3389'da tünel başlat (REACTIVE APPROACH)
-                    st = TunnelServerThread(self, listen_port, service)
-                    st.start()
-                    time.sleep(0.15)
-                    
-                    if st.is_alive():
-                        # Tünel başarıyla başlatıldı
-                        self.state["servers"][int(listen_port)] = st
-                        self.write_status(self._active_rows_from_servers(), running=True)
-                        self.state["running"] = True
-                        self.update_tray_icon()
-                        self.send_heartbeat_once("online")
-                        self._update_row_ui(listen_port, service, True)
-                        self.state["remote_desired"][service_upper] = "started"
-                        
-                        # API'ye koruma aktif bilgisini gönder
-                        log("✅ RDP tüneli başarıyla başlatıldı - API'ye bildirim gönderiliyor")
-                        self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
-                        
-                        with self.reconciliation_lock:
-                            self.state["reconciliation_paused"] = False
+                # RDP güvenli portta — 3389 boşsa honeypot başlat
+                if not port_in_use:
+                    log(f"✅ RDP güvenli portta ({RDP_SECURE_PORT}), 3389 boş - honeypot başlatılıyor...")
+                    if self.service_manager.start_service("RDP", 3389):
+                        self._on_service_started("RDP", 3389)
+                        self.service_manager.reconciliation_paused = False
                         return True
                     else:
-                        # RDP tüneli başarısız - admin yetki ile tekrar deneyelim
-                        log("❌ RDP tüneli normal yetki ile başlatılamadı")
-                        
-                        if manual_action:
-                            log("🔓 RDP için admin yetki ile tünel başlatma deneniyor")
-                            
-                            if self.require_admin_for_operation(f"RDP Tüneli Başlatma (Port 3389)"):
-                                log("✅ Admin yetki alındı - RDP tüneli yeniden deneniyor")
-                                
-                                st_admin = TunnelServerThread(self, listen_port, service)
-                                st_admin.start()
-                                time.sleep(0.15)
-                                
-                                if st_admin.is_alive():
-                                    log("✅ RDP tüneli admin yetki ile başarıyla başlatıldı")
-                                    self.state["servers"][int(listen_port)] = st_admin
-                                    self.write_status(self._active_rows_from_servers(), running=True)
-                                    self.state["running"] = True
-                                    self.update_tray_icon()
-                                    self.send_heartbeat_once("online")
-                                    self._update_row_ui(listen_port, service, True)
-                                    self.state["remote_desired"][service_upper] = "started"
-                                    
-                                    # API'ye koruma aktif bilgisini gönder
-                                    log("✅ RDP tüneli (admin) başarıyla başlatıldı - API'ye bildirim gönderiliyor")
-                                    self.report_tunnel_action_to_api("RDP", "start", str(RDP_SECURE_PORT))
-                                    
-                                    with self.reconciliation_lock:
-                                        self.state["reconciliation_paused"] = False
-                                    return True
-                                else:
-                                    log("❌ RDP tüneli admin yetki ile de başlatılamadı!")
-                            else:
-                                log("👤 Kullanıcı RDP admin yetki vermeyi reddetti")
-                        
-                        log("❌ RDP tüneli başlatılamadı!")
-                        with self.reconciliation_lock:
-                            self.state["reconciliation_paused"] = False
+                        log("❌ RDP honeypot başlatılamadı!")
+                        self.service_manager.reconciliation_paused = False
                         return False
                 else:
                     # Windows Terminal Services bug workaround
                     log("⚠️ RDP Registry'de güvenli portta ama 3389 hala dolu")
-                    log("📋 Muhtemel neden: Windows Terminal Services registry değişikliğini tanımadı")
-                    log("🔍 Bilinen Windows bug'ı: Registry port değişse de Terminal Services eski portu bırakmaz")
-                    
                     if manual_action:
-                        # Manuel başlatma - kullanıcıya uyarı göster
-                        log("🔄 Manuel RDP tünel başlatma - 3389 port çakışması uyarısı gösteriliyor")
-                        
-                        # Port çakışması uyarısı
-                        def show_port_conflict_warning():
-                            import tkinter as tk
-                            from tkinter import messagebox
-                            
-                            root = tk.Tk()
-                            root.withdraw()
-                            
-                            message = (
-                                "RDP Tünel Başlatma Sorunu\\n\\n"
-                                f"RDP portu güvenli porta ({RDP_SECURE_PORT}) taşınmış\\n"
-                                "ancak 3389 portunda hala bir uygulama dinliyor.\\n\\n"
-                                "Bu durum Windows Terminal Services bug'ından kaynaklanır.\\n\\n"
-                                "Çözüm seçenekleri:\\n"
-                                "1. 3389 portunu dinleyen uygulamaları kapatın\\n"
-                                "2. Cihazı yeniden başlatın (önerilen)\\n"
-                                "3. Terminal Services'ı yeniden başlatın\\n\\n"
-                                "Cihazı şimdi yeniden başlatmak istiyor musunuz?"
-                            )
-                            
-                            result = messagebox.askyesno(
-                                "Port Çakışması", 
-                                message,
-                                icon='warning'
-                            )
-                            
-                            root.destroy()
-                            
-                            if result:  # Yes seçildiyse
-                                log("🔄 Kullanıcı sistem yeniden başlatmayı onayladı")
-                                import subprocess
-                                subprocess.run(['shutdown', '/r', '/t', '30', '/c', 'RDP port çakışması sorunu için sistem yeniden başlatılıyor...'])
-                            else:
-                                log("👤 Kullanıcı sistem yeniden başlatmayı reddetti")
-                        
-                        # UI thread'de popup göster
-                        import threading
-                        threading.Thread(target=show_port_conflict_warning, daemon=True).start()
-                    else:
-                        log("🤖 API başlatma - port çakışması nedeniyle başarısız")
-                    
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = False
+                        self._show_rdp_port_conflict_warning()
+                    self.service_manager.reconciliation_paused = False
                     return False
             
             elif current_rdp_port == 3389:
-                # RDP standart portta (3389) - port dolu, geçiş gerekli  
-                if is_3389_in_use:
-                    log(f"⚠️ RDP standart portta (3389) ve port dolu - tünel başlatma için port geçişi gerekli")
+                # RDP standart portta — port taşıma gerekli
+                if port_in_use:
+                    log("⚠️ RDP standart portta (3389) ve port dolu - taşıma gerekli")
                     if manual_action:
-                        log(f"🔄 Kullanıcı RDP tünel başlatmak istiyor ama port 3389'da - kullanıcıya uyarı")
-                        
-                        # Kullanıcıya RDP port taşıma uyarısı göster
-                        import tkinter as tk
-                        from tkinter import messagebox
-                        
-                        def show_rdp_port_warning():
-                            root = tk.Tk()
-                            root.withdraw()
-                            
-                            message = (
-                                "RDP Tünel Başlatma Hatası\\n\\n"
-                                "RDP tüneli başlatmak için 3389 portu boş olmalıdır.\\n"
-                                "Şu anda RDP servisi 3389 portunda çalışıyor.\\n\\n"
-                                "Çözüm:\\n"
-                                "• 'RDP Taşı' butonunu kullanarak RDP portunu\\n"
-                                f"  güvenli porta ({RDP_SECURE_PORT}) taşıyın\\n"
-                                "• Ardından RDP tünelini tekrar başlatın\\n\\n"
-                                "RDP portunu şimdi taşımak istiyor musunuz?"
-                            )
-                            
-                            result = messagebox.askyesno(
-                                "RDP Port Uyarısı", 
-                                message,
-                                icon='warning'
-                            )
-                            
-                            root.destroy()
-                            
-                            if result:  # Yes seçildiyse
-                                log("👤 Kullanıcı RDP port taşımayı onayladı")
-                                # RDP port taşıma işlemini başlat
-                                self.toggle_rdp_protection()
-                            else:
-                                log("👤 Kullanıcı RDP port taşımayı reddetti")
-                        
-                        # UI thread'de popup göster
-                        import threading
-                        threading.Thread(target=show_rdp_port_warning, daemon=True).start()
-                        
-                        with self.reconciliation_lock:
-                            self.state["reconciliation_paused"] = False
-                        return False
-                    else:
-                        log(f"❌ Otomatik mod - port dolu olduğu için tünel başlatılamaz")
-                        with self.reconciliation_lock:
-                            self.state["reconciliation_paused"] = False
-                        return False
+                        self._show_rdp_move_prompt()
+                    self.service_manager.reconciliation_paused = False
+                    return False
                 else:
-                    # Bu durumda 3389 boş ama RDP servisi hala 3389'da - teorik olarak imkansız
-                    log(f"⚠️ RDP 3389'da ama port boş - beklenmeyen durum")
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = False
+                    log("⚠️ RDP 3389'da ama port boş - beklenmeyen durum")
+                    self.service_manager.reconciliation_paused = False
                     return False
             else:
                 log(f"⚠️ RDP beklenmeyen portta: {current_rdp_port}")
-                with self.reconciliation_lock:
-                    self.state["reconciliation_paused"] = False
+                self.service_manager.reconciliation_paused = False
                 return False
-            
-            # Manuel akış (kullanıcı Başlat butonuna tıklamış)
-            if manual_action:
-                # Kullanıcı kaynaklı RDP geçişi - onay penceresi göster
-                log("🔥 Manuel RDP güvenli port başlatma akışı tetiklendi - POPUP GÖSTERILECEK!")
-
-                def on_rdp_confirm():
-                    # RDP port değişikliği onaylandığında çalışacak callback
-                    log("RDP port geçişi kullanıcı tarafından onaylandı.")
-                    ensure_firewall_allow_for_port(3389, "RDP 3389 (Tunnel)")
-
-                    # Tünel sunucusunu başlat
-                    st = TunnelServerThread(self, listen_port, service)
-                    st.start()
-                    time.sleep(0.15)
-                    
-                    if st.is_alive():
-                        # Tünel başarıyla başlatıldı
-                        self.state["servers"][int(listen_port)] = st
-                        self.write_status(self._active_rows_from_servers(), running=True)
-                        self.state["running"] = True
-                        self.update_tray_icon()
-                        self.send_heartbeat_once("online")
-                        self._update_row_ui(listen_port, service, True)
-                        self.state["remote_desired"][service_upper] = "started"
-                        
-                        # API'ye bildir (ayrı thread'de)
-                        threading.Thread(
-                            target=self.report_tunnel_action_to_api,
-                            args=(service, 'start', p2),
-                            daemon=True
-                        ).start()
-                    else:
-                        log("Kullanıcı onayından sonra tünel başlatılamadı.")
-                        return False
-
-                self.rdp_move_popup(mode="secure", on_confirm=on_rdp_confirm)
-                return True
-            else: # API-driven
-                # RDP API-driven start (manual_action == False)
-                log("API tarafından RDP güvenli port başlatma akışı tetiklendi.")
-                try:
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = True
-                        log("RDP geçişi için API senkronizasyonu duraklatıldı.")
-
-                    if ServiceController.get_rdp_port() != RDP_SECURE_PORT:
-                        if not self.start_rdp_transition("secure"):
-                            log(f"API akışı: RDP {RDP_SECURE_PORT}'a taşınamadı.")
-                            return False
-
-                    # 3389 (tünel) + RDP güvenli port için firewall
-                    ensure_firewall_allow_for_port(3389,  "RDP 3389 (Tunnel)")
-                    ensure_firewall_allow_for_port(RDP_SECURE_PORT, f"RDP {RDP_SECURE_PORT}")
-
-                    # 3389 tünel
-                    st = TunnelServerThread(self, '3389', service)
-                    st.start(); time.sleep(0.15)
-                    if not st.is_alive():
-                        log("RDP tüneli başlatılamadı.")
-                        return False
-
-                    self.state["servers"][3389] = st
-                    self.write_status(self._active_rows_from_servers(), running=True)
-                    self.state["running"] = True
-                    self.update_tray_icon(); self.send_heartbeat_once("online")
-                    self._update_row_ui('3389', service, True)
-                    self.state["remote_desired"][service_upper] = "started"
-                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_tunnels, "#E53935")
-
-                    # API bildirimi
-                    threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'start', p2), daemon=True).start()
-
-                    # 8-9: 5 sn bekle, resume
-                    def _resume():
-                        time.sleep(5)
-                        with self.reconciliation_lock:
-                            self.state["reconciliation_paused"] = False
-                        log("RDP geçiş süreci tamamlandı - API iletişimi yeniden başlatıldı")
-                    threading.Thread(target=_resume, daemon=True).start()
-                    return True
-
-                except Exception as e:
-                    log(f"API RDP başlatma hatası: {e}")
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = False
-                    return False
-
-        # Non-RDP flow
-        if NetworkingHelpers.is_port_in_use(int(listen_port)):
+        
+        # Non-RDP honeypot başlatma
+        if is_port_in_use(listen_port):
             try:
                 if not messagebox.askyesno(self.t("warn"), self.t("port_in_use").format(port=listen_port)):
                     return False
             except Exception as e:
                 log(f"Port-in-use dialog failed for port {listen_port}: {e}")
         
-        # Tünel başlatma sırasında geçici olarak sync'i duraklat
-        if manual_action:
-            with self.reconciliation_lock:
-                self.state["reconciliation_paused"] = True
-                log(f"{service} tünel başlatma için API senkronizasyonu geçici olarak duraklatıldı.")
-        
-        # REACTIVE APPROACH: Try to start tunnel first, request admin if fails
-        st = TunnelServerThread(self, listen_port, service)
-        st.start(); time.sleep(0.15)
-        if st.is_alive():
-            # Tunnel started successfully
-            self.state["servers"][int(listen_port)] = st
-            self.write_status(self._active_rows_from_servers(), running=True)
-            self.state["running"] = True
-            self.update_tray_icon(); self.send_heartbeat_once("online")
-            self._update_row_ui(listen_port, service, True)
-            self.state["remote_desired"][service_upper] = "started"
-            
-            # GUI buton durumunu güncelle
-            self.sync_gui_with_tunnel_state()
-            
-            # Report to API and wait for confirmation
-            def notify_and_resume():
-                try:
-                    self.report_tunnel_action_to_api(service, 'start', p2)
-                finally:
-                    # Resume reconciliation after a short delay
-                    time.sleep(3)
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = False
-            
-            threading.Thread(target=notify_and_resume, daemon=True).start()
+        # ServiceManager üzerinden honeypot başlat
+        if self.service_manager.start_service(service_upper, listen_port):
+            self._on_service_started(service_upper, listen_port)
             return True
-        else:
-            # Tunnel failed to start - check if admin privileges might help
-            log(f"❌ {service} tüneli normal yetki ile başlatılamadı")
-            
-            # Check if this might be a permission issue (port < 1024 or specific ports)
-            port_num = int(listen_port)
-            needs_admin_retry = (
-                port_num < 1024 or  # Well-known ports
-                port_num in [3389, 1433, 3306] or  # Common admin-required ports
-                service.upper() in ['RDP', 'SSH', 'MSSQL', 'MYSQL', 'FTP']  # Critical services
-            )
-            
-            if needs_admin_retry and manual_action:  # Only for manual user actions
-                log(f"🔓 Admin yetki ile tünel başlatma deneniyor: {service} port {listen_port}")
-                
-                # Request admin privileges for this specific operation
-                if self.require_admin_for_operation(f"{service} Tüneli Başlatma (Port {listen_port})"):
-                    log(f"✅ Admin yetki alındı - {service} tüneli yeniden deneniyor")
-                    
-                    # Retry tunnel start with admin privileges
-                    st_admin = TunnelServerThread(self, listen_port, service)
-                    st_admin.start(); time.sleep(0.15)
-                    
-                    if st_admin.is_alive():
-                        log(f"✅ {service} tüneli admin yetki ile başarıyla başlatıldı")
-                        self.state["servers"][int(listen_port)] = st_admin
-                        self.write_status(self._active_rows_from_servers(), running=True)
-                        self.state["running"] = True
-                        self.update_tray_icon(); self.send_heartbeat_once("online")
-                        self._update_row_ui(listen_port, service, True)
-                        self.state["remote_desired"][service_upper] = "started"
-                        
-                        # GUI buton durumunu güncelle
-                        self.sync_gui_with_tunnel_state()
-                        
-                        # Report to API and wait for confirmation
-                        def notify_and_resume_admin():
-                            try:
-                                self.report_tunnel_action_to_api(service, 'start', p2)
-                            finally:
-                                time.sleep(3)
-                                with self.reconciliation_lock:
-                                    self.state["reconciliation_paused"] = False
-                        
-                        threading.Thread(target=notify_and_resume_admin, daemon=True).start()
-                        return True
-                    else:
-                        log(f"❌ {service} tüneli admin yetki ile de başlatılamadı")
-                else:
-                    log(f"👤 Kullanıcı admin yetki vermeyi reddetti: {service}")
-            
-            # Tünel başlatılamadı - pause'i kaldır
-            if manual_action:
-                with self.reconciliation_lock:
-                    self.state["reconciliation_paused"] = False
-                log(f"❌ {service} tüneli başlatılamadı - API senkronizasyonu devam ediyor")
         
         try: messagebox.showerror(self.t("error"), self.t("port_busy_error"))
         except: pass
         return False
 
     def stop_single_row(self, p1: str, p2: str, service: str, manual_action: bool = False) -> bool:
-        # Pause reconciliation before making changes
-        with self.reconciliation_lock:
-            self.state["reconciliation_paused"] = True
-
+        """Tek bir honeypot servisini ServiceManager üzerinden durdurur."""
         service_upper = str(service).upper()
-        # RDP dashboard akışında tünel her zaman 3389'u dinler
-        listen_port = '3389' if service_upper == 'RDP' else str(p1)
+        listen_port = 3389 if service_upper == 'RDP' else int(p1)
 
-        if service_upper == 'RDP' and listen_port == '3389':
-            # Önce tüneli kapat
-            st = self.state["servers"].pop(int(listen_port), None)
-            if st:
-                try: st.stop()
-                except Exception: pass
-
+        if service_upper == 'RDP':
+            # RDP durdurulduğunda rollback popup göster
+            self.service_manager.stop_service("RDP")
+            
             if manual_action:
-                self.log("Manuel RDP güvenli port durdurma akışı tetiklendi.")
                 def on_rdp_confirm_rollback():
-                    self.write_status(self._active_rows_from_servers(), running=bool(self.state["servers"]))
-                    if not self.state["servers"]:
-                        self.state["running"] = False
-                        self.send_heartbeat_once("offline")
-                    self.update_tray_icon()
-                    self._update_row_ui(listen_port, service, False)
-                    self.state["remote_desired"][service_upper] = "stopped"
-                    threading.Thread(target=self.report_tunnel_action_to_api,
-                                    args=(service, 'stop', p2), daemon=True).start()
-                log("🔄 RDP koruması durdurma - Rollback popup gösteriliyor")
+                    self._on_service_stopped("RDP", 3389)
                 self.rdp_move_popup(mode="rollback", on_confirm=on_rdp_confirm_rollback)
-                return True
             else:
                 # API-driven RDP stop
-                log("🤖 API tarafından RDP durdurma akışı tetiklendi")
                 if not self.start_rdp_transition("rollback"):
                     log("❌ API akışı: RDP 3389'a geri alınamadı.")
-
-                self.write_status(self._active_rows_from_servers(), running=bool(self.state["servers"]))
-                if not self.state["servers"]:
-                    self.state["running"] = False
-                    self.send_heartbeat_once("offline")
-                self.update_tray_icon()
-                self._update_row_ui('3389', service, False)
-                self.state["remote_desired"][service_upper] = "stopped"
-                
-                # GUI buton durumunu güncelle
-                self.sync_gui_with_tunnel_state()
-                
-                threading.Thread(target=self.report_tunnel_action_to_api, args=(service, 'stop', p2), daemon=True).start()
-
-                def _resume():
-                    time.sleep(5)
-                    with self.reconciliation_lock:
-                        self.state["reconciliation_paused"] = False
-                    log("RDP geçiş süreci tamamlandı - API iletişimi yeniden başlatıldı")
-                threading.Thread(target=_resume, daemon=True).start()
-                return True
+                self._on_service_stopped("RDP", 3389)
+            return True
 
         # Non-RDP stop
-        st = self.state["servers"].pop(int(listen_port), None)
-        if st:
-            try:
-                st.stop()
-            except Exception as e:
-                log(f"Tunnel stop failed for port {listen_port}: {e}")
-        
-        self.write_status(self._active_rows_from_servers(), running=len(self.state["servers"]) > 0)
-        if not self.state["servers"]:
+        self.service_manager.stop_service(service_upper)
+        self._on_service_stopped(service_upper, listen_port)
+        return True
+
+    def _on_service_started(self, service_name: str, port: int):
+        """Servis başarıyla başlatıldığında çağrılır — GUI ve state güncelleme."""
+        self.write_status(self._active_rows_from_services(), running=True)
+        self.state["running"] = True
+        self.update_tray_icon()
+        self.send_heartbeat_once("online")
+        self._update_row_ui(str(port), service_name, True)
+        self.sync_gui_with_service_state()
+
+    def _on_service_stopped(self, service_name: str, port: int):
+        """Servis durdurulduğunda çağrılır — GUI ve state güncelleme."""
+        running_services = self.service_manager.running_services
+        self.write_status(self._active_rows_from_services(), running=len(running_services) > 0)
+        if not running_services:
             self.state["running"] = False
             self.send_heartbeat_once("offline")
         self.update_tray_icon()
-        self._update_row_ui(listen_port, service, False)
-        self.state["remote_desired"][service_upper] = "stopped"
-        
-        # GUI buton durumunu güncelle
-        self.sync_gui_with_tunnel_state()
-        
-        # Report to API and wait for confirmation
-        def notify_and_resume():
-            try:
-                self.report_tunnel_action_to_api(service, 'stop', p2)
-            finally:
-                # Resume reconciliation after a short delay
-                time.sleep(3)
-                with self.reconciliation_lock:
-                    self.state["reconciliation_paused"] = False
-        
-        threading.Thread(target=notify_and_resume, daemon=True).start()
-        return True
+        self._update_row_ui(str(port), service_name, False)
+        self.sync_gui_with_service_state()
 
-    def report_tunnel_status_once(self):
-        # Güncel tünel durumlarını API'ye bildirir (/api/agent/tunnel-status)
-        # Her servis için status, listening_port ve varsa new_port bilgilerini gönderir
-        try:
-            token = self.state.get("token")
-            if not token:
-                log("Token bulunamadı, tünel durumu raporlanamıyor")
-                return False
-
-            # Durum raporu hazırla - sadece tanımlı servisleri raporla
-            statuses = []
-            for service, default_config in DEFAULT_TUNNELS.items():
-                listen_port = default_config["listen_port"]
-                running = self._is_service_running(listen_port, service)
-                status = {
-                    "service": service,
-                    "status": "started" if running else "stopped",
-                    "listen_port": listen_port
-                }
-                # RDP için hem 3389 hem güvenli portu kontrol et
-                if service == "RDP":
-                    current_port = ServiceController.get_rdp_port()
-                    status["new_port"] = current_port
-                    rdp_running = self._is_service_running(3389, service) or self._is_service_running(RDP_SECURE_PORT, service)
-                    status["status"] = "started" if rdp_running else "stopped"
-                statuses.append(status)
-                log(f"Tünel durumu: {service} -> {status['status']} (port: {listen_port})")
-
-            # /api/agent/tunnel-status endpoint'ine gönder
-            response = self.api_request(
-                method="POST",
-                endpoint="agent/tunnel-status",
-                json={
-                    "token": token,
-                    "statuses": statuses  # API modeline uygun format
-                }
+    def _show_rdp_port_conflict_warning(self):
+        """RDP port çakışması uyarısı göster"""
+        def show_warning():
+            import tkinter as tk
+            from tkinter import messagebox as mb
+            root = tk.Tk()
+            root.withdraw()
+            message = (
+                f"RDP portu güvenli porta ({RDP_SECURE_PORT}) taşınmış\n"
+                "ancak 3389 portunda hala bir uygulama dinliyor.\n\n"
+                "Çözüm: Cihazı yeniden başlatın."
             )
+            result = mb.askyesno("Port Çakışması", message, icon='warning')
+            root.destroy()
+            if result:
+                subprocess.run(['shutdown', '/r', '/t', '30', '/c', 'RDP port çakışması için yeniden başlatılıyor...'])
+        threading.Thread(target=show_warning, daemon=True).start()
 
-            if not response:
-                log("Tünel durumu güncellemesi başarısız")
-                return False
+    def _show_rdp_move_prompt(self):
+        """RDP port taşıma uyarısı göster"""
+        def show_warning():
+            import tkinter as tk
+            from tkinter import messagebox as mb
+            root = tk.Tk()
+            root.withdraw()
+            message = (
+                "RDP honeypot başlatmak için 3389 portu boş olmalıdır.\n"
+                "Şu anda RDP servisi 3389 portunda çalışıyor.\n\n"
+                f"'RDP Taşı' butonu ile portu {RDP_SECURE_PORT}'a taşıyın.\n\n"
+                "RDP portunu şimdi taşımak istiyor musunuz?"
+            )
+            result = mb.askyesno("RDP Port Uyarısı", message, icon='warning')
+            root.destroy()
+            if result:
+                self.toggle_rdp_protection()
+        threading.Thread(target=show_warning, daemon=True).start()
 
-            if isinstance(response, dict):
-                if response.get("status") == "ok":
-                    log("Tünel durumları başarıyla güncellendi")
-                    return True
-                
-                error = response.get("error", "Bilinmeyen hata")
-                log(f"Tünel durumu güncelleme hatası: {error}")
-                
-            return False
-
+    def report_service_status_once(self):
+        """Güncel servis durumlarını API'ye bildirir — ServiceManager'a delege eder."""
+        try:
+            self.service_manager._report_statuses()
         except Exception as e:
-            log(f"Tünel durumu raporlanırken hata: {e}")
-            return False
-
-    def report_tunnel_action_to_api(self, service: str, action: str,
-                                    new_port: Optional[Union[str, int]] = None) -> bool:
-        """Report tunnel action to API using modular API function"""
-        token = self.state.get("token")
-        if not token: return False
-        result = report_tunnel_action_api(self.api_request, token, service, action, new_port, log)
-        
-        # Local cache removed - TunnelManager handles state tracking
-        
-        return result
+            log(f"Servis durumu raporlanırken hata: {e}")
 
     def start_rdp_transition(self, transition_mode: str = "secure") -> bool:
         """Use RDP Manager for port transitions"""
         return self.rdp_manager.start_rdp_transition(transition_mode)
-
-
-        
 
 # ---------- Remote management helpers ---------- #
     def _collect_open_ports_windows(self):
@@ -1793,9 +1326,9 @@ class CloudHoneypotClient:
         return s
 
     def _is_service_running(self, listen_port: int, service_name: str) -> bool:
-        """Check if service is running on specific port - delegates to TunnelManager"""
-        from client_networking import TunnelManager
-        return TunnelManager.is_service_running_by_port(self, listen_port, service_name)
+        """Check if service is running — delegates to ServiceManager"""
+        status = self.service_manager.get_status(service_name)
+        return status == "started"
 
     # ---------- Tray Management (Modularized) ---------- #
     def initialize_tray_manager(self):
@@ -1870,7 +1403,6 @@ class CloudHoneypotClient:
         self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-        # Note: tunnel_watchdog_loop is now integrated into tunnel_sync_loop
         
         # Session monitoring for daemon-to-tray handover
         threading.Thread(target=self.monitor_user_sessions, daemon=True).start()
@@ -1879,12 +1411,12 @@ class CloudHoneypotClient:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
         except Exception as e:
             log(f"open ports reporter start failed: {e}")
-        # Tunnel sync (includes watchdog + API reconciliation in single loop)
+        # ServiceManager (sync + watchdog + batch reporter)
         try:
-            from client_networking import TunnelManager
-            threading.Thread(target=TunnelManager.tunnel_sync_loop, args=(self,), name="tunnel_sync_loop", daemon=True).start()
+            self.service_manager.start()
+            log("ServiceManager başlatıldı (daemon mode)")
         except Exception as e:
-            log(f"tunnel sync loop start failed: {e}")
+            log(f"ServiceManager start failed: {e}")
         # Start firewall agent in background (Windows/Linux)
         try:
             self.start_firewall_agent()
@@ -1903,7 +1435,7 @@ class CloudHoneypotClient:
 
         cons = self.read_consent()
         if not cons.get("accepted"):
-            log("Daemon: kullanıcı onayı yok, tünel uygulanmayacak.")
+            log("Daemon: kullanıcı onayı yok, servis uygulanmayacak.")
             return
 
         saved_rows, saved_running = self.read_status()
@@ -1916,16 +1448,16 @@ class CloudHoneypotClient:
         while True:
             try:
                 if rows and not self.state.get("running"):
-                    ok = self.apply_tunnels(rows)
+                    ok = self.apply_services(rows)
                     if ok:
-                        log("Daemon: Tüneller aktif (arka plan).")
+                        log("Daemon: Servisler aktif (arka plan).")
                 time.sleep(5)
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 log(f"Daemon loop err: {e}")
         try:
-            self.remove_tunnels()
+            self.remove_services()
         except Exception as e:
             log(f"Exception: {e}")
         
@@ -2020,7 +1552,7 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"firewall agent start failed (gui): {e}")
         else:
-            log("🔄 UI-only mode: Skipping background threads (heartbeat, open ports, tunnels, firewall)")
+            log("🔄 UI-only mode: Skipping background threads (heartbeat, open ports, services, firewall)")
         
         # Start external watchdog
         try:
@@ -2196,7 +1728,7 @@ class CloudHoneypotClient:
         if token:
             self.refresh_attack_count(async_thread=True)
 
-        # Port Tünelleme
+        # Honeypot Servisleri
         frame2 = tk.LabelFrame(self.root, text=self.t("port_tunnel"), padx=10, pady=10, bg="#f5f5f5", font=("Arial", 11, "bold"))
         frame2.pack(fill="both", expand=True, padx=15, pady=10)
 
@@ -2226,7 +1758,7 @@ class CloudHoneypotClient:
                 is_rdp = (str(servis).upper() == 'RDP')
 
                 if is_rdp:
-                    self.state['reconciliation_paused'] = True
+                    self.service_manager.reconciliation_paused = True
                     log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
 
                 try:
@@ -2249,10 +1781,10 @@ class CloudHoneypotClient:
                                 status_lbl.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
                 finally:
                     if is_rdp:
-                        self.state['reconciliation_paused'] = False
+                        self.service_manager.reconciliation_paused = False
                         log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
                         # Immediately report the new status to the API
-                        threading.Thread(target=self.report_tunnel_status_once, daemon=True).start()
+                        threading.Thread(target=self.report_service_status_once, daemon=True).start()
 
             btn.config(command=toggle)
             
@@ -2308,10 +1840,10 @@ class CloudHoneypotClient:
 
         # Legacy migration code removed - now using installer-based system
 
-        # Optional silent auto-update on startup if configured and no active tunnels
+        # Optional silent auto-update on startup if configured and no active services
         try:
             if os.environ.get('AUTO_UPDATE_SILENT') == '1':
-                if not self.state.get('servers'):
+                if not self.service_manager.running_services:
                     self.check_updates_and_apply_silent()
         except Exception as e:
             log(f"auto-update silent error: {e}")
@@ -2322,7 +1854,6 @@ class CloudHoneypotClient:
 
         # Başlangıçta tüm servisleri durmuş olarak başlat
         self.state["running"] = False
-        self.state["servers"] = {}
         self.state["selected_rows"] = []
         self.write_status([], running=False)
         # Tray ikonunu kırmızı olarak güncelle (pasif)
@@ -2542,7 +2073,7 @@ if __name__ == "__main__":
                     log(f"🔓 RDP koruması pasif (port: {current_port}) - GUI varsayılan durumda")
                 
                 # GUI buton durumunu senkronize et
-                app.sync_gui_with_tunnel_state()
+                app.sync_gui_with_service_state()
                 app.update_tray_icon()
             except Exception as e:
                 log(f"❌ RDP durum kontrolü hatası: {e}")
@@ -2675,3 +2206,5 @@ if __name__ == "__main__":
         # Fallback - should not happen with current logic
         log(f"ERROR: Unknown operation mode: {operation_mode}")
         sys.exit(1)
+
+

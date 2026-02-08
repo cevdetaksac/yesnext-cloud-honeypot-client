@@ -112,54 +112,17 @@ class TrayManager:
         
 
     def is_protection_active(self) -> bool:
-        """Check if any enabled tunnel service is currently active"""
-        active_enabled_services = 0
-        total_enabled_services = 0
-        
+        """Check if any honeypot service is currently active via ServiceManager"""
         try:
-            # Config'den enabled servisleri al
-            from client_constants import get_app_config
-            config = get_app_config()
-            default_ports = config.get("tunnels", {}).get("default_ports", [])
-            
-            # Aktif tunnels'ları al  
-            active_tunnels = self.app_instance.get_active_tunnels()
-            # Port mapping dictionary'si oluştur (local_port -> tunnel object)
-            tunnel_ports = {}
-            if active_tunnels:
-                for tunnel in active_tunnels:
-                    if 'local_port' in tunnel:
-                        tunnel_ports[tunnel['local_port']] = tunnel
-            
-            # Her enabled servis için kontrol
-            for port_config in default_ports:
-                if not port_config.get("enabled", False):
-                    continue  # Disabled servis - atla
-                    
-                service_name = port_config["service"]
-                local_port = port_config["local"]
-                total_enabled_services += 1
-                
-                # Bu servis için aktif tünel var mı?
-                tunnel = tunnel_ports.get(local_port)
-                if tunnel:
-                    # Tunnel aktif mi kontrol et
-                    status = tunnel.get('status', 'unknown')
-                    if status == 'active':
-                        active_enabled_services += 1
-            
-            # En az bir enabled service aktifse protection aktif
-            has_active_protection = active_enabled_services > 0
-            
-            # Tünel başlatma başarısızsa log ekle
-            if total_enabled_services > 0 and active_enabled_services == 0:
-                log("[TRAY] ⚠️ WARNING: Tünel servisleri başlatılamadı! Hiçbir aktif tünel yok.")
-                    
+            if hasattr(self.app_instance, 'service_manager'):
+                running = self.app_instance.service_manager.running_services
+                if not running:
+                    log("[TRAY] ⚠️ WARNING: Honeypot servisleri başlatılamadı! Hiçbir aktif servis yok.")
+                return len(running) > 0
         except Exception as e:
             log(f"[TRAY] Protection status check error: {e}")
-            has_active_protection = False
         
-        return has_active_protection
+        return False
 
     def update_tray_icon(self):
         """Update tray icon to reflect current protection status"""
@@ -218,27 +181,18 @@ class TrayManager:
                 
     def exit_app(self):
         """Exit application from tray"""
-        # Gerçek tünel durumunu kontrol et - TÜNEL AKTIF Mİ, PORT DURUMU DEĞİL
-        active_tunnels_exist = False
+        # ServiceManager üzerinden aktif servis kontrolü
+        active_services_exist = False
         try:
-            if hasattr(self.app_instance, 'state') and self.app_instance.state.get("servers"):
-                servers = self.app_instance.state["servers"]
-                
-                # Tüm aktif tunnelleri kontrol et
-                for port, server_thread in servers.items():
-                    if hasattr(server_thread, 'is_running') and server_thread.is_running():
-                        active_tunnels_exist = True
-                        log(f"[EXIT] Aktif tunnel bulundu: port {port}")
-                        break
-                    elif hasattr(server_thread, 'server') and server_thread.server:
-                        active_tunnels_exist = True
-                        log(f"[EXIT] Aktif tunnel server bulundu: port {port}")
-                        break
-                        
+            if hasattr(self.app_instance, 'service_manager'):
+                running = self.app_instance.service_manager.running_services
+                if running:
+                    active_services_exist = True
+                    log(f"[EXIT] Aktif servisler bulundu: {running}")
         except Exception as e:
-            log(f"[EXIT] Tünel durumu kontrol hatası: {e}")
+            log(f"[EXIT] Servis durumu kontrol hatası: {e}")
         
-        if active_tunnels_exist:
+        if active_services_exist:
             try:
                 import tkinter.messagebox as messagebox
                 messagebox.showwarning(self.t("warn"), self.t("tray_warn_stop_first"))

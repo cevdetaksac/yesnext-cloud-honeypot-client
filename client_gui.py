@@ -51,8 +51,8 @@ COLORS = {
 
 # ─── Servis Emoji Haritası ─── #
 SERVICE_ICONS = {
-    "RDP":   "🖥️",
-    "MSSQL": "🗄️",
+    "RDP":   "🖥",
+    "MSSQL": "🗃",
     "MYSQL": "🐬",
     "FTP":   "📁",
     "SSH":   "🔐",
@@ -542,8 +542,8 @@ class ModernGUI:
 
         ctk.CTkLabel(
             left, text=icon, font=ctk.CTkFont(size=22),
-            text_color=COLORS["text_bright"],
-        ).pack(side="left", padx=(0, 10))
+            text_color=COLORS["text_bright"], width=30, anchor="center",
+        ).pack(side="left", padx=(0, 8))
 
         name_frame = ctk.CTkFrame(left, fg_color="transparent")
         name_frame.pack(side="left")

@@ -59,10 +59,20 @@ if ($Clean) {
     Write-Host "   Cleanup completed" -ForegroundColor Green
 }
 
+# Detect Python: prefer .venv if present
+$venvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    $PYTHON = $venvPython
+    Write-Host "   Using venv Python: $PYTHON" -ForegroundColor Cyan
+} else {
+    $PYTHON = "python"
+    Write-Host "   Using system Python" -ForegroundColor Cyan
+}
+
 # Step 1: Build Python executable with performance optimizations
 Write-Host "[1/5] Building Python executable..." -ForegroundColor Yellow
 try {
-    & python -m PyInstaller honeypot-client.spec --clean
+    & $PYTHON -m PyInstaller honeypot-client.spec --clean
     if ($LASTEXITCODE -eq 0) {
         Write-Host "   SUCCESS: Executable built successfully" -ForegroundColor Green
     } else {

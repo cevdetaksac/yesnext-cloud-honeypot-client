@@ -1,7 +1,7 @@
 {
     "application": {
         "name": "Cloud Honeypot Client",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "author": "YesNext Technology"
     },
     "language": {

@@ -26,9 +26,11 @@ Exit codes: 0 normal, 1 critical error, 2 another instance running, 3 health-che
 # Standard library imports
 import os, sys, socket, threading, time, json, subprocess, ctypes, argparse
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from typing import Optional, Dict, Any, Union
 import webbrowser, logging
+
+import customtkinter as ctk
 
 # Local module imports  
 from client_firewall import FirewallAgent
@@ -66,6 +68,7 @@ from client_logging import LoggingManager, setup_logging
 from client_security import SecurityManager
 from client_updater import UpdateManager
 from client_tray import TrayManager
+from client_gui import ModernGUI
 
 try:
     from client_memory_restart import enable_simple_memory_restart, get_current_memory_mb, check_previous_restart_state
@@ -206,7 +209,8 @@ class CloudHoneypotClient:
             log(f"⚠️ Daemon detection failed: {e}")
         
         # Initialize GUI elements
-        self.root = self.btn_primary = self.tree = None
+        self.root = None
+        self.gui = None
         self.attack_entry = self.ip_entry = self.show_cb = None
         
         # Tray mode tracking - thread-safe flag (prevents window from auto-showing)
@@ -836,14 +840,9 @@ class CloudHoneypotClient:
                 # Callback'i çağır (servisleri başlat vs.)
                 on_confirm()
                 
-                # Update GUI state
-                if hasattr(self, 'btn_primary') and self.btn_primary:
-                    self.btn_primary.after(0, lambda: ClientHelpers.set_primary_button(
-                        self.btn_primary, self.t('btn_stop'), self.remove_services, "#E53935"
-                    ))
-                
                 # Update internal state
                 self.state["running"] = True
+                self.sync_gui_with_service_state()
                 
                 log("✅ RDP geçiş süreci kullanıcı onayı ile tamamlandı")
                     
@@ -952,41 +951,35 @@ class CloudHoneypotClient:
     def update_rdp_button(self):
         """RDP butonunun metnini güncel duruma göre güncelle"""
         try:
-            # RDP satırındaki RDP butonunu güncelle
+            # Delegate to ModernGUI if available
+            if hasattr(self, 'gui') and self.gui:
+                self.gui.update_rdp_button()
+                self.update_tray_icon()
+                return
+            # Fallback: legacy row_controls
             rdp_control = self.row_controls.get(("3389", "RDP"))
             if rdp_control and "rdp_button" in rdp_control:
                 rdp_btn = rdp_control["rdp_button"]
-                
                 is_protected, current_port = self.rdp_manager.get_rdp_protection_status()
                 target_port = 3389 if is_protected else RDP_SECURE_PORT
                 new_text = f"RDP Taşı : {target_port}"
-                
-                # Buton rengini de duruma göre ayarla
                 if is_protected:
-                    # Korumalı durumda - geri dönüş için turuncu
                     rdp_btn.config(text=new_text, bg="#FF9800", fg="white")
                 else:
-                    # Normal durumda - koruma için mavi
                     rdp_btn.config(text=new_text, bg="#2196F3", fg="white")
-                
-                # Sadece debug mode'da logla
-                # log(f"🔄 RDP butonu güncellendi: {new_text}")
-                
-                # Tray ikonunu da güncelle
                 self.update_tray_icon()
-                
         except Exception as e:
             log(f"❌ RDP buton güncelleme hatası: {e}")
 
     def sync_gui_with_service_state(self):
         """GUI buton durumunu gerçek servis durumu ile senkronize et"""
         try:
-            # RDP butonunu güncelle
             self.update_rdp_button()
-            
-            # Tray ikonunu güncelle
             self.update_tray_icon()
-                
+            # Update header badge
+            if hasattr(self, 'gui') and self.gui:
+                any_active = len(self.service_manager.running_services) > 0
+                self.gui.update_header_status(any_active)
         except Exception as e:
             log(f"[GUI_SYNC] Senkronizasyon hatası: {e}")
             import traceback
@@ -1003,33 +996,18 @@ class CloudHoneypotClient:
 
     # ---------- Per-row helpers ---------- #
 
-    def _find_tree_item(self, listen_port: str, service_name: str):
-        try:
-            for iid in self.tree.get_children(""):
-                vals = self.tree.item(iid).get("values") or []
-                if len(vals) >= 3 and str(vals[0]) == str(listen_port) and str(vals[2]).upper() == str(service_name).upper():
-                    return iid
-        except Exception as e:
-            log(f"Exception: {e}")
-        return None
-
     def _update_row_ui(self, listen_port: str, service_name: str, active: bool):
+        # Delegate to ModernGUI if available
+        if hasattr(self, 'gui') and self.gui:
+            self.gui.update_row_ui(listen_port, service_name, active)
+            return
+        # Fallback for headless / legacy
         def apply():
-            # RDP için ana butonu da güncelle ve logla
-            if service_name.upper() == 'RDP':
-                if active:
-                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_stop'), self.remove_services, "#E53935")
-                    log(f"[UI] Updating row UI for {service_name}: btn_stop")
-                else:
-                    ClientHelpers.set_primary_button(self.btn_primary, self.t('btn_row_start'), self.apply_services, "#4CAF50")
-                    log(f"[UI] Updating row UI for {service_name}: btn_row_start")
-            # Prefer new stacked UI controls
             try:
                 key = (str(listen_port), str(service_name).upper())
                 rc = getattr(self, 'row_controls', {}).get(key)
                 if rc:
                     btn = rc.get("button"); fr = rc.get("frame"); st = rc.get("status")
-                    # Hangi butonun güncelleneceğini logla
                     log(f"[UI] Updating row UI for {key}: {'Active' if active else 'Inactive'}")
                     if active:
                         if btn: btn.config(text=self.t('btn_row_stop'), bg="#E53935")
@@ -1039,15 +1017,6 @@ class CloudHoneypotClient:
                         if btn: btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
                         if fr: fr.configure(bg="#ffffff")
                         if st: st.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
-                    return
-            except Exception:
-                pass
-            # Fallback to legacy tree view if present
-            try:
-                iid = self._find_tree_item(listen_port, service_name)
-                if iid:
-                    self.tree.set(iid, self.t("col_active"), "Stop" if active else "Start")
-                    self.tree.item(iid, tags=("aktif",) if active else ())
             except Exception:
                 pass
         self._gui_safe(apply)
@@ -1536,9 +1505,9 @@ class CloudHoneypotClient:
         if minimized is not None:
             startup_mode = "minimized" if minimized else "gui"
             
-        # Ensure root window exists (needed for consent dialogs, etc.)
+        # Ensure root window exists (CTk)
         if not self.root:
-            self.root = tk.Tk()
+            self.root = ctk.CTk()
             self.root.withdraw()  # Start hidden — will be configured below
 
         self.start_single_instance_server()
@@ -1546,12 +1515,10 @@ class CloudHoneypotClient:
         # Background services - skip if daemon is running (UI-only mode)
         if not getattr(self, 'daemon_is_active', False):
             threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-            # Remote management: report open ports
             try:
                 threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
             except Exception as e:
                 log(f"open ports reporter start failed: {e}")
-            # Start firewall agent in background
             try:
                 self.start_firewall_agent()
             except Exception as e:
@@ -1570,279 +1537,33 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"update watchdog thread error: {e}")
 
-        # Configure main window
-        if startup_mode != "minimized" and not self._tray_mode.is_set():
-            try:
-                self.root.deiconify()
-            except Exception:
-                pass
-        self.root.title(f"{self.t('app_title')} v{__version__}")
-        
-        # Window icon ayarla
-        try:
-            from client_utils import get_resource_path
-            
-            # Ana window icon
-            main_icon_path = get_resource_path('certs/honeypot.ico')
-            if os.path.exists(main_icon_path):
-                self.root.iconbitmap(main_icon_path)
-                
-                # Taskbar icon için ayrıca PhotoImage ile ayarla
-                try:
-                    from PIL import Image, ImageTk
-                    img = Image.open(main_icon_path)
-                    photo = ImageTk.PhotoImage(img)
-                    self.root.iconphoto(True, photo)
-                except Exception as e:
-                    log(f"PhotoImage icon error: {e}")
-            else:
-                log(f"Main icon not found: {main_icon_path}")
-                
-        except Exception as e:
-            log(f"Icon setup error: {e}")  # Log the error instead of silent pass
-            
-        self.root.geometry("820x620")
-        self.root.configure(bg="#f5f5f5")
-
         # Language from central config
         self.lang = get_config_value("language.selected", "tr")
-
-        try:
-            self.ensure_consent_ui()
-        except Exception as e:
-            log(f"consent ui error: {e}")
-
-        # Menu
-        menubar = tk.Menu(self.root)
-        menu_settings = tk.Menu(menubar, tearoff=0)
-        def set_lang(code):
-            try: 
-                update_language_config(code, True)
-                log(f"[CONFIG] Language changed to: {code}")
-            except Exception as e: 
-                log(f"[CONFIG] Language change error: {e}")
-            messagebox.showinfo(self.t("info"), self.t("restart_needed_lang"))
-            exe = ClientHelpers.current_executable()
-            try:
-                subprocess.Popen([exe] + sys.argv[1:], shell=False,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                pass
-            sys.exit(0)
-        lang_menu = tk.Menu(menu_settings, tearoff=0)
-        lang_menu.add_command(label=self.t("menu_lang_tr"), command=lambda: set_lang("tr"))
-        lang_menu.add_command(label=self.t("menu_lang_en"), command=lambda: set_lang("en"))
-        menu_settings.add_cascade(label=self.t("menu_language"), menu=lang_menu)
-        menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
-
-        menu_help = tk.Menu(menubar, tearoff=0)
-        # Static version label as disabled entry at the top
-        menu_help.add_command(label=f"Sürüm: v{__version__}" if self.lang == 'tr' else f"Version: v{__version__}", state='disabled')
-        # Logs opener
-        def open_logs():
-            try:
-                if os.name == 'nt':
-                    os.startfile(LOG_FILE)
-                else:
-                    webbrowser.open(f"file://{LOG_FILE}")
-                log(f"Log dosyası açıldı: {LOG_FILE}")
-            except Exception as e:
-                log(f"open_logs error: {e}")
-                messagebox.showerror(self.t("error"), self.t("log_file_error").format(error=e))
-        menu_help.add_command(label=self.t("menu_logs"), command=open_logs)
-        # GitHub opener
-        def open_github():
-            try:
-                webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
-            except Exception as e:
-                log(f"open_github error: {e}")
-        menu_help.add_command(label=self.t("menu_github"), command=open_github)
-        menu_help.add_separator()
-        menu_help.add_command(label=self.t("menu_check_updates"), command=self.check_updates_and_prompt)
-        menubar.add_cascade(label=self.t("menu_help"), menu=menu_help)
-        self.root.config(menu=menubar)
-
-        # Kapatma → tray
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        style = ttk.Style()
-        try: style.theme_use("clam")
-        except: pass
-        style.configure("TButton", font=("Arial", 11), padding=6)
-        style.configure("Treeview.Heading", font=("Arial", 10, "bold"))
-        style.configure("Treeview", rowheight=28)
-
-        # Sunucu Bilgileri
-        frame1 = tk.LabelFrame(self.root, text=self.t("server_info"), padx=10, pady=10, bg="#f5f5f5", font=("Arial", 11, "bold"))
-        frame1.pack(fill="x", padx=15, pady=10)
-
-        def copy_entry(entry: tk.Entry):
-            try:
-                value = entry.get()
-                self.root.clipboard_clear(); self.root.clipboard_append(value); self.root.update()
-                messagebox.showinfo(self.t("copy"), value)
-            except Exception as e:
-                log(f"copy_entry error: {e}")
 
         # Token'ı yükle
         token = self.token_manager.load_token(self.root, self.t)
         self.state["token"] = token
         self.state["public_ip"] = ClientHelpers.get_public_ip()
-        
-        # Create dashboard URL after token is loaded
-        dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token if token else ''}"
-        
-        def open_dashboard():
-            webbrowser.open(dashboard_url)
 
-        attack_count_val = self.fetch_attack_count_sync(token) if token else 0
-        if attack_count_val is None: attack_count_val = 0
+        # row_controls — ModernGUI populates this
+        self.row_controls = {}
 
-        info_rows = [
-            (self.t("lbl_pc_ip"), f"{SERVER_NAME} ({self.state['public_ip']})", "ip"),
-            (self.t("lbl_token"), token, "token"),
-            (self.t("lbl_dashboard"), dashboard_url, "dash"),
-            (self.t("lbl_attacks"), str(attack_count_val), "attacks"),
-        ]
+        # ── Modern GUI ── #
+        self.gui = ModernGUI(self)
 
-        # satırlar
-        for idx, (label, value, key) in enumerate(info_rows):
-            tk.Label(frame1, text=label + ":", font=("Arial", 11), bg="#f5f5f5",
-                     width=18, anchor="w").grid(row=idx, column=0, sticky="w", pady=3)
-            entry = tk.Entry(frame1, width=60, font=("Arial", 10))
-            if value is not None:
-                entry.insert(0, str(value))
-            entry.config(state="readonly")
-            entry.grid(row=idx, column=1, padx=5, pady=3)
+        # Consent dialog (modern)
+        try:
+            self.gui.show_consent_dialog()
+        except Exception as e:
+            log(f"consent ui error: {e}")
 
-            tk.Button(frame1, text="📋", command=lambda e=entry: copy_entry(e)).grid(row=idx, column=2, padx=3)
+        # Build the full interface
+        self.gui.build(self.root, startup_mode)
 
-            if key == "dash":
-                tk.Button(frame1, text="🌐 " + self.t("open"), command=open_dashboard).grid(row=idx, column=3, padx=3)
-
-            if key == "attacks":
-                tk.Button(frame1, text="↻ " + self.t("refresh"), command=lambda: self.refresh_attack_count(async_thread=True)).grid(row=idx, column=3, padx=3)
-                self.attack_entry = entry
-
-            if key == "ip":
-                self.ip_entry = entry
-
+        # Attack count polling
         self.poll_attack_count()
-
-        # Now that token is loaded, refresh attack count
         if token:
             self.refresh_attack_count(async_thread=True)
-
-        # Honeypot Servisleri
-        frame2 = tk.LabelFrame(self.root, text=self.t("port_tunnel"), padx=10, pady=10, bg="#f5f5f5", font=("Arial", 11, "bold"))
-        frame2.pack(fill="both", expand=True, padx=15, pady=10)
-
-        # Stacked per-row controls (better UX than table cell clicks)
-        self.row_controls = {}
-        saved_rows, saved_running = self.read_status()
-
-        def make_row(parent, p1, servis):
-            fr = tk.Frame(parent, bg="#ffffff", padx=8, pady=8, highlightbackground="#ddd", highlightthickness=1)
-            fr.pack(fill="x", pady=6)
-            # Columns grow: make the middle space flexible so the button sticks right
-            try:
-                fr.grid_columnconfigure(2, weight=1)
-            except Exception:
-                pass
-            # Labels
-            tk.Label(fr, text=f"{self.t('col_service')}: {servis}", bg="#ffffff", font=("Arial", 11, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
-            tk.Label(fr, text=f"{self.t('col_listen')}: {p1}", bg="#ffffff", anchor="w").grid(row=1, column=0, sticky="w")
-            # Status label
-            status_lbl = tk.Label(fr, text=f"{self.t('status')}: {self.t('status_stopped')}", bg="#ffffff", anchor="w")
-            status_lbl.grid(row=1, column=2, sticky="w", padx=10)
-            # Button (right aligned)
-            btn = tk.Button(fr, text=self.t('btn_row_start'), bg="#4CAF50", fg="white", padx=18, pady=6, font=("Arial", 10, "bold"))
-
-            def toggle():
-                is_rdp = (str(servis).upper() == 'RDP')
-
-                if is_rdp:
-                    self.service_manager.reconciliation_paused = True
-                    log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
-
-                try:
-                    cur = btn["text"].lower()
-                    if cur == self.t('btn_row_start').lower():
-                        # Pass manual_action=True for GUI-initiated actions
-                        if self.start_single_row(str(p1), str(servis), manual_action=True):
-                            # For non-RDP, the UI updates instantly.
-                            # For RDP, the popup handles the flow, but we can preemptively update the UI.
-                            if not is_rdp:
-                                btn.config(text=self.t('btn_row_stop'), bg="#E53935")
-                                fr.configure(bg="#EEF7EE")
-                                status_lbl.config(text=f"{self.t('status')}: {self.t('status_running')}")
-                    else:
-                        # Pass manual_action=True for GUI-initiated actions
-                        if self.stop_single_row(str(p1), str(servis), manual_action=True):
-                            if not is_rdp:
-                                btn.config(text=self.t('btn_row_start'), bg="#4CAF50")
-                                fr.configure(bg="#ffffff")
-                                status_lbl.config(text=f"{self.t('status')}: {self.t('status_stopped')}")
-                finally:
-                    if is_rdp:
-                        self.service_manager.reconciliation_paused = False
-                        log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
-                        # Immediately report the new status to the API
-                        threading.Thread(target=self.report_service_status_once, daemon=True).start()
-
-            btn.config(command=toggle)
-            
-            # RDP için özel RDP Taşı butonu ekle
-            if str(servis).upper() == 'RDP':
-                # RDP Taşı butonu (ana butonun soluna)
-                def get_rdp_button_text():
-                    try:
-                        is_protected, current_port = self.rdp_manager.get_rdp_protection_status()
-                        target_port = 3389 if is_protected else RDP_SECURE_PORT
-                        return f"RDP Taşı : {target_port}"
-                    except:
-                        return "RDP Taşı : 53389"
-                
-                rdp_btn = tk.Button(
-                    fr, 
-                    text=get_rdp_button_text(),
-                    bg="#FF9800" if self.rdp_manager.is_rdp_protection_active() else "#2196F3",
-                    fg="white", 
-                    padx=12, 
-                    pady=6, 
-                    font=("Arial", 9, "bold"),
-                    command=self.toggle_rdp_protection
-                )
-                rdp_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(0, 5))
-                
-                # Ana butonu biraz daha sağa kaydır
-                btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=5)
-                
-                # RDP buton referansını sakla
-                self.row_controls[(str(p1), str(servis).upper())] = {
-                    "frame": fr, "button": btn, "status": status_lbl, "rdp_button": rdp_btn
-                }
-            else:
-                # Diğer servisler için normal pozisyon
-                btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=10)
-                self.row_controls[(str(p1), str(servis).upper())] = {"frame": fr, "button": btn, "status": status_lbl}
-
-        for (p1, servis) in self.PORT_TABLOSU:
-            make_row(frame2, p1, servis)
-
-        # Apply previous state to UI
-        if saved_rows:
-            for (sp1, ssvc) in saved_rows:
-                key = (str(sp1), str(ssvc).upper())
-                rc = self.row_controls.get(key)
-                if rc:
-                    rc["button"].config(text=self.t('btn_row_stop'), bg="#E53935")
-                    rc["frame"].configure(bg="#EEF7EE")
-                    rc["status"].config(text=f"{self.t('status')}: {self.t('status_running')}")
-
-
-
-        # Legacy migration code removed - now using installer-based system
 
         # Optional silent auto-update on startup if configured and no active services
         try:
@@ -1860,21 +1581,10 @@ class CloudHoneypotClient:
         self.state["running"] = False
         self.state["selected_rows"] = []
         self.write_status([], running=False)
-        # Tray ikonunu kırmızı olarak güncelle (pasif)
         try:
             self.update_tray_icon()
         except Exception as e:
             log(f"Exception: {e}")
-            
-        # ===== BASIT STARTUP MODE ===== #
-        # Basit startup mode uygulama
-        if startup_mode == "minimized":
-            self._tray_mode.set()  # Mark as intentionally in tray
-            self.root.withdraw()   # Fully hide (not just iconify)
-        else:
-            # Normal GUI mode - only show if not already in tray
-            if not self._tray_mode.is_set():
-                self.root.deiconify()
 
         # show_cb is used by single-instance control server to bring window to front
         def _show_window():
@@ -1886,9 +1596,6 @@ class CloudHoneypotClient:
                     self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
-
-        # poll_attack_count is already started above — do NOT schedule again
-        # (previously caused double scheduling chains)
         
         # GUI sağlık durumu izleme başlat
         self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)

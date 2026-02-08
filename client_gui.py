@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Cloud Honeypot Client — Modern GUI Module (CustomTkinter).
+
+Tüm GUI bileşenlerini içerir. client.py'deki iş mantığından bağımsızdır.
+CloudHoneypotClient instance'ı üzerinden veri ve aksiyonlara erişir.
+"""
+
+import os
+import sys
+import threading
+import webbrowser
+import subprocess
+import tkinter as tk
+from tkinter import messagebox
+from typing import Optional, Callable, Dict, Any
+
+import customtkinter as ctk
+
+from client_helpers import log, ClientHelpers
+from client_utils import (
+    get_config_value, update_language_config, get_resource_path
+)
+from client_constants import (
+    LOG_FILE, RDP_SECURE_PORT, GITHUB_OWNER, GITHUB_REPO, __version__
+)
+
+
+# ─── Renk Paleti ─── #
+COLORS = {
+    "bg":           "#1a1a2e",
+    "card":         "#16213e",
+    "card_active":  "#1b3a4b",
+    "accent":       "#0f3460",
+    "green":        "#00c853",
+    "green_hover":  "#00e676",
+    "red":          "#ff1744",
+    "red_hover":    "#ff5252",
+    "orange":       "#ff9100",
+    "orange_hover": "#ffab40",
+    "blue":         "#2979ff",
+    "blue_hover":   "#448aff",
+    "text":         "#e0e0e0",
+    "text_dim":     "#9e9e9e",
+    "text_bright":  "#ffffff",
+    "border":       "#2a2a4a",
+    "entry_bg":     "#0d1b2a",
+    "status_dot_on":"#00e676",
+    "status_dot_off":"#ff1744",
+}
+
+# ─── Servis Emoji Haritası ─── #
+SERVICE_ICONS = {
+    "RDP":   "🖥️",
+    "MSSQL": "🗄️",
+    "MYSQL": "🐬",
+    "FTP":   "📁",
+    "SSH":   "🔐",
+}
+
+
+class ModernGUI:
+    """CustomTkinter tabanlı modern GUI — CloudHoneypotClient'a bağlanır."""
+
+    def __init__(self, app):
+        """
+        Args:
+            app: CloudHoneypotClient instance
+        """
+        self.app = app
+        self.row_controls: Dict[str, dict] = {}
+        self._attack_entry: Optional[ctk.CTkEntry] = None
+        self._ip_entry: Optional[ctk.CTkEntry] = None
+
+    # ─── Yardımcılar ─── #
+    def t(self, key: str) -> str:
+        return self.app.t(key)
+
+    def _gui_safe(self, func):
+        """Thread-safe CTk çağrısı"""
+        try:
+            if self.app.root and self.app.root.winfo_exists():
+                self.app.root.after(0, func)
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════════════════════════
+    #  ANA BUILD
+    # ═══════════════════════════════════════════════════════════════
+    def build(self, root: ctk.CTk, startup_mode: str = "gui"):
+        """Ana GUI'yi oluşturur — client.py build_gui() tarafından çağrılır."""
+        self.root = root
+
+        # ── Tema ── #
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        root.title(f"{self.t('app_title')} v{__version__}")
+        root.geometry("860x680")
+        root.configure(fg_color=COLORS["bg"])
+        root.minsize(780, 600)
+
+        # ── İkon ── #
+        self._set_window_icon(root)
+
+        # ── Menü (tk.Menu — CTk menü desteklemez) ── #
+        self._build_menu(root)
+
+        # ── Kapatma → tray ── #
+        root.protocol("WM_DELETE_WINDOW", self.app.on_close)
+
+        # ── Ana scroll container ── #
+        container = ctk.CTkScrollableFrame(root, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+
+        # ── Başlık Bandı ── #
+        self._build_header(container)
+
+        # ── Sunucu Bilgileri ── #
+        self._build_info_section(container)
+
+        # ── Honeypot Servisleri ── #
+        self._build_services_section(container)
+
+        # ── Başlangıç modu ── #
+        if startup_mode == "minimized":
+            self.app._tray_mode.set()
+            root.withdraw()
+        else:
+            if not self.app._tray_mode.is_set():
+                root.deiconify()
+
+    # ═══════════════════════════════════════════════════════════════
+    #  BAŞLIK BANDI
+    # ═══════════════════════════════════════════════════════════════
+    def _build_header(self, parent):
+        hdr = ctk.CTkFrame(parent, fg_color=COLORS["accent"], corner_radius=12, height=52)
+        hdr.pack(fill="x", pady=(0, 12))
+        hdr.pack_propagate(False)
+
+        lbl = ctk.CTkLabel(
+            hdr,
+            text=f"🛡️  {self.t('app_title')}  v{__version__}",
+            font=ctk.CTkFont(size=17, weight="bold"),
+            text_color=COLORS["text_bright"],
+        )
+        lbl.pack(side="left", padx=16)
+
+        # Sağ taraf — durum göstergesi
+        self._header_status = ctk.CTkLabel(
+            hdr,
+            text="● " + self.t("protection_inactive"),
+            font=ctk.CTkFont(size=13),
+            text_color=COLORS["red"],
+        )
+        self._header_status.pack(side="right", padx=16)
+
+    def update_header_status(self, active: bool):
+        """Koruma durumu badge'ini güncelle"""
+        try:
+            if active:
+                self._header_status.configure(
+                    text="● " + self.t("protection_active"),
+                    text_color=COLORS["green"],
+                )
+            else:
+                self._header_status.configure(
+                    text="● " + self.t("protection_inactive"),
+                    text_color=COLORS["red"],
+                )
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════════════════════════
+    #  SUNUCU BİLGİLERİ
+    # ═══════════════════════════════════════════════════════════════
+    def _build_info_section(self, parent):
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        # Başlık
+        ctk.CTkLabel(
+            sec, text=f"📊  {self.t('server_info')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=16, pady=(12, 8))
+
+        # Separator
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Token & IP yükle
+        token = self.app.state.get("token", "")
+        public_ip = self.app.state.get("public_ip", "")
+        from client_constants import SERVER_NAME
+        dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token or ''}"
+        attack_count = self.app.fetch_attack_count_sync(token) if token else 0
+        if attack_count is None:
+            attack_count = 0
+
+        rows = [
+            ("lbl_pc_ip",    f"{SERVER_NAME} ({public_ip})", "ip",      None),
+            ("lbl_token",    token or "",                     "token",   None),
+            ("lbl_dashboard", dashboard_url,                  "dash",    lambda: webbrowser.open(dashboard_url)),
+            ("lbl_attacks",  str(attack_count),               "attacks", None),
+        ]
+
+        grid = ctk.CTkFrame(sec, fg_color="transparent")
+        grid.pack(fill="x", padx=16, pady=(0, 12))
+        grid.columnconfigure(1, weight=1)
+
+        for idx, (label_key, value, key, action) in enumerate(rows):
+            # Etiket
+            ctk.CTkLabel(
+                grid, text=self.t(label_key) + ":",
+                font=ctk.CTkFont(size=13),
+                text_color=COLORS["text_dim"],
+                width=140, anchor="w",
+            ).grid(row=idx, column=0, sticky="w", pady=4)
+
+            # Entry
+            entry = ctk.CTkEntry(
+                grid, font=ctk.CTkFont(size=12),
+                fg_color=COLORS["entry_bg"],
+                border_color=COLORS["border"],
+                text_color=COLORS["text"],
+                state="normal",
+            )
+            entry.insert(0, str(value) if value else "")
+            entry.configure(state="disabled")
+            entry.grid(row=idx, column=1, sticky="ew", padx=(8, 4), pady=4)
+
+            # Kopyala butonu
+            ctk.CTkButton(
+                grid, text="📋", width=36, height=32,
+                fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+                command=lambda e=entry: self._copy_entry(e),
+            ).grid(row=idx, column=2, padx=2, pady=4)
+
+            # Özel butonlar
+            if key == "dash" and action:
+                ctk.CTkButton(
+                    grid, text="🌐 " + self.t("open"), width=80, height=32,
+                    fg_color=COLORS["blue"], hover_color=COLORS["blue_hover"],
+                    command=action,
+                ).grid(row=idx, column=3, padx=2, pady=4)
+
+            if key == "attacks":
+                ctk.CTkButton(
+                    grid, text="↻ " + self.t("refresh"), width=90, height=32,
+                    fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+                    command=lambda: self.app.refresh_attack_count(async_thread=True),
+                ).grid(row=idx, column=3, padx=2, pady=4)
+                self._attack_entry = entry
+
+            if key == "ip":
+                self._ip_entry = entry
+
+        # app referanslarını bağla
+        self.app.attack_entry = self._attack_entry
+        self.app.ip_entry = self._ip_entry
+
+    def _copy_entry(self, entry: ctk.CTkEntry):
+        """Entry içeriğini panoya kopyala"""
+        try:
+            entry.configure(state="normal")
+            value = entry.get()
+            entry.configure(state="disabled")
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+            self.root.update()
+            messagebox.showinfo(self.t("copy"), value)
+        except Exception as e:
+            log(f"copy error: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    #  HONEYPOT SERVİSLERİ
+    # ═══════════════════════════════════════════════════════════════
+    def _build_services_section(self, parent):
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 8))
+
+        # Başlık
+        ctk.CTkLabel(
+            sec, text=f"🐝  {self.t('port_tunnel')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=16, pady=(12, 8))
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Servis kartları
+        saved_rows, saved_running = self.app.read_status()
+        running_names = [str(r[1]).upper() for r in saved_rows] if saved_rows else []
+
+        for (port, service) in self.app.PORT_TABLOSU:
+            is_active = str(service).upper() in running_names
+            self._build_service_card(sec, str(port), str(service), is_active)
+
+        # Alt padding
+        ctk.CTkFrame(sec, height=8, fg_color="transparent").pack()
+
+    def _build_service_card(self, parent, port: str, service: str, initially_active: bool):
+        """Tek bir servis kartı oluşturur."""
+        svc_upper = service.upper()
+        icon = SERVICE_ICONS.get(svc_upper, "⚙️")
+
+        # ── Kart Frame ── #
+        card_color = COLORS["card_active"] if initially_active else COLORS["bg"]
+        card = ctk.CTkFrame(parent, fg_color=card_color, corner_radius=10,
+                            border_width=1, border_color=COLORS["border"])
+        card.pack(fill="x", padx=16, pady=4)
+        card.columnconfigure(1, weight=1)
+
+        # ── Sol: İkon + İsim ── #
+        left = ctk.CTkFrame(card, fg_color="transparent")
+        left.grid(row=0, column=0, padx=(12, 0), pady=10, sticky="w")
+
+        ctk.CTkLabel(
+            left, text=icon, font=ctk.CTkFont(size=22),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left", padx=(0, 8))
+
+        name_frame = ctk.CTkFrame(left, fg_color="transparent")
+        name_frame.pack(side="left")
+
+        ctk.CTkLabel(
+            name_frame, text=service,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w")
+
+        port_lbl = ctk.CTkLabel(
+            name_frame, text=f"Port: {port}",
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_dim"],
+        )
+        port_lbl.pack(anchor="w")
+
+        # ── Orta: Durum ── #
+        status_text = self.t("status_running") if initially_active else self.t("status_stopped")
+        status_color = COLORS["status_dot_on"] if initially_active else COLORS["status_dot_off"]
+
+        status_frame = ctk.CTkFrame(card, fg_color="transparent")
+        status_frame.grid(row=0, column=1, padx=8, sticky="e")
+
+        status_dot = ctk.CTkLabel(
+            status_frame, text="●",
+            font=ctk.CTkFont(size=14),
+            text_color=status_color,
+        )
+        status_dot.pack(side="left", padx=(0, 4))
+
+        status_lbl = ctk.CTkLabel(
+            status_frame, text=status_text,
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_dim"],
+        )
+        status_lbl.pack(side="left")
+
+        # ── Sağ: Butonlar ── #
+        right = ctk.CTkFrame(card, fg_color="transparent")
+        right.grid(row=0, column=2, padx=(4, 12), pady=8, sticky="e")
+
+        # RDP özel butonu
+        rdp_btn = None
+        if svc_upper == "RDP":
+            rdp_btn = self._build_rdp_move_button(right)
+            rdp_btn.pack(side="left", padx=(0, 6))
+
+        # Başlat / Durdur butonu
+        if initially_active:
+            btn_text = self.t("btn_row_stop")
+            btn_color = COLORS["red"]
+            btn_hover = COLORS["red_hover"]
+        else:
+            btn_text = self.t("btn_row_start")
+            btn_color = COLORS["green"]
+            btn_hover = COLORS["green_hover"]
+
+        toggle_btn = ctk.CTkButton(
+            right, text=btn_text, width=100, height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=btn_color, hover_color=btn_hover,
+            corner_radius=8,
+        )
+        toggle_btn.pack(side="left")
+
+        # ── Referans kaydet ── #
+        ctrl = {
+            "card": card, "button": toggle_btn, "status_lbl": status_lbl,
+            "status_dot": status_dot, "rdp_button": rdp_btn,
+        }
+        self.row_controls[(port, svc_upper)] = ctrl
+
+        # client.py uyumluluğu
+        self.app.row_controls[(port, svc_upper)] = {
+            "frame": card, "button": toggle_btn, "status": status_lbl,
+        }
+        if rdp_btn:
+            self.app.row_controls[(port, svc_upper)]["rdp_button"] = rdp_btn
+
+        # ── Toggle komutu ── #
+        def toggle(p=port, s=service, b=toggle_btn, c=card, sl=status_lbl, sd=status_dot):
+            self._toggle_service(p, s, b, c, sl, sd)
+
+        toggle_btn.configure(command=toggle)
+
+    def _build_rdp_move_button(self, parent) -> ctk.CTkButton:
+        """RDP Taşı butonu oluşturur."""
+        try:
+            is_protected, _ = self.app.rdp_manager.get_rdp_protection_status()
+            target = 3389 if is_protected else RDP_SECURE_PORT
+            color = COLORS["orange"] if is_protected else COLORS["blue"]
+            hover = COLORS["orange_hover"] if is_protected else COLORS["blue_hover"]
+        except Exception:
+            target = RDP_SECURE_PORT
+            color = COLORS["blue"]
+            hover = COLORS["blue_hover"]
+
+        btn = ctk.CTkButton(
+            parent, text=f"RDP Taşı: {target}", width=120, height=36,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=color, hover_color=hover, corner_radius=8,
+            command=self.app.toggle_rdp_protection,
+        )
+        return btn
+
+    # ─── Servis Toggle ─── #
+    def _toggle_service(self, port, service, btn, card, status_lbl, status_dot):
+        """Tek bir servisi başlat/durdur — iş mantığı client.py'de."""
+        svc_upper = str(service).upper()
+        is_rdp = svc_upper == "RDP"
+
+        if is_rdp:
+            self.app.service_manager.reconciliation_paused = True
+            log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
+
+        try:
+            cur_text = btn.cget("text").lower()
+            if cur_text == self.t("btn_row_start").lower():
+                if self.app.start_single_row(port, service, manual_action=True):
+                    if not is_rdp:
+                        self._set_card_active(btn, card, status_lbl, status_dot)
+            else:
+                if self.app.stop_single_row(port, service, manual_action=True):
+                    if not is_rdp:
+                        self._set_card_inactive(btn, card, status_lbl, status_dot)
+        finally:
+            if is_rdp:
+                self.app.service_manager.reconciliation_paused = False
+                log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
+                threading.Thread(target=self.app.report_service_status_once, daemon=True).start()
+
+    # ─── Kart Durumu Güncelleyiciler ─── #
+    def _set_card_active(self, btn, card, status_lbl, status_dot):
+        btn.configure(text=self.t("btn_row_stop"), fg_color=COLORS["red"], hover_color=COLORS["red_hover"])
+        card.configure(fg_color=COLORS["card_active"])
+        status_lbl.configure(text=self.t("status_running"))
+        status_dot.configure(text_color=COLORS["status_dot_on"])
+
+    def _set_card_inactive(self, btn, card, status_lbl, status_dot):
+        btn.configure(text=self.t("btn_row_start"), fg_color=COLORS["green"], hover_color=COLORS["green_hover"])
+        card.configure(fg_color=COLORS["bg"])
+        status_lbl.configure(text=self.t("status_stopped"))
+        status_dot.configure(text_color=COLORS["status_dot_off"])
+
+    # ═══════════════════════════════════════════════════════════════
+    #  UPDATE ROW UI — client.py._update_row_ui tarafından çağrılır
+    # ═══════════════════════════════════════════════════════════════
+    def update_row_ui(self, listen_port: str, service_name: str, active: bool):
+        """Bir servis satırının UI durumunu güncelle (thread-safe)."""
+        def apply():
+            key = (str(listen_port), str(service_name).upper())
+            ctrl = self.row_controls.get(key)
+            if not ctrl:
+                return
+            btn = ctrl["button"]
+            card = ctrl["card"]
+            sl = ctrl["status_lbl"]
+            sd = ctrl["status_dot"]
+            if active:
+                self._set_card_active(btn, card, sl, sd)
+            else:
+                self._set_card_inactive(btn, card, sl, sd)
+
+            # Header badge
+            any_active = len(self.app.service_manager.running_services) > 0
+            self.update_header_status(any_active)
+
+        self._gui_safe(apply)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  RDP BUTON GÜNCELLEME
+    # ═══════════════════════════════════════════════════════════════
+    def update_rdp_button(self):
+        """RDP Taşı butonunun metnini/rengini güncel duruma göre güncelle."""
+        try:
+            rdp_ctrl = self.row_controls.get(("3389", "RDP"))
+            if not rdp_ctrl or not rdp_ctrl.get("rdp_button"):
+                return
+            rdp_btn = rdp_ctrl["rdp_button"]
+            is_protected, _ = self.app.rdp_manager.get_rdp_protection_status()
+            target = 3389 if is_protected else RDP_SECURE_PORT
+            if is_protected:
+                rdp_btn.configure(text=f"RDP Taşı: {target}",
+                                  fg_color=COLORS["orange"], hover_color=COLORS["orange_hover"])
+            else:
+                rdp_btn.configure(text=f"RDP Taşı: {target}",
+                                  fg_color=COLORS["blue"], hover_color=COLORS["blue_hover"])
+        except Exception as e:
+            log(f"RDP buton güncelleme hatası: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    #  MENÜ
+    # ═══════════════════════════════════════════════════════════════
+    def _build_menu(self, root):
+        menubar = tk.Menu(root, bg="#2a2a4a", fg="#e0e0e0", activebackground="#0f3460",
+                          activeforeground="white", relief="flat")
+
+        # Ayarlar
+        menu_settings = tk.Menu(menubar, tearoff=0, bg="#2a2a4a", fg="#e0e0e0",
+                                activebackground="#0f3460", activeforeground="white")
+        lang_menu = tk.Menu(menu_settings, tearoff=0, bg="#2a2a4a", fg="#e0e0e0",
+                            activebackground="#0f3460", activeforeground="white")
+        lang_menu.add_command(label=self.t("menu_lang_tr"), command=lambda: self._set_lang("tr"))
+        lang_menu.add_command(label=self.t("menu_lang_en"), command=lambda: self._set_lang("en"))
+        menu_settings.add_cascade(label=self.t("menu_language"), menu=lang_menu)
+        menubar.add_cascade(label=self.t("menu_settings"), menu=menu_settings)
+
+        # Yardım
+        menu_help = tk.Menu(menubar, tearoff=0, bg="#2a2a4a", fg="#e0e0e0",
+                            activebackground="#0f3460", activeforeground="white")
+        ver_label = f"Sürüm: v{__version__}" if self.app.lang == "tr" else f"Version: v{__version__}"
+        menu_help.add_command(label=ver_label, state="disabled")
+        menu_help.add_command(label=self.t("menu_logs"), command=self._open_logs)
+        menu_help.add_command(label=self.t("menu_github"), command=self._open_github)
+        menu_help.add_separator()
+        menu_help.add_command(label=self.t("menu_check_updates"),
+                              command=self.app.check_updates_and_prompt)
+        menubar.add_cascade(label=self.t("menu_help"), menu=menu_help)
+
+        root.config(menu=menubar)
+
+    def _set_lang(self, code: str):
+        try:
+            update_language_config(code, True)
+            log(f"[CONFIG] Language changed to: {code}")
+        except Exception as e:
+            log(f"[CONFIG] Language change error: {e}")
+        messagebox.showinfo(self.t("info"), self.t("restart_needed_lang"))
+        exe = ClientHelpers.current_executable()
+        try:
+            subprocess.Popen([exe] + sys.argv[1:], shell=False,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception:
+            pass
+        sys.exit(0)
+
+    def _open_logs(self):
+        try:
+            if os.name == "nt":
+                os.startfile(LOG_FILE)
+            else:
+                webbrowser.open(f"file://{LOG_FILE}")
+        except Exception as e:
+            log(f"open_logs error: {e}")
+            messagebox.showerror(self.t("error"), self.t("log_file_error").format(error=e))
+
+    def _open_github(self):
+        try:
+            webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
+        except Exception as e:
+            log(f"open_github error: {e}")
+
+    # ─── Window İkon ─── #
+    def _set_window_icon(self, root):
+        try:
+            icon_path = get_resource_path("certs/honeypot.ico")
+            if os.path.exists(icon_path):
+                root.iconbitmap(icon_path)
+                try:
+                    from PIL import Image, ImageTk
+                    img = Image.open(icon_path)
+                    photo = ImageTk.PhotoImage(img)
+                    root.iconphoto(True, photo)
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"Icon setup error: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    #  CONSENT DİALOG (modern)
+    # ═══════════════════════════════════════════════════════════════
+    def show_consent_dialog(self) -> dict:
+        """Modern onay dialogu gösterir. Kabul edilmişse skip eder."""
+        cons = self.app.read_consent()
+        if cons.get("accepted"):
+            self.app.state["consent"] = cons
+            return cons
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(self.t("consent_title"))
+        dialog.geometry("520x380")
+        dialog.configure(fg_color=COLORS["bg"])
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # İçerik
+        ctk.CTkLabel(
+            dialog, text=self.t("consent_msg").replace("\\n", "\n"),
+            font=ctk.CTkFont(size=13), text_color=COLORS["text"],
+            justify="left", wraplength=480,
+        ).pack(padx=20, pady=(20, 12))
+
+        var_rdp = ctk.BooleanVar(value=True)
+        var_auto = ctk.BooleanVar(value=False)
+
+        ctk.CTkCheckBox(
+            dialog, text=self.t("consent_rdp"), variable=var_rdp,
+            fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+            text_color=COLORS["text"],
+        ).pack(anchor="w", padx=24, pady=4)
+
+        ctk.CTkCheckBox(
+            dialog, text=self.t("consent_auto"), variable=var_auto,
+            fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+            text_color=COLORS["text"],
+        ).pack(anchor="w", padx=24, pady=4)
+
+        accepted = {"val": False}
+
+        def do_accept():
+            accepted["val"] = True
+            self.app.write_consent(True, var_rdp.get(), var_auto.get())
+            self.app.state["consent"] = self.app.read_consent()
+            dialog.destroy()
+
+        def do_cancel():
+            self.app.write_consent(False, var_rdp.get(), var_auto.get())
+            self.app.state["consent"] = self.app.read_consent()
+            dialog.destroy()
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=16)
+
+        ctk.CTkButton(
+            btn_frame, text=self.t("consent_accept"), width=140, height=38,
+            fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"), corner_radius=8,
+            command=do_accept,
+        ).pack(side="left", padx=8)
+
+        ctk.CTkButton(
+            btn_frame, text=self.t("consent_cancel"), width=120, height=38,
+            fg_color=COLORS["accent"], hover_color=COLORS["red"],
+            font=ctk.CTkFont(size=13), corner_radius=8,
+            command=do_cancel,
+        ).pack(side="left", padx=8)
+
+        dialog.wait_window()
+        return self.app.state.get("consent", cons)

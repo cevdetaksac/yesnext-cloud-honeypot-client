@@ -1,12 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os, importlib
 
+# CustomTkinter veri dosyalarını bul
+ctk_path = os.path.dirname(importlib.import_module('customtkinter').__file__)
 
 a = Analysis(
     ['client.py'],
     pathex=[],
     binaries=[],
-    datas=[('certs/*.ico', 'certs'), ('certs/*.png', 'certs'), ('certs/*.bmp', 'certs'), ('client_config.json', '.'), ('client_lang.json', '.'), ('client_memory_restart.py', '.'), ('memory_restart.ps1', '.')],
-    hiddenimports=['client_memory_restart', 'client_honeypots', 'client_service_manager', 'paramiko', 'psutil', 'win32event', 'win32api', 'winerror'],
+    datas=[('certs/*.ico', 'certs'), ('certs/*.png', 'certs'), ('certs/*.bmp', 'certs'), ('client_config.json', '.'), ('client_lang.json', '.'), ('client_memory_restart.py', '.'), ('memory_restart.ps1', '.'), ('client_gui.py', '.'), (os.path.join(ctk_path, 'assets'), 'customtkinter/assets')],
+    hiddenimports=['client_memory_restart', 'client_honeypots', 'client_service_manager', 'client_gui', 'customtkinter', 'darkdetect', 'paramiko', 'psutil', 'win32event', 'win32api', 'winerror'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

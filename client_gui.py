@@ -8,6 +8,7 @@ CloudHoneypotClient instance'ı üzerinden veri ve aksiyonlara erişir.
 
 import os
 import sys
+import time
 import threading
 import webbrowser
 import subprocess
@@ -90,15 +91,16 @@ class ModernGUI:
     def build(self, root: ctk.CTk, startup_mode: str = "gui"):
         """Ana GUI'yi oluşturur — client.py build_gui() tarafından çağrılır."""
         self.root = root
+        self._start_time = time.time()  # uptime izleme
 
         # ── Tema ── #
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
         root.title(f"{self.t('app_title')} v{__version__}")
-        root.geometry("860x680")
+        root.geometry("880x740")
         root.configure(fg_color=COLORS["bg"])
-        root.minsize(780, 600)
+        root.minsize(800, 640)
 
         # ── İkon ── #
         self._set_window_icon(root)
@@ -116,11 +118,17 @@ class ModernGUI:
         # ── Başlık Bandı ── #
         self._build_header(container)
 
+        # ── Dashboard İstatistik Kartları ── #
+        self._build_dashboard(container)
+
         # ── Sunucu Bilgileri ── #
         self._build_info_section(container)
 
         # ── Honeypot Servisleri ── #
         self._build_services_section(container)
+
+        # ── Periyodik Dashboard Güncelleme (her 5 sn) ── #
+        self._schedule_dashboard_refresh()
 
         # ── Başlangıç modu ── #
         if startup_mode == "minimized":
@@ -172,6 +180,217 @@ class ModernGUI:
             pass
 
     # ═══════════════════════════════════════════════════════════════
+    #  DASHBOARD İSTATİSTİK KARTLARI
+    # ═══════════════════════════════════════════════════════════════
+    def _build_dashboard(self, parent):
+        """Mini dashboard — canlı istatistik kartları."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        # Başlık
+        hdr_row = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr_row.pack(fill="x", padx=16, pady=(12, 6))
+
+        ctk.CTkLabel(
+            hdr_row, text=f"📈  {self.t('dash_title')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        # Canlı pulse göstergesi (●)
+        self._pulse_dot = ctk.CTkLabel(
+            hdr_row, text="●",
+            font=ctk.CTkFont(size=10),
+            text_color=COLORS["green"],
+        )
+        self._pulse_dot.pack(side="right", padx=8)
+        self._pulse_visible = True
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(0, 10))
+
+        # Kart grid — 2 satır × 3 sütun
+        grid = ctk.CTkFrame(sec, fg_color="transparent")
+        grid.pack(fill="x", padx=12, pady=(0, 14))
+        for c in range(3):
+            grid.columnconfigure(c, weight=1)
+
+        # Referans dict — refresh'te güncellenir
+        self._dash_cards: Dict[str, dict] = {}
+
+        # ── İlk değerleri hesapla ── #
+        token = self.app.state.get("token", "")
+        total_attacks = self.app.fetch_attack_count_sync(token) if token else 0
+        if total_attacks is None:
+            total_attacks = 0
+        # Cache for re-use (info section, dashboard refresh)
+        self.app._last_attack_count = total_attacks
+        active_count = len(self.app.service_manager.running_services)
+        session_attacks = 0
+        try:
+            session_attacks = self.app.service_manager.session_stats.get("total_credentials", 0)
+        except Exception:
+            pass
+
+        # ── Kartları oluştur ── #
+        cards_data = [
+            # (key, emoji, label_key, value, color, row, col)
+            ("total_attacks",   "🎯", "dash_total_attacks",   str(total_attacks),   COLORS["red"],    0, 0),
+            ("session_attacks", "⚡", "dash_session_attacks",  str(session_attacks), COLORS["orange"], 0, 1),
+            ("active_services", "🟢", "dash_active_services",  f"{active_count}/5",  COLORS["green"],  0, 2),
+            ("uptime",          "⏱️", "dash_uptime",           "0dk",                COLORS["blue"],   1, 0),
+            ("last_attack",     "🕵️", "dash_last_attack",      self.t("dash_no_attack"), COLORS["text_dim"], 1, 1),
+            ("connection",      "🌐", "dash_connection",       self.t("dash_connected"), COLORS["green"], 1, 2),
+        ]
+
+        for key, emoji, label_key, value, color, row, col in cards_data:
+            card = self._create_stat_card(grid, emoji, self.t(label_key), value, color)
+            card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
+            self._dash_cards[key] = card
+
+    def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
+        """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""
+        card = ctk.CTkFrame(parent, fg_color=COLORS["bg"], corner_radius=10,
+                            border_width=1, border_color=COLORS["border"])
+
+        # Emoji
+        ctk.CTkLabel(
+            card, text=emoji, font=ctk.CTkFont(size=20),
+        ).pack(anchor="w", padx=12, pady=(10, 0))
+
+        # Değer (büyük rakam)
+        value_lbl = ctk.CTkLabel(
+            card, text=value,
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=color,
+        )
+        value_lbl.pack(anchor="w", padx=12, pady=(2, 0))
+
+        # Açıklama
+        ctk.CTkLabel(
+            card, text=label,
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"],
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+        # value_lbl referansı card objesine ekleniyor
+        card._value_lbl = value_lbl  # type: ignore[attr-defined]
+        return card
+
+    # ─── Dashboard Refresh ─── #
+    def _schedule_dashboard_refresh(self):
+        """Her 5 saniyede bir dashboard kartlarını günceller."""
+        self._refresh_dashboard()
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.after(5000, self._schedule_dashboard_refresh)
+        except Exception:
+            pass
+
+    def _refresh_dashboard(self):
+        """Dashboard kartlarının anlık değerlerini güncelle."""
+        try:
+            if not hasattr(self, '_dash_cards') or not self._dash_cards:
+                return
+
+            sm = self.app.service_manager
+
+            # 1) Aktif servisler
+            active_count = len(sm.running_services)
+            total_services = len(self.app.PORT_TABLOSU)
+            self._update_card("active_services", f"{active_count}/{total_services}",
+                              COLORS["green"] if active_count > 0 else COLORS["text_dim"])
+
+            # 2) Oturum saldırıları
+            sess = sm.session_stats
+            session_count = sess.get("total_credentials", 0)
+            self._update_card("session_attacks", str(session_count),
+                              COLORS["orange"] if session_count > 0 else COLORS["text_dim"])
+
+            # 3) Toplam saldırılar (API'den — _last_attack_count client.py tarafından güncellenir)
+            total = getattr(self.app, '_last_attack_count', None)
+            if total is not None:
+                self._update_card("total_attacks", str(total),
+                                  COLORS["red"] if total > 0 else COLORS["text_dim"])
+
+            # 4) Uptime
+            elapsed = int(time.time() - self._start_time)
+            self._update_card("uptime", self._format_uptime(elapsed), COLORS["blue"])
+
+            # 5) Son saldırı zamanı
+            last_ts = sess.get("last_attack_ts")
+            if last_ts:
+                ago = self._format_ago(time.time() - last_ts)
+                last_ip = sess.get("last_attacker_ip", "")
+                last_svc = sess.get("last_service", "")
+                display = f"{last_ip} ({last_svc})" if last_ip else ago
+                self._update_card("last_attack", display, COLORS["orange"])
+            else:
+                self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
+
+            # 6) API bağlantı durumu
+            api_ok = getattr(self.app, '_last_attack_count', None) is not None
+            if api_ok:
+                self._update_card("connection", self.t("dash_connected"), COLORS["green"])
+            else:
+                self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
+
+            # Pulse animasyonu
+            self._pulse_visible = not self._pulse_visible
+            if hasattr(self, '_pulse_dot'):
+                pulse_color = COLORS["green"] if active_count > 0 else COLORS["text_dim"]
+                self._pulse_dot.configure(
+                    text_color=pulse_color if self._pulse_visible else COLORS["bg"]
+                )
+
+            # Header badge senkronizasyonu
+            self.update_header_status(active_count > 0)
+
+        except Exception:
+            pass
+
+    def _update_card(self, key: str, value: str, color: str):
+        """Bir dashboard kartının değerini güncelle."""
+        card = self._dash_cards.get(key)
+        if card and hasattr(card, '_value_lbl'):
+            try:
+                card._value_lbl.configure(text=value, text_color=color)
+            except Exception:
+                pass
+
+    def _format_uptime(self, seconds: int) -> str:
+        """Saniyeyi insanca okunur süreye çevirir."""
+        d = self.t("dash_days")
+        h = self.t("dash_hours")
+        m = self.t("dash_minutes")
+        if seconds < 60:
+            return f"<1{m}"
+        elif seconds < 3600:
+            return f"{seconds // 60}{m}"
+        elif seconds < 86400:
+            hrs = seconds // 3600
+            mins = (seconds % 3600) // 60
+            return f"{hrs}{h} {mins}{m}"
+        else:
+            days = seconds // 86400
+            hrs = (seconds % 86400) // 3600
+            return f"{days}{d} {hrs}{h}"
+
+    def _format_ago(self, seconds: float) -> str:
+        """Saniyeyi '3dk önce' formatına çevirir."""
+        s = int(seconds)
+        if s < 10:
+            return self.t("dash_just_now")
+        elif s < 60:
+            return self.t("dash_ago").format(val=f"{s}{self.t('dash_seconds')}")
+        elif s < 3600:
+            return self.t("dash_ago").format(val=f"{s // 60}{self.t('dash_minutes')}")
+        elif s < 86400:
+            return self.t("dash_ago").format(val=f"{s // 3600}{self.t('dash_hours')}")
+        else:
+            return self.t("dash_ago").format(val=f"{s // 86400}{self.t('dash_days')}")
+
+    # ═══════════════════════════════════════════════════════════════
     #  SUNUCU BİLGİLERİ
     # ═══════════════════════════════════════════════════════════════
     def _build_info_section(self, parent):
@@ -194,9 +413,8 @@ class ModernGUI:
         public_ip = self.app.state.get("public_ip", "")
         from client_constants import SERVER_NAME
         dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token or ''}"
-        attack_count = self.app.fetch_attack_count_sync(token) if token else 0
-        if attack_count is None:
-            attack_count = 0
+        # Re-use attack count from dashboard build (avoid duplicate API call)
+        attack_count = getattr(self.app, '_last_attack_count', 0) or 0
 
         rows = [
             ("lbl_pc_ip",    f"{SERVER_NAME} ({public_ip})", "ip",      None),

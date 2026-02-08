@@ -110,7 +110,23 @@
     "api_connection_failed": "API bağlantısı başarısız!",
     "api_connection_retry": "Yeniden deneme:",
     "api_connection_info": "Uygulama çalışabilmesi için API sunucusuna bağlantı gereklidir.\\n5 saniye arayla en fazla 5 kez deneme yapılacak.",
-    "api_connection_error": "API sunucusuna bağlanılamadı!\\n\\nLütfen internet bağlantınızı kontrol edin ve tekrar deneyin.\\nUygulama kapatılacak."
+    "api_connection_error": "API sunucusuna bağlanılamadı!\\n\\nLütfen internet bağlantınızı kontrol edin ve tekrar deneyin.\\nUygulama kapatılacak.",
+    "dash_title": "Anlık Durum",
+    "dash_total_attacks": "Toplam Saldırı",
+    "dash_session_attacks": "Oturum Saldırıları",
+    "dash_active_services": "Aktif Servisler",
+    "dash_uptime": "Çalışma Süresi",
+    "dash_last_attack": "Son Saldırı",
+    "dash_no_attack": "henüz yok",
+    "dash_ago": "{val} önce",
+    "dash_just_now": "az önce",
+    "dash_days": "g",
+    "dash_hours": "sa",
+    "dash_minutes": "dk",
+    "dash_seconds": "sn",
+    "dash_connection": "API Bağlantısı",
+    "dash_connected": "Bağlı",
+    "dash_disconnected": "Bağlantı Yok"
   },
   "en": {
     "app_title": "Cloud Honeypot Security",
@@ -232,6 +248,22 @@
     "api_connection_failed": "API connection failed!",
     "api_connection_retry": "Retrying in:",
     "api_connection_info": "API server connection is required for the application to work.\\nUp to 5 attempts will be made with 5-second intervals.",
-    "api_connection_error": "Could not connect to API server!\\n\\nPlease check your internet connection and try again.\\nThe application will be closed."
+    "api_connection_error": "Could not connect to API server!\\n\\nPlease check your internet connection and try again.\\nThe application will be closed.",
+    "dash_title": "Live Status",
+    "dash_total_attacks": "Total Attacks",
+    "dash_session_attacks": "Session Attacks",
+    "dash_active_services": "Active Services",
+    "dash_uptime": "Uptime",
+    "dash_last_attack": "Last Attack",
+    "dash_no_attack": "none yet",
+    "dash_ago": "{val} ago",
+    "dash_just_now": "just now",
+    "dash_days": "d",
+    "dash_hours": "h",
+    "dash_minutes": "m",
+    "dash_seconds": "s",
+    "dash_connection": "API Connection",
+    "dash_connected": "Connected",
+    "dash_disconnected": "Disconnected"
   }
 }

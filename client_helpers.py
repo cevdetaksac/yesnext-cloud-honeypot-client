@@ -113,11 +113,22 @@ class ClientHelpers:
             return _ip_cache['ip'] if _ip_cache['ip'] else "0.0.0.0"
 
     @staticmethod
-    def safe_set_entry(entry: tk.Entry, text: str):
-        """Safely update entry widget text"""
+    def safe_set_entry(entry, text: str):
+        """Safely update entry widget text (supports both tk.Entry and CTkEntry)"""
         try:
-            entry.delete(0, tk.END)
+            # CTkEntry requires configure to toggle state
+            if hasattr(entry, 'configure'):
+                try:
+                    entry.configure(state="normal")
+                except Exception:
+                    pass
+            entry.delete(0, "end")
             entry.insert(0, str(text) if text else "")
+            if hasattr(entry, 'configure'):
+                try:
+                    entry.configure(state="disabled")
+                except Exception:
+                    pass
         except Exception as e:
             log(f"Entry update error: {e}")
 

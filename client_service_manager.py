@@ -104,6 +104,17 @@ class ServiceManager:
         # Reconciliation pause flag (RDP transition sırasında)
         self.reconciliation_paused = False
 
+        # Session-level statistics (local — never reset until process restarts)
+        self.session_stats = {
+            "total_credentials": 0,
+            "per_service": {},        # {"SSH": 3, "FTP": 1, ...}
+            "last_attack_ts": None,   # timestamp of last credential captured
+            "last_attacker_ip": None,
+            "last_service": None,
+            "unique_ips": set(),
+        }
+        self._stats_lock = threading.Lock()
+
         # Shutdown signal
         self._stop_evt = threading.Event()
 
@@ -274,6 +285,17 @@ class ServiceManager:
             self._attack_queue.put_nowait(entry)
         except queue.Full:
             log(f"[ServiceManager] Attack queue dolu — credential atılıyor ({service})")
+
+        # Update session stats
+        with self._stats_lock:
+            s = self.session_stats
+            s["total_credentials"] += 1
+            svc_upper = str(service).upper()
+            s["per_service"][svc_upper] = s["per_service"].get(svc_upper, 0) + 1
+            s["last_attack_ts"] = time.time()
+            s["last_attacker_ip"] = attacker_ip
+            s["last_service"] = svc_upper
+            s["unique_ips"].add(attacker_ip)
 
     # ==================== BATCH REPORTER THREAD ==================== #
 

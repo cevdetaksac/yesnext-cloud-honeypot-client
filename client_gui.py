@@ -738,30 +738,61 @@ class ModernGUI:
         except Exception as e:
             log(f"RDP buton güncelleme hatası: {e}")
 
+    def _close_popup(self):
+        """Mevcut popup'ı güvenli şekilde kapat."""
+        popup = getattr(self, "_active_popup", None)
+        if popup is not None:
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            self._active_popup = None
+        # Global click binding'i temizle
+        bid = getattr(self, "_popup_click_bid", None)
+        if bid is not None:
+            try:
+                self.root.unbind("<Button-1>", bid)
+            except Exception:
+                pass
+            self._popup_click_bid = None
+
     def _show_popup_menu(self, anchor_widget, menu_type: str):
         """CTkToplevel popup menü — dark mode uyumlu."""
+        # Zaten açıksa kapat (toggle davranışı)
+        if getattr(self, "_active_popup", None) is not None:
+            self._close_popup()
+            return
+
         popup = ctk.CTkToplevel(self.root)
         popup.overrideredirect(True)
         popup.configure(fg_color=COLORS["card"])
         popup.attributes("-topmost", True)
+        self._active_popup = popup
 
         # Pozisyon hesapla
         x = anchor_widget.winfo_rootx()
         y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height() + 2
         popup.geometry(f"+{x}+{y}")
 
+        def _run_and_close(action):
+            """Menü öğesi tıklanınca: önce kapat, sonra action çalıştır."""
+            def _handler():
+                self._close_popup()
+                action()
+            return _handler
+
         items = []
         if menu_type == "settings":
             items = [
-                (f"🇹🇷  {self.t('menu_lang_tr')}", lambda: (popup.destroy(), self._set_lang("tr"))),
-                (f"🇬🇧  {self.t('menu_lang_en')}", lambda: (popup.destroy(), self._set_lang("en"))),
+                (f"🇹🇷  {self.t('menu_lang_tr')}", _run_and_close(lambda: self._set_lang("tr"))),
+                (f"🇬🇧  {self.t('menu_lang_en')}", _run_and_close(lambda: self._set_lang("en"))),
             ]
         elif menu_type == "help":
             items = [
-                (f"📄  {self.t('menu_logs')}", lambda: (popup.destroy(), self._open_logs())),
-                (f"🌐  {self.t('menu_github')}", lambda: (popup.destroy(), self._open_github())),
+                (f"📄  {self.t('menu_logs')}", _run_and_close(self._open_logs)),
+                (f"🌐  {self.t('menu_github')}", _run_and_close(self._open_github)),
                 (None, None),  # separator
-                (f"🔄  {self.t('menu_check_updates')}", lambda: (popup.destroy(), self.app.check_updates_and_prompt())),
+                (f"🔄  {self.t('menu_check_updates')}", _run_and_close(self.app.check_updates_and_prompt)),
             ]
 
         for label, cmd in items:
@@ -777,14 +808,30 @@ class ModernGUI:
                 )
                 btn.pack(fill="x", padx=4, pady=1)
 
-        # Dışına tıklanınca kapat
-        def _on_focus_out(event):
+        # Dışına tıklanınca kapat (root üzerinde global click)
+        def _on_root_click(event):
             try:
-                popup.destroy()
+                # Tıklanan widget popup içinde mi kontrol et
+                w = event.widget
+                while w is not None:
+                    if w == popup:
+                        return  # popup içine tıklandı, kapatma
+                    w = getattr(w, "master", None)
             except Exception:
                 pass
-        popup.bind("<FocusOut>", _on_focus_out)
-        popup.focus_set()
+            self._close_popup()
+
+        # Bir sonraki event loop'ta bind et (mevcut click'i yutmasın)
+        self.root.after(50, lambda: self._bind_popup_click(_on_root_click))
+
+    def _bind_popup_click(self, handler):
+        """Popup dışı click handler'ı güvenli şekilde bağla."""
+        if getattr(self, "_active_popup", None) is None:
+            return  # Popup zaten kapandı
+        try:
+            self._popup_click_bid = self.root.bind("<Button-1>", handler, add="+")
+        except Exception:
+            pass
 
     def _set_lang(self, code: str):
         try:

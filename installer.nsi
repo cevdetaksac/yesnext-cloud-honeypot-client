@@ -35,8 +35,14 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
-; Finish page - Auto-start configuration
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} installed successfully$\r$\n$\r$\nApplication will start automatically$\r$\nDesktop shortcut has been created$\r$\nSystem is ready for security monitoring$\r$\n$\r$\nInstaller will close automatically..."
+; Finish page - "Run after install" checkbox (checked by default)
+!define MUI_FINISHPAGE_TITLE "Kurulum Tamamlandı / Installation Complete"
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} başarıyla kuruldu.$\r$\n$\r$\nMasaüstü kısayolu oluşturuldu.$\r$\nSistem güvenlik izlemesi için hazır.$\r$\n$\r$\nUygulamayı hemen başlatmak için aşağıdaki kutuyu işaretli bırakın."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\honeypot-client.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Cloud Honeypot Client'ı şimdi başlat / Launch now"
+!define MUI_FINISHPAGE_RUN_CHECKED
+!define MUI_FINISHPAGE_NOREBOOTSUPPORT
+!insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
 !insertmacro MUI_UNPAGE_WELCOME
@@ -353,36 +359,18 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
 
     ; =================================================================
-    ; PHASE 4: AUTO-START APPLICATION
+    ; PHASE 4: AUTO-START (silent install only — normal install uses finish page checkbox)
     ; =================================================================
-    !insertmacro LOG "[PHASE 4] Starting application..."
-
-    IfFileExists "$INSTDIR\honeypot-client.exe" StartApp NoExe
-
-    StartApp:
-        IfSilent SilentInstall NormalInstall
-
-        SilentInstall:
-            !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
-            ; Create tasks via --create-tasks first, then start daemon
+    IfSilent 0 SkipAutoStart
+        !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
+        IfFileExists "$INSTDIR\honeypot-client.exe" SilentStart SkipAutoStart
+        SilentStart:
             nsExec::Exec '"$INSTDIR\honeypot-client.exe" --create-tasks'
             Sleep 2000
             Exec '"$INSTDIR\honeypot-client.exe" --mode=daemon --silent'
             !insertmacro LOG "[AUTO-START] Daemon started with tasks pre-created."
-            Goto EndAutoStart
+    SkipAutoStart:
 
-        NormalInstall:
-            !insertmacro LOG "[AUTO-START] Normal install - starting GUI mode..."
-            Exec '"$INSTDIR\honeypot-client.exe"'
-            !insertmacro LOG "[AUTO-START] Application started - tasks will be created on first run."
-
-        EndAutoStart:
-        Goto End
-
-    NoExe:
-        !insertmacro LOG "[ERROR] Executable not found at $INSTDIR\honeypot-client.exe!"
-
-    End:
     !insertmacro LOG "[FINISH] Installation complete."
 SectionEnd
 

@@ -431,8 +431,8 @@ class ModernGUI:
             else:
                 self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
 
-            # 6) API bağlantı durumu
-            api_ok = getattr(self.app, '_last_attack_count', None) is not None
+            # 6) API bağlantı durumu (gerçek zamanlı kontrol)
+            api_ok = getattr(self.app, '_last_api_ok', False)
             if api_ok:
                 self._update_card("connection", self.t("dash_connected"), COLORS["green"])
             else:

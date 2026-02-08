@@ -631,13 +631,14 @@ class CloudHoneypotClient:
         def worker():
             try:
                 cnt = self.fetch_attack_count_sync(token)
-                if cnt is None: return
+                if cnt is None:
+                    self._last_api_ok = False
+                    return
+                self._last_api_ok = True
                 if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt: return
-                    
                 self._last_attack_count = cnt
-                # Dashboard kart güncelleme (attack_entry kaldırıldı)
             except Exception:
-                pass
+                self._last_api_ok = False
                 
         if async_thread:
             # PERFORMANCE: Reuse existing thread if already running
@@ -976,6 +977,63 @@ class CloudHoneypotClient:
                 self.update_tray_icon()
         except Exception as e:
             log(f"❌ RDP buton güncelleme hatası: {e}")
+
+    def _restore_saved_services(self):
+        """Önceki oturumda çalışan servisleri otomatik geri yükle."""
+        try:
+            cons = self.read_consent()
+            if not cons.get("accepted"):
+                log("[RESTORE] Kullanıcı onayı yok, servisler geri yüklenmeyecek.")
+                self.state["running"] = False
+                self.state["selected_rows"] = []
+                return
+
+            saved_rows, saved_running = self.read_status()
+            if not saved_rows or not saved_running:
+                log("[RESTORE] Kaydedilmiş aktif servis yok, temiz başlangıç.")
+                self.state["running"] = False
+                self.state["selected_rows"] = []
+                return
+
+            log(f"[RESTORE] Önceki oturumdan {len(saved_rows)} servis geri yükleniyor: {saved_rows}")
+
+            def _restore_worker():
+                """Servisleri arka plan thread'inde başlat (GUI donmasın)."""
+                try:
+                    started = 0
+                    for (listen_port, service) in saved_rows:
+                        port = int(listen_port)
+                        svc = str(service).upper()
+                        if self.service_manager.start_service(svc, port):
+                            self._update_row_ui(str(listen_port), str(service), True)
+                            started += 1
+                            log(f"[RESTORE] ✅ {svc}:{port} başarıyla geri yüklendi")
+                        else:
+                            log(f"[RESTORE] ❌ {svc}:{port} başlatılamadı")
+
+                    if started > 0:
+                        self.state["running"] = True
+                        self.state["selected_rows"] = [(str(a[0]), str(a[1])) for a in saved_rows]
+                        self.write_status(saved_rows, running=True)
+                        self.send_heartbeat_once("online")
+                        log(f"[RESTORE] {started}/{len(saved_rows)} servis geri yüklendi")
+                    else:
+                        self.state["running"] = False
+                        self.state["selected_rows"] = []
+                        self.write_status([], running=False)
+                        log("[RESTORE] Hiçbir servis başlatılamadı")
+
+                    # GUI senkronizasyonu (thread-safe)
+                    self._gui_safe(lambda: self.sync_gui_with_service_state())
+                except Exception as e:
+                    log(f"[RESTORE] Servis geri yükleme hatası: {e}")
+
+            threading.Thread(target=_restore_worker, daemon=True, name="ServiceRestorer").start()
+
+        except Exception as e:
+            log(f"[RESTORE] Hata: {e}")
+            self.state["running"] = False
+            self.state["selected_rows"] = []
 
     def sync_gui_with_service_state(self):
         """GUI buton durumunu gerçek servis durumu ile senkronize et"""
@@ -1583,10 +1641,8 @@ class CloudHoneypotClient:
         if TRY_TRAY:
             self.initialize_tray_manager()
 
-        # Başlangıçta tüm servisleri durmuş olarak başlat
-        self.state["running"] = False
-        self.state["selected_rows"] = []
-        self.write_status([], running=False)
+        # Önceki oturumdan kalan servisleri geri yükle
+        self._restore_saved_services()
         try:
             self.update_tray_icon()
         except Exception as e:

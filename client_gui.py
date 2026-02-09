@@ -1690,6 +1690,14 @@ class ModernGUI:
         blocked_ips = getattr(threat_engine, '_rule_blocked_ips', set())
         whitelist_ips = getattr(threat_engine, '_whitelist_ips', set())
 
+        # AutoResponse'daki aktif blokları da kontrol et (firewall gerçeği)
+        ar_blocked: set = set()
+        if auto_response:
+            try:
+                ar_blocked = set(getattr(auto_response, '_blocks', {}).keys())
+            except Exception:
+                pass
+
         for ip, ctx in contexts.items():
             if ip in ("local", "", "127.0.0.1", "::1"):
                 continue
@@ -1704,7 +1712,7 @@ class ModernGUI:
 
             if ip in whitelist_ips:
                 status = "whitelisted"
-            elif ip in blocked_ips or ctx.is_blocked:
+            elif ip in blocked_ips or ip in ar_blocked or ctx.is_blocked:
                 status = "blocked"
             else:
                 status = "watching"
@@ -1804,9 +1812,38 @@ class ModernGUI:
                     text_color=st_color, anchor="w",
                 ).pack(side="left", padx=4)
 
-                # Aksiyon butonları
+                # Aksiyon butonları — duruma göre dinamik
                 ip = r["ip"]
-                if status != "blocked":
+                if status == "blocked":
+                    # Engeli kaldır butonu
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_unblock"),
+                        width=70, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["orange"], hover_color=COLORS["orange_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_unblock(_ip),
+                    ).pack(side="left", padx=2)
+                    # Güvenli listeye al
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_whitelist"),
+                        width=55, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_whitelist(_ip),
+                    ).pack(side="left", padx=2)
+                elif status == "whitelisted":
+                    # Güvenden çıkar butonu
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_remove_whitelist"),
+                        width=75, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["orange"], hover_color=COLORS["orange_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_remove_whitelist(_ip),
+                    ).pack(side="left", padx=2)
+                    # Engelle butonu
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_block"),
                         width=55, height=20,
@@ -1815,8 +1852,16 @@ class ModernGUI:
                         text_color=COLORS["text_bright"], corner_radius=3,
                         command=lambda _ip=ip: self._ip_table_block(_ip),
                     ).pack(side="left", padx=2)
-
-                if status != "whitelisted":
+                else:
+                    # İzleniyor — Engelle + Güvenli
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_block"),
+                        width=55, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_block(_ip),
+                    ).pack(side="left", padx=2)
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_whitelist"),
                         width=55, height=20,
@@ -1830,34 +1875,91 @@ class ModernGUI:
             log(f"[GUI] IP table render error: {e}")
 
     def _ip_table_block(self, ip: str):
-        """IP tablosundan hızlı engelle."""
+        """IP tablosundan hızlı engelle — firewall + ThreatEngine senkron."""
         auto_response = getattr(self.app, 'auto_response', None)
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not auto_response:
+            return
+
+        # Önce whitelist'ten çıkar (varsa)
+        if threat_engine:
+            threat_engine._whitelist_ips.discard(ip)
+        ew = getattr(self.app, 'event_watcher', None)
+        if ew and hasattr(ew, 'whitelist_ips'):
+            ew.whitelist_ips.discard(ip)
         if auto_response:
-            ok = auto_response.block_ip(ip, reason="Manual block from IP table")
-            if ok:
-                self.show_toast(self.t("toast_ip_blocked"),
-                                self.t("toast_ip_blocked_msg").format(ip=ip), "high")
-            else:
-                self.show_toast(self.t("toast_block_failed"),
-                                self.t("toast_ip_block_failed_msg").format(ip=ip), "warning")
-            self._refresh_ip_table()
+            auto_response.whitelist_ips.discard(ip)
+
+        ok = auto_response.block_ip(ip, reason="Manual block from IP table")
+        if ok:
+            # ThreatEngine durumunu da güncelle
+            if threat_engine:
+                threat_engine._rule_blocked_ips.add(ip)
+                ctx = threat_engine.get_ip_context(ip)
+                if ctx:
+                    ctx.is_blocked = True
+            self.show_toast(self.t("toast_ip_blocked"),
+                            self.t("toast_ip_blocked_msg").format(ip=ip), "high")
+        else:
+            self.show_toast(self.t("toast_block_failed"),
+                            self.t("toast_ip_blocked_msg").format(ip=ip), "warning")
+        self._refresh_ip_table()
+
+    def _ip_table_unblock(self, ip: str):
+        """IP tablosundan engeli kaldır — firewall + ThreatEngine senkron."""
+        auto_response = getattr(self.app, 'auto_response', None)
+        threat_engine = getattr(self.app, 'threat_engine', None)
+
+        if auto_response:
+            auto_response.unblock_ip(ip)
+        if threat_engine:
+            threat_engine._rule_blocked_ips.discard(ip)
+            ctx = threat_engine.get_ip_context(ip)
+            if ctx:
+                ctx.is_blocked = False
+        self.show_toast(self.t("toast_ip_unblocked"),
+                        self.t("toast_ip_unblocked_msg").format(ip=ip), "info")
+        self._refresh_ip_table()
 
     def _ip_table_whitelist(self, ip: str):
-        """IP tablosundan hızlı whitelist ekle."""
+        """IP tablosundan güvenli listeye ekle — engeli kaldır + whitelist senkron."""
         threat_engine = getattr(self.app, 'threat_engine', None)
+        auto_response = getattr(self.app, 'auto_response', None)
+
+        # Engeli varsa önce kaldır
+        if auto_response:
+            auto_response.unblock_ip(ip)
+            auto_response.whitelist_ips.add(ip)
         if threat_engine:
+            threat_engine._rule_blocked_ips.discard(ip)
             threat_engine._whitelist_ips.add(ip)
-            # EventLogWatcher'a da ekle
-            ew = getattr(self.app, 'event_watcher', None)
-            if ew:
-                ew.whitelist_ips.add(ip)
-            # AutoResponse'a da ekle
-            ar = getattr(self.app, 'auto_response', None)
-            if ar:
-                ar.whitelist_ips.add(ip)
-            self.show_toast(self.t("ip_status_whitelisted"),
-                            f"{ip}", "info")
-            self._refresh_ip_table()
+            ctx = threat_engine.get_ip_context(ip)
+            if ctx:
+                ctx.is_blocked = False
+        ew = getattr(self.app, 'event_watcher', None)
+        if ew and hasattr(ew, 'whitelist_ips'):
+            ew.whitelist_ips.add(ip)
+
+        self.show_toast(self.t("ip_status_whitelisted"),
+                        self.t("toast_ip_whitelisted_msg").format(ip=ip), "info")
+        self._refresh_ip_table()
+
+    def _ip_table_remove_whitelist(self, ip: str):
+        """IP'yi güvenli listeden çıkar."""
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        auto_response = getattr(self.app, 'auto_response', None)
+
+        if threat_engine:
+            threat_engine._whitelist_ips.discard(ip)
+        ew = getattr(self.app, 'event_watcher', None)
+        if ew and hasattr(ew, 'whitelist_ips'):
+            ew.whitelist_ips.discard(ip)
+        if auto_response:
+            auto_response.whitelist_ips.discard(ip)
+
+        self.show_toast("Whitelist",
+                        self.t("toast_ip_removed_whitelist").format(ip=ip), "info")
+        self._refresh_ip_table()
 
     def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
         """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""

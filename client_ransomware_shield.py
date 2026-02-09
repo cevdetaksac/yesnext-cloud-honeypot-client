@@ -677,8 +677,7 @@ class RansomwareShield:
                     self.auto_response.block_ip(
                         ip,
                         reason=f"Ransomware alert — {trigger_reason}",
-                        duration_minutes=1440,   # 24 saat
-                        source="ransomware_shield",
+                        duration_hours=24,
                     )
                     blocked_count += 1
                 except Exception:

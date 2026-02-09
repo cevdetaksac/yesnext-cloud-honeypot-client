@@ -275,8 +275,14 @@
     "ip_status_watching": "İzleniyor",
     "ip_status_whitelisted": "Güvenli",
     "ip_btn_block": "Engelle",
+    "ip_btn_unblock": "Engeli Kaldır",
     "ip_btn_whitelist": "Güvenli",
-    "ip_no_activity": "Henüz IP aktivitesi yok"
+    "ip_btn_remove_whitelist": "Güvenden Çıkar",
+    "ip_no_activity": "Henüz IP aktivitesi yok",
+    "toast_ip_unblocked": "IP Engeli Kaldırıldı",
+    "toast_ip_unblocked_msg": "{ip} engeli kaldırıldı",
+    "toast_ip_whitelisted_msg": "{ip} güvenli listeye eklendi",
+    "toast_ip_removed_whitelist": "{ip} güvenli listeden çıkarıldı"
   },
   "en": {
     "app_title": "Cloud Honeypot Security",
@@ -563,7 +569,13 @@
     "ip_status_watching": "Watching",
     "ip_status_whitelisted": "Whitelisted",
     "ip_btn_block": "Block",
+    "ip_btn_unblock": "Unblock",
     "ip_btn_whitelist": "Whitelist",
-    "ip_no_activity": "No IP activity yet"
+    "ip_btn_remove_whitelist": "Remove WL",
+    "ip_no_activity": "No IP activity yet",
+    "toast_ip_unblocked": "IP Unblocked",
+    "toast_ip_unblocked_msg": "{ip} unblocked",
+    "toast_ip_whitelisted_msg": "{ip} added to whitelist",
+    "toast_ip_removed_whitelist": "{ip} removed from whitelist"
   }
 }

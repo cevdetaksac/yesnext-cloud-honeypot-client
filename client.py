@@ -276,6 +276,7 @@ class CloudHoneypotClient:
                 if ENABLE_RANSOMWARE_SHIELD:
                     self.ransomware_shield = RansomwareShield(
                         on_alert=self.alert_pipeline.handle_alert if self.alert_pipeline else None,
+                        auto_response=self.auto_response,
                         threat_engine=self.threat_engine,
                     )
                 self.health_monitor = SystemHealthMonitor(

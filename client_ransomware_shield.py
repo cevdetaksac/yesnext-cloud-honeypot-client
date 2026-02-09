@@ -434,6 +434,9 @@ class RansomwareShield:
             except Exception:
                 pass
 
+        # Ransomware tespit — aktif şüpheli IP'leri engelle
+        self._block_suspicious_ips(f"canary {change_type}: {filename}")
+
     # ── Katman 3: Suspicious Process Detection ────────────────────
 
     def _process_monitor_loop(self):
@@ -543,6 +546,10 @@ class RansomwareShield:
             except Exception:
                 pass
 
+        # Yüksek skorlu tespit — aktif şüpheli IP'leri engelle
+        if score >= 90:
+            self._block_suspicious_ips(f"suspicious process: {pname} — {reason}")
+
     # ── Katman 4: VSS Monitor ─────────────────────────────────────
 
     def _vss_monitor_loop(self):
@@ -638,7 +645,52 @@ class RansomwareShield:
             except Exception:
                 pass
 
+        # VSS silme — aktif şüpheli IP'leri engelle
+        self._block_suspicious_ips(f"VSS deletion: {deleted_count} shadows deleted")
+
     # ── Helpers ────────────────────────────────────────────────────
+
+    def _block_suspicious_ips(self, trigger_reason: str):
+        """Ransomware tespit edildiğinde ThreatEngine'deki aktif şüpheli IP'leri engelle.
+
+        Mantık:
+          - ThreatEngine'deki tüm IP bağlamlarını al
+          - Whitelist'te olanları atla
+          - Threat score'u >= 30 olanları auto_response ile engelle
+          - Bu sayede ransomware'i deploy etmiş olabilecek ağ saldırganları kesilir
+        """
+        if not self.auto_response or not self.threat_engine:
+            return
+
+        try:
+            whitelist = getattr(self.threat_engine, '_whitelist_ips', set())
+            contexts = self.threat_engine.get_all_contexts()
+            blocked_count = 0
+
+            for ip, ctx in contexts.items():
+                if ip in whitelist:
+                    continue
+                # Sadece gerçekten şüpheli olanları engelle
+                if ctx.threat_score < 30:
+                    continue
+                try:
+                    self.auto_response.block_ip(
+                        ip,
+                        reason=f"Ransomware alert — {trigger_reason}",
+                        duration_minutes=1440,   # 24 saat
+                        source="ransomware_shield",
+                    )
+                    blocked_count += 1
+                except Exception:
+                    pass
+
+            if blocked_count:
+                log(
+                    f"[RANSOMWARE-SHIELD] 🔒 Blocked {blocked_count} suspicious IP(s) "
+                    f"after ransomware detection ({trigger_reason})"
+                )
+        except Exception as e:
+            log(f"[RANSOMWARE-SHIELD] IP block error: {e}")
 
     @staticmethod
     def _file_hash(filepath: str) -> Optional[str]:

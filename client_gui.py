@@ -127,8 +127,8 @@ class ModernGUI:
         # CTkTabview rename/dict manipulation tab click'i bozar,
         # bu yüzden runtime'da DEĞİŞTİRİLMEZ. Dil değişince _rebuild_gui() çağrılır.
         self._tab_status_name = self.t("tab_status")
-        self._tab_threat_name = f"🛡️ {self.t('tab_threat_center')}"
-        self._tab_services_name = f"🍯 {self.t('tab_services')}"
+        self._tab_threat_name = self.t("tab_threat_center")
+        self._tab_services_name = self.t("tab_services")
 
         self._tabview.add(self._tab_status_name)
         self._tabview.add(self._tab_threat_name)
@@ -148,8 +148,9 @@ class ModernGUI:
             self._tabview.tab(self._tab_services_name), fg_color="transparent")
         tab3_scroll.pack(fill="both", expand=True)
 
-        # ── Tab 1: Anlık Durum — Dashboard kartları ── #
+        # ── Tab 1: Anlık Durum — Dashboard kartları + IP Tablosu ── #
         self._build_dashboard(tab1_scroll)
+        self._build_ip_activity_table(tab1_scroll)
 
         # ── Tab 2: Tehdit Merkezi — Threat detection + response ── #
         self._build_threat_center(tab2_scroll)
@@ -628,7 +629,9 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
             )
             fw_on = "ON" in r.stdout.upper() if r.returncode == 0 else False
-            checks.append((self.t("check_firewall"), fw_on, self.t("check_active") if fw_on else self.t("check_disabled_warning")))
+            checks.append((self.t("check_firewall"), fw_on,
+                           self.t("check_active") if fw_on else self.t("check_disabled_warning"),
+                           None if fw_on else "firewall"))
         except Exception:
             checks.append((self.t("check_firewall"), None, self.t("check_unable_to_verify")))
 
@@ -640,7 +643,9 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
             )
             av_on = "TRUE" in r.stdout.upper().strip() if r.returncode == 0 else False
-            checks.append((self.t("check_antivirus"), av_on, self.t("check_realtime_on") if av_on else self.t("check_disabled_warning")))
+            checks.append((self.t("check_antivirus"), av_on,
+                           self.t("check_realtime_on") if av_on else self.t("check_disabled_warning"),
+                           None if av_on else "antivirus"))
         except Exception:
             checks.append((self.t("check_antivirus"), None, self.t("check_unable_to_verify")))
 
@@ -652,7 +657,8 @@ class ModernGUI:
             )
             winrm_running = "RUNNING" in r.stdout.upper() if r.returncode == 0 else False
             checks.append((self.t("check_winrm"), not winrm_running,
-                           self.t("check_closed_safe") if not winrm_running else self.t("check_open_remote_risk")))
+                           self.t("check_closed_safe") if not winrm_running else self.t("check_open_remote_risk"),
+                           "winrm" if winrm_running else None))
         except Exception:
             checks.append((self.t("check_winrm"), True, self.t("check_service_not_found")))
 
@@ -666,7 +672,8 @@ class ModernGUI:
             )
             nla_on = "0x1" in r.stdout if r.returncode == 0 else False
             checks.append((self.t("check_rdp_nla"), nla_on,
-                           self.t("check_nla_active") if nla_on else self.t("check_nla_off_risk")))
+                           self.t("check_nla_active") if nla_on else self.t("check_nla_off_risk"),
+                           None if nla_on else "nla"))
         except Exception:
             checks.append((self.t("check_rdp_nla"), None, self.t("check_unable_to_verify")))
 
@@ -711,7 +718,7 @@ class ModernGUI:
         self._gui_safe(lambda: self._render_security_checks(checks))
 
     def _render_security_checks(self, checks: list):
-        """Güvenlik kontrol sonuçlarını GUI'de göster."""
+        """Güvenlik kontrol sonuçlarını GUI'de göster — aksiyon butonları ile."""
         try:
             # Mevcut widget'ları temizle
             for w in self._security_checks_frame.winfo_children():
@@ -736,8 +743,11 @@ class ModernGUI:
             )
             banner.pack(anchor="w", padx=4, pady=(0, 8))
 
-            # Her kontrol için satır
-            for name, status, detail in checks:
+            # Her kontrol için satır — check_id ile aksiyon butonu eklenir
+            for item in checks:
+                name, status, detail = item[0], item[1], item[2]
+                check_id = item[3] if len(item) > 3 else None
+
                 row = ctk.CTkFrame(self._security_checks_frame, fg_color="transparent")
                 row.pack(fill="x", padx=4, pady=1)
 
@@ -763,8 +773,122 @@ class ModernGUI:
                     text_color=COLORS["text_dim"], anchor="w",
                 ).pack(side="left", padx=(4, 0))
 
+                # Aksiyon butonları — sadece sorunlu öğeler için
+                if status is False and check_id:
+                    btn_cfg = self._get_fix_button_config(check_id)
+                    if btn_cfg:
+                        ctk.CTkButton(
+                            row, text=btn_cfg["text"],
+                            width=btn_cfg.get("width", 70), height=22,
+                            font=ctk.CTkFont(size=10),
+                            fg_color=btn_cfg.get("color", COLORS["accent"]),
+                            hover_color=btn_cfg.get("hover", COLORS["blue"]),
+                            text_color=COLORS["text_bright"],
+                            corner_radius=4,
+                            command=btn_cfg["command"],
+                        ).pack(side="right", padx=(4, 0))
+
         except Exception:
             pass
+
+    def _get_fix_button_config(self, check_id: str) -> dict:
+        """Güvenlik sorunları için düzeltme butonu konfigürasyonu."""
+        configs = {
+            "winrm": {
+                "text": self.t("btn_fix_winrm"),
+                "color": COLORS["red"],
+                "hover": COLORS["red_hover"],
+                "width": 60,
+                "command": self._fix_winrm,
+            },
+            "nla": {
+                "text": self.t("btn_fix_nla"),
+                "color": COLORS["blue"],
+                "hover": COLORS["blue_hover"],
+                "width": 80,
+                "command": self._fix_nla,
+            },
+            "antivirus": {
+                "text": self.t("btn_fix_antivirus"),
+                "color": COLORS["orange"],
+                "hover": COLORS["orange_hover"],
+                "width": 50,
+                "command": self._fix_antivirus,
+            },
+            "firewall": {
+                "text": self.t("btn_fix_firewall_warn"),
+                "color": COLORS["orange"],
+                "hover": COLORS["orange_hover"],
+                "width": 200,
+                "command": lambda: None,  # Sadece uyarı
+            },
+        }
+        return configs.get(check_id)
+
+    # ── Güvenlik Düzeltme Aksiyonları ─────────────────────────────
+
+    def _fix_winrm(self):
+        """WinRM servisini kapat."""
+        if not messagebox.askyesno("WinRM", self.t("fix_winrm_confirm")):
+            return
+        import subprocess
+        CREATE_NW = 0x08000000
+        def _do():
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Stop-Service WinRM -Force; "
+                     "Set-Service WinRM -StartupType Disabled; "
+                     "Disable-PSRemoting -Force -ErrorAction SilentlyContinue"],
+                    capture_output=True, timeout=15, creationflags=CREATE_NW,
+                )
+                self._gui_safe(lambda: messagebox.showinfo("WinRM", self.t("fix_winrm_ok")))
+            except Exception:
+                self._gui_safe(lambda: messagebox.showerror("WinRM", self.t("fix_winrm_fail")))
+            self._refresh_security_intel()
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _fix_nla(self):
+        """RDP NLA'yı aktifleştir."""
+        if not messagebox.askyesno("RDP NLA", self.t("fix_nla_confirm")):
+            return
+        import subprocess
+        CREATE_NW = 0x08000000
+        def _do():
+            try:
+                subprocess.run(
+                    ["reg", "add",
+                     r"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
+                     "/v", "UserAuthentication", "/t", "REG_DWORD", "/d", "1", "/f"],
+                    capture_output=True, timeout=10, creationflags=CREATE_NW,
+                )
+                self._gui_safe(lambda: messagebox.showinfo("RDP NLA", self.t("fix_nla_ok")))
+            except Exception:
+                self._gui_safe(lambda: messagebox.showerror("RDP NLA", self.t("fix_nla_fail")))
+            self._refresh_security_intel()
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _fix_antivirus(self):
+        """Windows Defender gerçek zamanlı korumayı aç."""
+        if not messagebox.askyesno("Antivirus", self.t("fix_av_confirm")):
+            return
+        import subprocess
+        CREATE_NW = 0x08000000
+        def _do():
+            try:
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Set-MpPreference -DisableRealtimeMonitoring $false"],
+                    capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+                )
+                if r.returncode == 0:
+                    self._gui_safe(lambda: messagebox.showinfo("Antivirus", self.t("fix_av_ok")))
+                else:
+                    self._gui_safe(lambda: messagebox.showerror("Antivirus", self.t("fix_av_fail")))
+            except Exception:
+                self._gui_safe(lambda: messagebox.showerror("Antivirus", self.t("fix_av_fail")))
+            self._refresh_security_intel()
+        threading.Thread(target=_do, daemon=True).start()
 
     # ─── Collector: User Accounts ─── #
     def _collect_user_accounts(self):
@@ -1482,6 +1606,259 @@ class ModernGUI:
             else:
                 self.show_toast(self.t("toast_snapshot_failed"), result.get("error", "Unknown error"), "warning")
 
+    # ═══════════════════════════════════════════════════════════════
+    #  IP AKTİVİTE TABLOSU (Tab 1 — Anlık Durum)
+    # ═══════════════════════════════════════════════════════════════
+
+    def _build_ip_activity_table(self, parent):
+        """Anlık IP aktivite tablosu — giriş denemeleri, durum, butonlar."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text=self.t("section_ip_activity"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            hdr, text="🔄", width=28, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
+            hover_color="#2a2b3e",
+            command=self._refresh_ip_table,
+        ).pack(side="right")
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(4, 8))
+
+        # Tablo başlığı
+        header_row = ctk.CTkFrame(sec, fg_color=COLORS["accent"], corner_radius=4)
+        header_row.pack(fill="x", padx=16, pady=(0, 2))
+
+        cols = [
+            (self.t("ip_col_address"), 140),
+            (self.t("ip_col_service"), 65),
+            (self.t("ip_col_attempts"), 60),
+            (self.t("ip_col_last_time"), 130),
+            (self.t("ip_col_status"), 80),
+        ]
+        for text, width in cols:
+            ctk.CTkLabel(
+                header_row, text=text, width=width,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=COLORS["text_bright"], anchor="w",
+            ).pack(side="left", padx=4, pady=4)
+
+        ctk.CTkLabel(
+            header_row, text=self.t("ip_col_actions"),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS["text_bright"], anchor="w",
+        ).pack(side="left", padx=4, pady=4, fill="x", expand=True)
+
+        # Tablo içeriği — scrollable
+        self._ip_table_frame = ctk.CTkScrollableFrame(
+            sec, fg_color="transparent", height=180,
+        )
+        self._ip_table_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        # Boş mesaj
+        self._ip_table_empty = ctk.CTkLabel(
+            self._ip_table_frame,
+            text=self.t("ip_no_activity"),
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_dim"],
+        )
+        self._ip_table_empty.pack(anchor="w", padx=4, pady=8)
+
+    def _refresh_ip_table(self):
+        """ThreatEngine IP pool'undan verileri alıp tabloyu güncelle."""
+        threading.Thread(target=self._collect_ip_table_data, daemon=True).start()
+
+    def _collect_ip_table_data(self):
+        """Arka planda IP verilerini topla."""
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        auto_response = getattr(self.app, 'auto_response', None)
+        if not threat_engine:
+            return
+
+        rows = []
+        contexts = threat_engine.get_all_contexts()
+        blocked_ips = getattr(threat_engine, '_rule_blocked_ips', set())
+        whitelist_ips = getattr(threat_engine, '_whitelist_ips', set())
+
+        for ip, ctx in contexts.items():
+            if ip in ("local", "", "127.0.0.1", "::1"):
+                continue
+            if ctx.threat_score < 1 and ctx.failed_attempts < 1:
+                continue
+
+            services = list(ctx.services_targeted) if ctx.services_targeted else ["—"]
+            service_str = "/".join(services[:2])
+
+            attempts = ctx.failed_attempts
+            last_seen = ctx.last_seen
+
+            if ip in whitelist_ips:
+                status = "whitelisted"
+            elif ip in blocked_ips or ctx.is_blocked:
+                status = "blocked"
+            else:
+                status = "watching"
+
+            rows.append({
+                "ip": ip,
+                "service": service_str,
+                "attempts": attempts,
+                "last_seen": last_seen,
+                "status": status,
+                "score": ctx.threat_score,
+            })
+
+        # En yeni ilk sıraya
+        rows.sort(key=lambda r: r["last_seen"], reverse=True)
+        # Max 50 satır
+        rows = rows[:50]
+
+        self._gui_safe(lambda: self._render_ip_table(rows))
+
+    def _render_ip_table(self, rows: list):
+        """IP tablosunu GUI'ye render et."""
+        try:
+            for w in self._ip_table_frame.winfo_children():
+                w.destroy()
+
+            if not rows:
+                ctk.CTkLabel(
+                    self._ip_table_frame,
+                    text=self.t("ip_no_activity"),
+                    font=ctk.CTkFont(size=12),
+                    text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=8)
+                return
+
+            from datetime import datetime
+
+            for i, r in enumerate(rows):
+                bg = COLORS["bg"] if i % 2 == 0 else COLORS["card"]
+                row_frame = ctk.CTkFrame(
+                    self._ip_table_frame, fg_color=bg,
+                    corner_radius=4, height=30,
+                )
+                row_frame.pack(fill="x", pady=1)
+                row_frame.pack_propagate(False)
+
+                # IP
+                ip_color = COLORS["red"] if r["status"] == "blocked" else (
+                    COLORS["green"] if r["status"] == "whitelisted" else COLORS["text"])
+                ctk.CTkLabel(
+                    row_frame, text=r["ip"], width=140,
+                    font=ctk.CTkFont(family="Consolas", size=11),
+                    text_color=ip_color, anchor="w",
+                ).pack(side="left", padx=4)
+
+                # Servis
+                ctk.CTkLabel(
+                    row_frame, text=r["service"], width=65,
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=4)
+
+                # Deneme sayısı
+                att_color = COLORS["red"] if r["attempts"] >= 3 else (
+                    COLORS["orange"] if r["attempts"] >= 1 else COLORS["text_dim"])
+                ctk.CTkLabel(
+                    row_frame, text=str(r["attempts"]), width=60,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=att_color, anchor="w",
+                ).pack(side="left", padx=4)
+
+                # Son zaman
+                try:
+                    ts = datetime.fromtimestamp(r["last_seen"]).strftime("%d.%m %H:%M:%S")
+                except Exception:
+                    ts = "—"
+                ctk.CTkLabel(
+                    row_frame, text=ts, width=130,
+                    font=ctk.CTkFont(size=10),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=4)
+
+                # Durum
+                status = r["status"]
+                if status == "blocked":
+                    st_text = self.t("ip_status_blocked")
+                    st_color = COLORS["red"]
+                elif status == "whitelisted":
+                    st_text = self.t("ip_status_whitelisted")
+                    st_color = COLORS["green"]
+                else:
+                    st_text = self.t("ip_status_watching")
+                    st_color = COLORS["orange"]
+                ctk.CTkLabel(
+                    row_frame, text=st_text, width=80,
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=st_color, anchor="w",
+                ).pack(side="left", padx=4)
+
+                # Aksiyon butonları
+                ip = r["ip"]
+                if status != "blocked":
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_block"),
+                        width=55, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_block(_ip),
+                    ).pack(side="left", padx=2)
+
+                if status != "whitelisted":
+                    ctk.CTkButton(
+                        row_frame, text=self.t("ip_btn_whitelist"),
+                        width=55, height=20,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=lambda _ip=ip: self._ip_table_whitelist(_ip),
+                    ).pack(side="left", padx=2)
+
+        except Exception as e:
+            log(f"[GUI] IP table render error: {e}")
+
+    def _ip_table_block(self, ip: str):
+        """IP tablosundan hızlı engelle."""
+        auto_response = getattr(self.app, 'auto_response', None)
+        if auto_response:
+            ok = auto_response.block_ip(ip, reason="Manual block from IP table")
+            if ok:
+                self.show_toast(self.t("toast_ip_blocked"),
+                                self.t("toast_ip_blocked_msg").format(ip=ip), "high")
+            else:
+                self.show_toast(self.t("toast_block_failed"),
+                                self.t("toast_ip_block_failed_msg").format(ip=ip), "warning")
+            self._refresh_ip_table()
+
+    def _ip_table_whitelist(self, ip: str):
+        """IP tablosundan hızlı whitelist ekle."""
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if threat_engine:
+            threat_engine._whitelist_ips.add(ip)
+            # EventLogWatcher'a da ekle
+            ew = getattr(self.app, 'event_watcher', None)
+            if ew:
+                ew.whitelist_ips.add(ip)
+            # AutoResponse'a da ekle
+            ar = getattr(self.app, 'auto_response', None)
+            if ar:
+                ar.whitelist_ips.add(ip)
+            self.show_toast(self.t("ip_status_whitelisted"),
+                            f"{ip}", "info")
+            self._refresh_ip_table()
+
     def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
         """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""
         card = ctk.CTkFrame(parent, fg_color=COLORS["bg"], corner_radius=10,
@@ -1752,6 +2129,14 @@ class ModernGUI:
     def _schedule_dashboard_refresh(self):
         """Her 5 saniyede bir dashboard kartlarını günceller."""
         self._refresh_dashboard()
+
+        # IP tablosunu her 10 saniyede bir güncelle (2 × 5s)
+        if not hasattr(self, '_ip_table_tick'):
+            self._ip_table_tick = 0
+        self._ip_table_tick += 1
+        if self._ip_table_tick >= 2:
+            self._ip_table_tick = 0
+            self._refresh_ip_table()
 
         # Security intel panellerini her 60 saniyede bir güncelle (12 × 5s)
         if not hasattr(self, '_security_tick'):

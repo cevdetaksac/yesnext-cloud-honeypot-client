@@ -421,6 +421,40 @@ class HoneypotAPIClient:
             self.log(f"[API] fetch threat config error: {e}")
             return None
 
+    def fetch_block_rules(self, token: str) -> Optional[list]:
+        """GET /api/premium/rules — Dashboard'dan tanımlanan blok kurallarını çek.
+
+        Her kural şu yapıda:
+          {
+            "id": 1,
+            "name": "RDP",
+            "services": "RDP",
+            "threshold_count": 3,
+            "window_minutes": 30,
+            "actions": "email,block",
+            "enabled": true,
+            "email_cooldown_min": 10,
+            "match_usernames": "admin\nroot"
+          }
+        """
+        try:
+            resp = self.api_request(
+                "GET", "premium/rules",
+                params={"token": token},
+                timeout=8, verbose_logging=False,
+            )
+            if isinstance(resp, list):
+                return resp
+            # API bazen {"rules": [...]} döndürebilir
+            if isinstance(resp, dict) and "rules" in resp:
+                rules = resp["rules"]
+                if isinstance(rules, list):
+                    return rules
+            return None
+        except Exception as e:
+            self.log(f"[API] fetch block rules error: {e}")
+            return None
+
     def report_silent_hours_event(self, token: str, data: dict) -> bool:
         """POST /api/alerts/silent-hours — Sessiz saat ihlali bildirimi"""
         try:

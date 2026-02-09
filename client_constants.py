@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.1.4"  # Fix i18n loading: prioritize installer dir over _MEIPASS bundle
+VERSION = "4.1.5"  # API block rules: fetch dashboard rules, threshold-based auto-blocking
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

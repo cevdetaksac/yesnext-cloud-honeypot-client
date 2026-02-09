@@ -165,6 +165,18 @@ CONTEXT_CLEANUP_INTERVAL = 300       # 5 min
 # Max age for IP context entries without new events
 CONTEXT_MAX_AGE = 86400              # 24 hours
 
+# Default block rule when no API rules are configured
+DEFAULT_BLOCK_RULES = [
+    {
+        "name": "default_rdp",
+        "services": "RDP",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "block",
+        "enabled": True,
+    },
+]
+
 
 # ── IP Context ────────────────────────────────────────────────────
 
@@ -248,17 +260,36 @@ class ThreatEngine:
         self._running = False
         self._housekeeping_thread: Optional[threading.Thread] = None
 
+        # API block rules — fetched from dashboard
+        self._block_rules: List[dict] = list(DEFAULT_BLOCK_RULES)
+        self._block_rules_lock = threading.Lock()
+        # Track which IPs were already blocked by rule engine
+        self._rule_blocked_ips: Set[str] = set()
+
         # Stats
         self._stats = {
             "events_scored": 0,
             "alerts_generated": 0,
             "correlations_matched": 0,
+            "rule_blocks": 0,
             "active_ips": 0,
             "highest_threat_ip": "",
             "highest_threat_score": 0,
         }
 
     # ── Public API ────────────────────────────────────────────────
+
+    def update_block_rules(self, rules: List[dict]):
+        """Update API-defined block rules.
+
+        Each rule: {name, services, threshold_count, window_minutes,
+                    actions, enabled, email_cooldown_min, match_usernames}
+        """
+        with self._block_rules_lock:
+            enabled = [r for r in rules if r.get("enabled", True)]
+            self._block_rules = enabled if enabled else list(DEFAULT_BLOCK_RULES)
+        rule_names = [r.get("name", "?") for r in self._block_rules]
+        log(f"[THREAT] 📋 Block rules updated: {rule_names}")
 
     def start(self):
         """Start the housekeeping (cleanup + score decay) thread."""
@@ -307,6 +338,10 @@ class ThreatEngine:
                 ctx.add_event(event, score)
 
             self._stats["events_scored"] += 1
+
+            # 2b. API block rules — simple threshold check (e.g. 3 RDP fails → block)
+            if event_type in FAILED_LOGON_TYPES or event_type == "failed_logon_single":
+                self._check_block_rules(ip_key, ctx, event)
 
             # 3. Correlation rules
             correlation_match = self._check_correlations(ip_key, ctx, event)
@@ -481,6 +516,84 @@ class ThreatEngine:
 
         return float(base_score)
 
+    # ── API Block Rules (Dashboard kuralları) ─────────────────────
+
+    def _check_block_rules(self, ip: str, ctx: IPContext, event: dict):
+        """
+        Dashboard'dan gelen blok kurallarını kontrol et.
+        Örnek kural: RDP servisi, eşik=3, pencere=30dk → 3 failed login = anında blokla.
+        """
+        if ip in ("local", "", "127.0.0.1", "::1"):
+            return
+        if ip in self._rule_blocked_ips:
+            return  # zaten bu kural ile bloklanmış
+
+        event_service = (event.get("target_service", "") or "").upper()
+
+        with self._block_rules_lock:
+            rules = list(self._block_rules)
+
+        for rule in rules:
+            if not rule.get("enabled", True):
+                continue
+
+            # Servis eşleştirmesi
+            rule_services_raw = rule.get("services", "")
+            if rule_services_raw:
+                rule_services = {s.strip().upper() for s in rule_services_raw.split(",")}
+                if event_service not in rule_services:
+                    continue
+
+            threshold = int(rule.get("threshold_count", 3))
+            window_sec = int(rule.get("window_minutes", 30)) * 60
+            actions_str = rule.get("actions", "block")
+            actions = {a.strip().lower() for a in actions_str.split(",")}
+
+            # Pencere içindeki failed login sayısı
+            recent = ctx.get_recent_events(window_sec)
+            fail_count = sum(
+                1 for e in recent
+                if e["event_type"] in FAILED_LOGON_TYPES
+                   or e["event_type"] == "failed_logon_single"
+            )
+
+            if fail_count < threshold:
+                continue
+
+            # Eşik aşıldı!
+            rule_name = rule.get("name", "block_rule")
+            log(f"[THREAT] 🚨 Block rule '{rule_name}' triggered: "
+                f"IP={ip} service={event_service} "
+                f"fails={fail_count}/{threshold} window={rule.get('window_minutes')}m")
+
+            self._rule_blocked_ips.add(ip)
+            self._stats["rule_blocks"] += 1
+
+            # Aksiyonları belirle
+            auto_response = []
+            if "block" in actions:
+                auto_response.append("block_ip")
+            if "email" in actions:
+                auto_response.append("notify_urgent")
+            if not auto_response:
+                auto_response = ["block_ip", "notify_urgent"]
+
+            # Alert üret → AlertPipeline → AutoResponse.block_ip()
+            self._emit_alert(
+                event=event,
+                ctx=ctx,
+                score=95,
+                severity="critical",
+                rule_name=f"api_rule_{rule_name}",
+                description=(
+                    f"Block rule '{rule_name}': {fail_count} failed login(s) "
+                    f"from {ip} to {event_service} in {rule.get('window_minutes')} min "
+                    f"(threshold: {threshold})"
+                ),
+                auto_response=auto_response,
+            )
+            break  # İlk eşleşen kural yeterli
+
     # ── Correlation ───────────────────────────────────────────────
 
     def _check_correlations(self, ip: str, ctx: IPContext,
@@ -617,6 +730,10 @@ class ThreatEngine:
     def _build_title(event: dict, rule_name: str) -> str:
         """Build a human-readable alert title."""
         if rule_name:
+            # API rule-based blocks
+            if rule_name.startswith("api_rule_"):
+                display_name = rule_name[len("api_rule_"):]
+                return f"🚫 Block Rule: {display_name}"
             titles = {
                 "brute_force_then_access": "🔓 Brute Force → Successful Login",
                 "rdp_after_hours":         "🌙 RDP Access After Hours",
@@ -644,6 +761,8 @@ class ThreatEngine:
     @staticmethod
     def _recommend_action(severity: str, rule_name: str) -> str:
         """Return recommended action text."""
+        if rule_name and rule_name.startswith("api_rule_"):
+            return "IP blocked by dashboard block rule — review attack pattern"
         if rule_name == "brute_force_then_access":
             return "Block IP immediately, review compromised account, check for lateral movement"
         if rule_name == "post_exploitation":

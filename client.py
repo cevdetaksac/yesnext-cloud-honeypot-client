@@ -657,7 +657,7 @@ class CloudHoneypotClient:
     # ---------- Threat Config Sync (v4.0 Faz 2) ---------- #
 
     def _sync_threat_config(self):
-        """Fetch threat detection + silent hours config from backend."""
+        """Fetch threat detection + silent hours config + block rules from backend."""
         try:
             token = self.state.get("token", "")
             if not token or not self.api_client:
@@ -669,6 +669,12 @@ class CloudHoneypotClient:
                 if sh_cfg and self.silent_hours_guard:
                     self.silent_hours_guard.update_config(sh_cfg)
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
+
+            # Fetch block rules from dashboard (GET /api/premium/rules)
+            rules = self.api_client.fetch_block_rules(token)
+            if rules and isinstance(rules, list) and self.threat_engine:
+                self.threat_engine.update_block_rules(rules)
+                log(f"[CONFIG-SYNC] Block rules synced: {len(rules)} rule(s)")
         except Exception as e:
             log(f"[CONFIG-SYNC] Error: {e}")
 

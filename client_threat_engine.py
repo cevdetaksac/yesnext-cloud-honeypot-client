@@ -145,7 +145,7 @@ LOGON_EVENT_TYPES: Set[str] = {
 
 # Events that qualify as "failed logon"
 FAILED_LOGON_TYPES: Set[str] = {
-    "failed_logon", "sql_failed_logon", "honeypot_credential",
+    "failed_logon", "sql_failed_logon",
 }
 
 # Events that qualify as "persistence action"
@@ -206,7 +206,7 @@ class IPContext:
         if etype in LOGON_EVENT_TYPES:
             self.successful_logins += 1
 
-        svc = event.get("target_service", "")
+        svc = event.get("target_service", "") or event.get("service", "")
         if svc:
             self.services_targeted.add(svc)
 
@@ -324,6 +324,10 @@ class ThreatEngine:
                 )
             elif score >= SEVERITY_THRESHOLDS["warning"]:
                 severity = self._score_to_severity(ctx.threat_score)
+                # Honeypot credential veya critical skor → anında IP blokla
+                standalone_auto_response = []
+                if event_type == "honeypot_credential" or severity == "critical":
+                    standalone_auto_response = ["block_ip", "notify_urgent"]
                 self._emit_alert(
                     event=event,
                     ctx=ctx,
@@ -331,7 +335,7 @@ class ThreatEngine:
                     severity=severity,
                     rule_name="",
                     description=f"{event_type} detected from {ip_key}",
-                    auto_response=[],
+                    auto_response=standalone_auto_response,
                 )
 
             # Update stats
@@ -558,8 +562,8 @@ class ThreatEngine:
             "title": self._build_title(event, rule_name),
             "description": description,
             "source_ip": ctx.ip,
-            "target_service": event.get("target_service", ""),
-            "target_port": event.get("target_port", 0),
+            "target_service": event.get("target_service", "") or event.get("service", ""),
+            "target_port": event.get("target_port", 0) or event.get("port", 0),
             "username": event.get("username", ""),
             "threat_score": int(ctx.threat_score),
             "event_ids": [event.get("event_id", 0)],
@@ -607,6 +611,7 @@ class ThreatEngine:
             "new_service_installed":     "⚙️ New Service Installed",
             "rdp_connection_succeeded":  "🖥️ RDP Connection Established",
             "sql_successful_logon":      "🗄️ SQL Successful Login",
+            "honeypot_credential":       "🍯 Honeypot Credential Captured",
         }
         return titles.get(etype, f"⚠️ {etype.replace('_', ' ').title()}")
 

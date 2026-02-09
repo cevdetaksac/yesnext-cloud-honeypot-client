@@ -1293,6 +1293,12 @@ class ModernGUI:
         )
         self._threat_feed_box.pack(fill="x", padx=4, pady=(0, 6))
 
+        # Placeholder — veri gelince otomatik temizlenir
+        self._threat_feed_box.configure(state="normal")
+        self._threat_feed_box.insert("1.0", "  ⏳  Tehdit beslemesi dinleniyor...\n  Saldırı tespit edildiğinde burada anlık olarak görünecektir.")
+        self._threat_feed_box.configure(state="disabled")
+        self._threat_feed_has_data = False
+
     def _build_response_buttons(self, parent):
         """Quick-action response buttons for dashboard."""
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1339,6 +1345,10 @@ class ModernGUI:
                 if not hasattr(self, '_threat_feed_box'):
                     return
                 self._threat_feed_box.configure(state="normal")
+                # İlk gerçek veri geldiğinde placeholder'ı temizle
+                if not getattr(self, '_threat_feed_has_data', False):
+                    self._threat_feed_box.delete("1.0", "end")
+                    self._threat_feed_has_data = True
                 self._threat_feed_box.insert("end", text + "\n")
                 self._threat_feed_box.see("end")
                 # Keep only last 200 lines
@@ -1472,6 +1482,12 @@ class ModernGUI:
         )
         self._cmd_history_box.pack(fill="x", padx=16, pady=(0, 12))
 
+        # Placeholder
+        self._cmd_history_box.configure(state="normal")
+        self._cmd_history_box.insert("1.0", "  ⏳  Henüz komut çalıştırılmadı.\n  Sunucudan gelen uzak komutlar burada listelenecektir.")
+        self._cmd_history_box.configure(state="disabled")
+        self._cmd_history_has_data = False
+
     def append_command_history(self, text: str):
         """Append a line to command history (thread-safe)."""
         def _do():
@@ -1479,6 +1495,10 @@ class ModernGUI:
                 if not hasattr(self, '_cmd_history_box'):
                     return
                 self._cmd_history_box.configure(state="normal")
+                # İlk gerçek veri geldiğinde placeholder'ı temizle
+                if not getattr(self, '_cmd_history_has_data', False):
+                    self._cmd_history_box.delete("1.0", "end")
+                    self._cmd_history_has_data = True
                 self._cmd_history_box.insert("end", text + "\n")
                 self._cmd_history_box.see("end")
                 content = self._cmd_history_box.get("1.0", "end")
@@ -1524,6 +1544,13 @@ class ModernGUI:
         )
         self._sessions_box.pack(fill="x", padx=16, pady=(0, 12))
 
+        # Placeholder + otomatik yükle
+        self._sessions_box.configure(state="normal")
+        self._sessions_box.insert("1.0", "  ⏳  Oturumlar yükleniyor...")
+        self._sessions_box.configure(state="disabled")
+        # Başlangıçta otomatik yükle
+        self._refresh_active_sessions()
+
     def _refresh_active_sessions(self):
         """Fetch and display active sessions via 'query session'."""
         import subprocess
@@ -1534,18 +1561,25 @@ class ModernGUI:
                     capture_output=True, text=True, timeout=5,
                     creationflags=0x08000000,
                 )
-                output = result.stdout.strip() if result.returncode == 0 else "No sessions found"
-                if hasattr(self, '_sessions_box'):
-                    self._sessions_box.configure(state="normal")
-                    self._sessions_box.delete("1.0", "end")
-                    self._sessions_box.insert("1.0", output)
-                    self._sessions_box.configure(state="disabled")
+                if result.returncode == 0 and result.stdout.strip():
+                    output = result.stdout.strip()
+                else:
+                    output = "  ✅  Aktif uzak oturum bulunmuyor."
             except Exception as e:
-                if hasattr(self, '_sessions_box'):
-                    self._sessions_box.configure(state="normal")
-                    self._sessions_box.delete("1.0", "end")
-                    self._sessions_box.insert("1.0", f"Error: {e}")
-                    self._sessions_box.configure(state="disabled")
+                output = f"  ⚠️  Oturum bilgisi alınamadı: {e}"
+
+            def _update():
+                try:
+                    if hasattr(self, '_sessions_box'):
+                        self._sessions_box.configure(state="normal")
+                        self._sessions_box.delete("1.0", "end")
+                        self._sessions_box.insert("1.0", output)
+                        self._sessions_box.configure(state="disabled")
+                except Exception:
+                    pass
+            if self.root:
+                self.root.after(0, _update)
+
         import threading as _th
         _th.Thread(target=_do, daemon=True).start()
 

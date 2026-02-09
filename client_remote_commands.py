@@ -18,7 +18,7 @@ Supported commands:
   block_ip, unblock_ip, logoff_user, disable_account, enable_account,
   reset_password, kill_process, stop_service, disable_service,
   emergency_lockdown, lift_lockdown, list_sessions, list_processes,
-  snapshot
+  snapshot, collect_diagnostics
 
 Security layers:
   - Command whitelist (ALLOWED_COMMANDS)
@@ -30,6 +30,7 @@ Exports:
   RemoteCommandExecutor — main class (start / stop / get_stats)
 """
 
+import os
 import subprocess
 import threading
 import time
@@ -53,6 +54,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "kill_process", "stop_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "list_sessions", "list_processes", "snapshot",
+    "collect_diagnostics",
 }
 
 PROTECTED_ACCOUNTS: Set[str] = {
@@ -181,7 +183,7 @@ class RemoteCommandExecutor:
                     entry = {
                         "command_type": cmd.get("command_type", ""),
                         "command_id": cmd.get("command_id", ""),
-                        "parameters": cmd.get("parameters", {}),
+                        "parameters": cmd.get("parameters") or cmd.get("params") or {},
                         "result": result,
                         "executed_at": time.time(),
                     }
@@ -241,6 +243,7 @@ class RemoteCommandExecutor:
                     "status": "completed" if result.get("success") else "failed",
                     "result": result,
                     "executed_at": datetime.now(timezone.utc).isoformat(),
+                    "execution_time_ms": result.get("execution_time_ms", 0),
                 })
             except Exception as e:
                 log(f"[REMOTE-CMD] Result report error: {e}")
@@ -259,8 +262,8 @@ class RemoteCommandExecutor:
         if cmd_type not in ALLOWED_COMMANDS:
             return f"Unknown command: {cmd_type}"
 
-        # 2. Expired?
-        issued_at = cmd.get("issued_at", "")
+        # 2. Expired?  API may send issued_at, requested_at, or created_at
+        issued_at = cmd.get("issued_at") or cmd.get("requested_at") or cmd.get("created_at") or ""
         if issued_at:
             try:
                 issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
@@ -271,8 +274,8 @@ class RemoteCommandExecutor:
             except (ValueError, TypeError):
                 pass
 
-        # 3. Protected target checks
-        params = cmd.get("parameters", {})
+        # 3. Protected target checks — accept both "parameters" and "params"
+        params = cmd.get("parameters") or cmd.get("params") or {}
 
         if cmd_type in ("logoff_user", "disable_account", "enable_account", "reset_password"):
             username = params.get("username", "")
@@ -304,12 +307,17 @@ class RemoteCommandExecutor:
     def _execute(self, cmd: dict) -> dict:
         """Route to the appropriate handler."""
         cmd_type = cmd.get("command_type", "")
-        params = cmd.get("parameters", {})
+        # API may send "params" or "parameters" — accept both
+        params = cmd.get("parameters") or cmd.get("params") or {}
 
         handler = getattr(self, f"_cmd_{cmd_type}", None)
         if handler:
             try:
-                return handler(params)
+                start_ms = time.monotonic()
+                result = handler(params)
+                elapsed_ms = int((time.monotonic() - start_ms) * 1000)
+                result["execution_time_ms"] = elapsed_ms
+                return result
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -523,6 +531,132 @@ class RemoteCommandExecutor:
                 "connections": len(psutil.net_connections()),
                 "boot_time": psutil.boot_time(),
             }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_collect_diagnostics(self, params: dict) -> dict:
+        """Collect comprehensive system diagnostics."""
+        try:
+            import psutil
+            import platform
+            import socket
+
+            diag: Dict = {}
+
+            # OS info
+            diag["os"] = {
+                "system": platform.system(),
+                "release": platform.release(),
+                "version": platform.version(),
+                "architecture": platform.machine(),
+                "hostname": socket.gethostname(),
+            }
+
+            # Agent info
+            try:
+                from client_constants import VERSION
+                diag["agent"] = {
+                    "version": VERSION,
+                    "uptime_seconds": int(time.time() - psutil.boot_time()),
+                    "pid": os.getpid() if hasattr(os, 'getpid') else None,
+                }
+            except Exception:
+                diag["agent"] = {"version": "unknown"}
+
+            # CPU
+            diag["cpu"] = {
+                "percent": psutil.cpu_percent(interval=1),
+                "count_logical": psutil.cpu_count(logical=True),
+                "count_physical": psutil.cpu_count(logical=False),
+                "freq_mhz": round(psutil.cpu_freq().current, 0) if psutil.cpu_freq() else None,
+            }
+
+            # Memory
+            mem = psutil.virtual_memory()
+            diag["memory"] = {
+                "total_gb": round(mem.total / (1024 ** 3), 2),
+                "used_gb": round(mem.used / (1024 ** 3), 2),
+                "available_gb": round(mem.available / (1024 ** 3), 2),
+                "percent": mem.percent,
+            }
+
+            # Disk
+            diag["disk"] = {}
+            for part in psutil.disk_partitions():
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    diag["disk"][part.mountpoint] = {
+                        "total_gb": round(usage.total / (1024 ** 3), 2),
+                        "used_gb": round(usage.used / (1024 ** 3), 2),
+                        "free_gb": round(usage.free / (1024 ** 3), 2),
+                        "percent": usage.percent,
+                    }
+                except (PermissionError, OSError):
+                    continue
+
+            # Network interfaces
+            diag["network"] = {
+                "interfaces": {},
+                "active_connections": len(psutil.net_connections()),
+            }
+            for iface, addrs in psutil.net_if_addrs().items():
+                diag["network"]["interfaces"][iface] = [
+                    {"address": a.address, "family": str(a.family)}
+                    for a in addrs
+                ]
+
+            # Firewall rules summary
+            try:
+                fw_result = subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "show", "rule",
+                     "name=HONEYPOT", "dir=in"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                rule_count = fw_result.stdout.count("Rule Name:")
+                diag["firewall"] = {
+                    "honeypot_rules_count": rule_count,
+                    "status": "active" if rule_count >= 0 else "unknown",
+                }
+            except Exception:
+                diag["firewall"] = {"status": "query_failed"}
+
+            # Services check
+            diag["services"] = {}
+            check_services = ["sshd", "W3SVC", "MSSQLSERVER", "MySQL", "TermService"]
+            for svc_name in check_services:
+                try:
+                    svc = psutil.win_service_get(svc_name)
+                    info = svc.as_dict()
+                    diag["services"][svc_name] = {
+                        "status": info.get("status", "unknown"),
+                        "start_type": info.get("start_type", "unknown"),
+                    }
+                except Exception:
+                    diag["services"][svc_name] = {"status": "not_found"}
+
+            # Top processes (top 10 by CPU)
+            diag["top_processes"] = []
+            for p in sorted(
+                psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']),
+                key=lambda p: p.info.get('cpu_percent', 0) or 0,
+                reverse=True,
+            )[:10]:
+                try:
+                    info = p.info
+                    diag["top_processes"].append({
+                        "pid": info.get("pid"),
+                        "name": info.get("name", ""),
+                        "cpu_percent": info.get("cpu_percent", 0),
+                        "memory_mb": round(
+                            (info.get("memory_info") or type("", (), {"rss": 0})).rss / 1024 / 1024, 1
+                        ),
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            return {"success": True, "diagnostics": diag}
+
         except Exception as e:
             return {"success": False, "error": str(e)}
 

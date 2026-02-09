@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.1.0"  # Unified firewall rule naming: all rules now use HP-BLOCK- prefix
+VERSION = "4.1.1"  # Firewall rule migration & API sync on startup
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

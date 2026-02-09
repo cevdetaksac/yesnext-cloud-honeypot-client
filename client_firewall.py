@@ -283,6 +283,96 @@ class WindowsFirewallBackend(FirewallBackend):
         return True
 
 
+    def scan_existing_rules(self) -> List[dict]:
+        """Scan all HP-BLOCK- and legacy HONEYPOT_THREAT_BLOCK_ firewall rules.
+
+        Returns list of dicts: {name, remoteip, prefix, ip, legacy}
+        """
+        rc, out, err = run_cmd([
+            "netsh", "advfirewall", "firewall", "show", "rule",
+            "dir=in", "status=enabled", "type=static",
+        ], timeout=30)
+        if rc != 0:
+            self.logger.error(f"Failed to enumerate firewall rules: {err}")
+            return []
+
+        rules: List[dict] = []
+        current: dict = {}
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                if current:
+                    rules.append(current)
+                    current = {}
+                continue
+            if ":" in line:
+                key, _, val = line.partition(":")
+                key = key.strip().lower()
+                val = val.strip()
+                if "rule name" in key or "kural ad" in key:
+                    current["name"] = val
+                elif "remoteip" in key or "uzak ip" in key or "remote ip" in key:
+                    current["remoteip"] = val
+        if current:
+            rules.append(current)
+
+        # Filter only our rules
+        result = []
+        for r in rules:
+            name = r.get("name", "")
+            remoteip = r.get("remoteip", "")
+            if name.startswith("HP-BLOCK-"):
+                suffix = name[len("HP-BLOCK-"):]
+                result.append({
+                    "name": name,
+                    "remoteip": remoteip,
+                    "suffix": suffix,
+                    "legacy": False,
+                })
+            elif name.startswith("HONEYPOT_THREAT_BLOCK_"):
+                suffix = name[len("HONEYPOT_THREAT_BLOCK_"):]
+                # Convert underscored IP back to dotted
+                ip = suffix.replace("_", ".")
+                result.append({
+                    "name": name,
+                    "remoteip": remoteip,
+                    "suffix": suffix,
+                    "ip": ip,
+                    "legacy": True,
+                })
+        return result
+
+    def migrate_legacy_rule(self, old_name: str, ip: str, remoteip: str) -> bool:
+        """Rename a legacy HONEYPOT_THREAT_BLOCK_ rule to HP-BLOCK-{ip}.
+
+        netsh doesn't support rename, so delete old + create new.
+        """
+        new_name = f"HP-BLOCK-{ip}"
+        # Delete old rule
+        rc, out, err = run_cmd([
+            "netsh", "advfirewall", "firewall", "delete", "rule",
+            f"name={old_name}", "dir=in",
+        ])
+        if rc != 0:
+            msg = (out + err).lower()
+            if "no rules match" not in msg:
+                self.logger.error(f"Failed to delete legacy rule {old_name}: {err}")
+                return False
+
+        # Create new rule with same remoteip
+        remote = remoteip if remoteip and remoteip.lower() not in ("any", "herhangi") else ip
+        rc, out, err = run_cmd([
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={new_name}", "dir=in", "action=block",
+            f"remoteip={remote}", "enable=yes",
+        ])
+        if rc == 0:
+            self.logger.info(f"Migrated: {old_name} → {new_name}")
+            return True
+        self.logger.error(f"Failed to create migrated rule {new_name}: {err}")
+        return False
+
+
 class LinuxFirewallBackend(FirewallBackend):
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
@@ -535,6 +625,143 @@ class FirewallAgent:
                 self.logger.error(f"block-removed HTTP {code}")
         return removed_ids
 
+    # --------------- Migration & sync --------------- #
+
+    def _migrate_and_sync_rules(self) -> None:
+        """Startup migration: rename legacy rules and sync all local blocks to API.
+
+        1. Scan all HP-BLOCK-* and HONEYPOT_THREAT_BLOCK_* firewall rules
+        2. Migrate legacy names → HP-BLOCK-{ip}
+        3. POST full list to /api/agent/sync-rules so dashboard is in sync
+        """
+        if not is_windows():
+            return  # Linux migration not needed yet
+        if not isinstance(self.backend, WindowsFirewallBackend):
+            return
+
+        self.logger.info("🔄 Firewall rule migration & sync starting...")
+
+        try:
+            rules = self.backend.scan_existing_rules()
+        except Exception as e:
+            self.logger.error(f"Rule scan failed: {e}")
+            return
+
+        if not rules:
+            self.logger.info("No existing HP-BLOCK / legacy rules found")
+            # Still sync empty list so API knows
+            self._sync_rules_to_api([])
+            return
+
+        # Phase 1: Migrate legacy rules
+        migrated = 0
+        for r in rules:
+            if r.get("legacy"):
+                ip = r.get("ip", "")
+                if ip:
+                    ok = self.backend.migrate_legacy_rule(
+                        old_name=r["name"],
+                        ip=ip,
+                        remoteip=r.get("remoteip", ""),
+                    )
+                    if ok:
+                        migrated += 1
+                        # Update record in-place for sync
+                        r["name"] = f"HP-BLOCK-{ip}"
+                        r["legacy"] = False
+                        r["suffix"] = ip
+
+        if migrated:
+            self.logger.info(f"✅ Migrated {migrated} legacy rule(s) to HP-BLOCK- prefix")
+
+        # Phase 2: Also load AutoResponse in-memory blocks into sync list
+        auto_blocks = []
+        if self.auto_response:
+            try:
+                auto_blocks = self.auto_response.get_blocked_ips()
+            except Exception:
+                pass
+
+        # Phase 3: Build unique IP list from firewall + AutoResponse
+        sync_ips: dict = {}  # ip -> {rule_name, source}
+        for r in rules:
+            # Extract IP from remoteip or suffix
+            remoteip = r.get("remoteip", "")
+            suffix = r.get("suffix", "")
+            # For HP-BLOCK-{id} (numeric IDs from dashboard), use remoteip
+            # For HP-BLOCK-{ip}, suffix is the IP
+            ip = ""
+            if suffix and not suffix.isdigit():
+                ip = suffix  # HP-BLOCK-1.2.3.4 → ip=1.2.3.4
+            elif remoteip and remoteip.lower() not in ("any", "herhangi"):
+                ip = remoteip.split(",")[0].strip()  # Take first IP from CSV
+
+            if ip:
+                sync_ips[ip] = {
+                    "rule_name": r["name"],
+                    "source": "auto_response" if not suffix.isdigit() else "dashboard",
+                }
+
+        # Add AutoResponse in-memory blocks
+        for ab in auto_blocks:
+            ip = ab.get("ip", "")
+            if ip and ip not in sync_ips:
+                sync_ips[ip] = {
+                    "rule_name": f"HP-BLOCK-{ip}",
+                    "source": "auto_response",
+                    "reason": ab.get("reason", ""),
+                    "blocked_at": ab.get("blocked_at", 0),
+                }
+
+        # Phase 4: Sync to API
+        self._sync_rules_to_api(list(sync_ips.items()))
+        self.logger.info(
+            f"🔄 Sync complete: {len(sync_ips)} active block(s) reported to API"
+        )
+
+    def _sync_rules_to_api(self, ip_entries: list) -> None:
+        """POST /api/agent/sync-rules — Send all local firewall blocks to API."""
+        import datetime as _dt
+
+        blocks = []
+        for item in ip_entries:
+            if isinstance(item, tuple):
+                ip, info = item
+            else:
+                continue
+            blocks.append({
+                "ip": ip,
+                "rule_name": info.get("rule_name", f"HP-BLOCK-{ip}"),
+                "source": info.get("source", "unknown"),
+                "reason": info.get("reason", ""),
+                "blocked_at": info.get("blocked_at", ""),
+            })
+
+        body = {
+            "token": self.token,
+            "blocks": blocks,
+            "total_rules": len(blocks),
+            "synced_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        _, code = self._post_json("/api/agent/sync-rules", body)
+        if code == 200:
+            self.logger.info(f"API sync-rules accepted ({len(blocks)} blocks)")
+        else:
+            # Fallback: try individual auto-block reports
+            self.logger.warning(
+                f"sync-rules HTTP {code} — falling back to individual reports"
+            )
+            for b in blocks:
+                if b.get("source") == "auto_response" and b.get("ip"):
+                    fallback_body = {
+                        "token": self.token,
+                        "blocked_ip": b["ip"],
+                        "reason": b.get("reason", "migration_sync"),
+                        "duration_hours": 24,
+                        "firewall_rule_name": b.get("rule_name", ""),
+                    }
+                    self._post_json("/api/alerts/auto-block", fallback_body)
+
     def run_once(self) -> dict:
         """Run a single poll cycle and return results"""
         try:
@@ -557,6 +784,13 @@ class FirewallAgent:
     def run_forever(self) -> None:
         if not is_admin():
             self.logger.error("This agent requires Administrator/root privileges.")
+
+        # Run migration & sync once at startup
+        try:
+            self._migrate_and_sync_rules()
+        except Exception as e:
+            self.logger.error(f"Migration/sync error (non-fatal): {e}")
+
         backoff = self.refresh_interval
         max_backoff = max(60, self.refresh_interval * 6)
         self.logger.info("Started Honeypot Firewall Agent")

@@ -26,6 +26,7 @@ Mevcut endpointler:
 - `GET  /agent/pending-unblocks` — Kaldırılacak bloklar
 - `POST /agent/block-applied` — Blok uygulandı onayı
 - `POST /agent/block-removed` — Blok kaldırıldı onayı
+- `POST /agent/sync-rules` — Client firewall kurallarını API ile senkronize et (v4.1.1)
 
 Authentication: Tüm isteklerde `token` (string) body veya query param olarak gönderilir.
 
@@ -325,6 +326,62 @@ Content-Type: application/json
 3. Mevcut `pending-blocks` sistemiyle senkronize et (çift engellemeyi önle)
 4. `extend_duration: true` dönerse client süreyi uzatır
 5. `permanent_block: true` dönerse client kalıcı kural oluşturur
+
+---
+
+### 4b. 🔄 POST /api/agent/sync-rules (v4.1.1)
+
+**Amaç:** Client başlatıldığında mevcut firewall kurallarını backend ile senkronize eder. Dashboard ve client aynı blok listesini gösterir.
+
+**Ne zaman çağrılır:** Client her başlatıldığında (FirewallAgent.run_forever() başlangıcında) otomatik olarak bir kez çağrılır.
+
+**Request:**
+
+```json
+POST /api/agent/sync-rules
+Content-Type: application/json
+
+{
+    "token": "client-registration-token",
+    "blocks": [
+        {
+            "ip": "45.132.181.87",
+            "rule_name": "HP-BLOCK-45.132.181.87",
+            "source": "auto_response",
+            "reason": "brute_force",
+            "blocked_at": 1739145600.0
+        },
+        {
+            "ip": "103.54.59.128",
+            "rule_name": "HP-BLOCK-42",
+            "source": "dashboard",
+            "reason": "",
+            "blocked_at": ""
+        }
+    ],
+    "total_rules": 2,
+    "synced_at": "2026-02-09T17:30:00Z"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+    "status": "synced",
+    "accepted": 2,
+    "removed_stale": 0
+}
+```
+
+**Backend davranışı:**
+1. Token'a ait mevcut "aktif blok" listesini bu payload ile güncelle
+2. Client'ta var ama backend'te yok olan blokları ekle
+3. Backend'te var ama client'ta yok olan blokları "stale" olarak işaretle
+4. Dashboard "Uygulanan Bloklar" panelini senkronize et
+5. `source` alanı blokun kaynağını belirtir: `auto_response` veya `dashboard`
+
+**Fallback:** Eğer backend bu endpoint'i henüz desteklemiyorsa (HTTP != 200), client mevcut `POST /api/alerts/auto-block` endpoint'ine tek tek blok bildirimi yapar.
 
 ---
 

@@ -165,14 +165,55 @@ CONTEXT_CLEANUP_INTERVAL = 300       # 5 min
 # Max age for IP context entries without new events
 CONTEXT_MAX_AGE = 86400              # 24 hours
 
-# Default block rule when no API rules are configured
+# Default block rules when no API rules are configured.
+# Her servis için ideal varsayılan koruma — kullanıcı dashboard'dan özelleştirebilir.
 DEFAULT_BLOCK_RULES = [
     {
         "name": "default_rdp",
         "services": "RDP",
         "threshold_count": 3,
         "window_minutes": 30,
-        "actions": "block",
+        "actions": "email,block",
+        "enabled": True,
+    },
+    {
+        "name": "default_mssql",
+        "services": "MSSQL",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "email,block",
+        "enabled": True,
+    },
+    {
+        "name": "default_ssh",
+        "services": "SSH",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "email,block",
+        "enabled": True,
+    },
+    {
+        "name": "default_ftp",
+        "services": "FTP",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "email,block",
+        "enabled": True,
+    },
+    {
+        "name": "default_mysql",
+        "services": "MYSQL",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "email,block",
+        "enabled": True,
+    },
+    {
+        "name": "default_network",
+        "services": "Network",
+        "threshold_count": 3,
+        "window_minutes": 30,
+        "actions": "email,block",
         "enabled": True,
     },
 ]
@@ -340,7 +381,10 @@ class ThreatEngine:
             self._stats["events_scored"] += 1
 
             # 2b. API block rules — simple threshold check (e.g. 3 RDP fails → block)
-            if event_type in FAILED_LOGON_TYPES or event_type == "failed_logon_single":
+            # failed_logon, sql_failed_logon, honeypot_credential hepsi kontrol edilir
+            if (event_type in FAILED_LOGON_TYPES
+                    or event_type == "failed_logon_single"
+                    or event_type == "honeypot_credential"):
                 self._check_block_rules(ip_key, ctx, event)
 
             # 3. Correlation rules
@@ -518,17 +562,26 @@ class ThreatEngine:
 
     # ── API Block Rules (Dashboard kuralları) ─────────────────────
 
+    # Event types that count as "failed auth" for block rules
+    _BLOCK_RULE_FAIL_TYPES: Set[str] = (
+        FAILED_LOGON_TYPES | {"failed_logon_single", "honeypot_credential"}
+    )
+
     def _check_block_rules(self, ip: str, ctx: IPContext, event: dict):
         """
-        Dashboard'dan gelen blok kurallarını kontrol et.
+        Dashboard'dan gelen (veya varsayılan) blok kurallarını kontrol et.
         Örnek kural: RDP servisi, eşik=3, pencere=30dk → 3 failed login = anında blokla.
+        Honeypot credential'lar da failed auth olarak sayılır.
         """
         if ip in ("local", "", "127.0.0.1", "::1"):
             return
         if ip in self._rule_blocked_ips:
             return  # zaten bu kural ile bloklanmış
 
-        event_service = (event.get("target_service", "") or "").upper()
+        # Servis tespiti: EventLog → target_service, Honeypot → service
+        event_service = (
+            event.get("target_service", "") or event.get("service", "") or ""
+        ).upper()
 
         with self._block_rules_lock:
             rules = list(self._block_rules)
@@ -546,15 +599,14 @@ class ThreatEngine:
 
             threshold = int(rule.get("threshold_count", 3))
             window_sec = int(rule.get("window_minutes", 30)) * 60
-            actions_str = rule.get("actions", "block")
+            actions_str = rule.get("actions", "email,block")
             actions = {a.strip().lower() for a in actions_str.split(",")}
 
-            # Pencere içindeki failed login sayısı
+            # Pencere içindeki failed login sayısı (honeypot credential dahil)
             recent = ctx.get_recent_events(window_sec)
             fail_count = sum(
                 1 for e in recent
-                if e["event_type"] in FAILED_LOGON_TYPES
-                   or e["event_type"] == "failed_logon_single"
+                if e["event_type"] in self._BLOCK_RULE_FAIL_TYPES
             )
 
             if fail_count < threshold:

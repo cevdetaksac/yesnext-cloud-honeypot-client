@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.0.0"  # Threat detection, auto-response, ransomware shield, performance optimizer
+VERSION = "4.0.1"  # Heartbeat enrichment, health report enhancement, GUI 3-tab layout
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

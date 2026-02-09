@@ -273,6 +273,7 @@ class CloudHoneypotClient:
                     api_client=self.api_client,
                     token_getter=lambda: self.state.get("token", ""),
                     threat_engine=self.threat_engine,
+                    ransomware_shield=self.ransomware_shield,
                 )
                 if ENABLE_SELF_PROTECTION:
                     self.process_protection = ProcessProtection(
@@ -714,6 +715,67 @@ class CloudHoneypotClient:
         # Program açık ama servis yok → idle
         return "idle"
 
+    def _build_system_context(self) -> dict:
+        """Heartbeat ile gönderilecek zengin sunucu bilgilerini toplar."""
+        import platform
+        ctx = {
+            "agent_version": __version__,
+            "os_info": f"{platform.system()} {platform.release()} (build {platform.version()})",
+        }
+
+        # Uptime
+        try:
+            import psutil
+            boot = psutil.boot_time()
+            ctx["uptime_hours"] = round((time.time() - boot) / 3600, 1)
+        except Exception:
+            ctx["uptime_hours"] = 0
+
+        # Aktif honeypot servisleri + portlar
+        try:
+            services = []
+            for svc in self.service_manager.running_services:
+                port = getattr(svc, "port", None) or getattr(svc, "_port", 0)
+                services.append({"name": svc.__class__.__name__.replace("Fake", "").upper(), "port": port})
+            ctx["active_services"] = services
+            ctx["active_service_count"] = len(services)
+        except Exception:
+            ctx["active_services"] = []
+            ctx["active_service_count"] = 0
+
+        # CPU / RAM özet (varsa health monitor'dan)
+        try:
+            if self.health_monitor:
+                snap = self.health_monitor.get_snapshot()
+                ctx["cpu_percent"] = snap.get("cpu_percent", 0)
+                ctx["memory_percent"] = snap.get("memory_percent", 0)
+        except Exception:
+            pass
+
+        # Threat Engine durumu
+        try:
+            if self.threat_engine:
+                level, _ = self.threat_engine.get_threat_level()
+                stats = self.threat_engine.get_stats()
+                ctx["threat_level"] = level
+                ctx["active_threat_ips"] = stats.get("active_ips", 0)
+                ctx["total_alerts"] = stats.get("alerts_generated", 0)
+        except Exception:
+            pass
+
+        # Ransomware Shield durumu
+        try:
+            if self.ransomware_shield:
+                rs_stats = self.ransomware_shield.get_stats()
+                ctx["ransomware_shield_status"] = "active" if self.ransomware_shield._running else "disabled"
+                ctx["ransomware_detections"] = rs_stats.get("total_detections", 0)
+            else:
+                ctx["ransomware_shield_status"] = "disabled"
+        except Exception:
+            ctx["ransomware_shield_status"] = "error"
+
+        return ctx
+
     def send_heartbeat_once(self, status_override: Optional[str] = None):
         """Send single heartbeat to API with intelligent status detection (session-based)"""
         token = self.state.get("token")
@@ -723,7 +785,8 @@ class CloudHoneypotClient:
             if status_override is None: status_override = self.get_intelligent_status()
             self.api_client.send_heartbeat(
                 token, ip, SERVER_NAME,
-                self.state.get("running", False), status_override
+                self.state.get("running", False), status_override,
+                system_context=self._build_system_context()
             )
 
     def heartbeat_loop(self):

@@ -112,11 +112,13 @@ class SystemHealthMonitor:
         api_client=None,
         token_getter: Optional[Callable[[], str]] = None,
         threat_engine=None,
+        ransomware_shield=None,
     ):
         self.on_alert = on_alert
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.threat_engine = threat_engine
+        self._ransomware_shield = ransomware_shield
 
         self._running = False
 
@@ -339,13 +341,49 @@ class SystemHealthMonitor:
         if not token:
             return
 
+        # Collect extended memory and disk info
+        mem_total_gb = 0.0
+        mem_used_gb = 0.0
+        disk_total_gb = 0
+        disk_free_gb = 0
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            mem_total_gb = round(mem.total / (1024 ** 3), 1)
+            mem_used_gb = round(mem.used / (1024 ** 3), 1)
+            try:
+                disk = psutil.disk_usage("C:\\")
+                disk_total_gb = round(disk.total / (1024 ** 3))
+                disk_free_gb = round(disk.free / (1024 ** 3))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # VSS shadow count + ransomware shield status
+        vss_shadow_count = 0
+        ransomware_shield_status = "disabled"
+        canary_files_intact = True
+        if self._ransomware_shield:
+            try:
+                ransomware_shield_status = "active" if self._ransomware_shield._running else "disabled"
+                rs_stats = self._ransomware_shield.get_stats()
+                canary_files_intact = rs_stats.get("canary_alerts", 0) == 0
+                vss_shadow_count = getattr(self._ransomware_shield, "_vss_count", 0) or 0
+            except Exception:
+                ransomware_shield_status = "error"
+
         payload = {
             "token": token,
             "snapshot": {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "cpu_percent": self._latest.get("cpu_percent", 0),
                 "memory_percent": self._latest.get("memory_percent", 0),
+                "memory_total_gb": mem_total_gb,
+                "memory_used_gb": mem_used_gb,
                 "disk_usage_percent": self._latest.get("disk_usage_percent", 0),
+                "disk_total_gb": disk_total_gb,
+                "disk_free_gb": disk_free_gb,
                 "disk_io_read_rate": round(self._latest.get("disk_io_read_rate", 0)),
                 "disk_io_write_rate": round(self._latest.get("disk_io_write_rate", 0)),
                 "net_bytes_sent_rate": round(self._latest.get("net_bytes_sent_rate", 0)),
@@ -354,6 +392,9 @@ class SystemHealthMonitor:
                 "connection_count": self._latest.get("connection_count", 0),
                 "anomalies_detected": self._anomalies,
                 "top_cpu_processes": self._stats.get("top_cpu_processes", [])[:5],
+                "vss_shadow_count": vss_shadow_count,
+                "ransomware_shield_status": ransomware_shield_status,
+                "canary_files_intact": canary_files_intact,
             },
         }
 

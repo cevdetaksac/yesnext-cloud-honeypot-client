@@ -144,13 +144,28 @@ class HoneypotAPIClient:
             self.log(f"[API] IP güncelleme hatası: {e}")
             return False
 
-    def send_heartbeat(self, token: str, ip: str, hostname: str, running: bool, status: str) -> bool:
-        """API'ye bir heartbeat sinyali gönderir."""
+    def send_heartbeat(self, token: str, ip: str, hostname: str, running: bool, status: str,
+                        system_context: dict = None) -> bool:
+        """API'ye zengin heartbeat sinyali gönderir.
+        
+        Args:
+            token: Client authentication token
+            ip: Public IP address
+            hostname: Server hostname
+            running: Whether the client is running
+            status: Status string (online/idle/offline)
+            system_context: Optional dict with rich system info:
+                agent_version, os_info, uptime_hours, cpu_percent, memory_percent,
+                active_services, threat_level, blocked_ips, total_attacks, etc.
+        """
         try:
             payload = {
                 "token": token, "ip": ip, "hostname": hostname,
                 "running": running, "status": status
             }
+            # Merge rich system context if provided
+            if system_context:
+                payload["system_context"] = system_context
             response = self.api_request("POST", "heartbeat", data=payload)
             return response is not None
         except Exception as e:

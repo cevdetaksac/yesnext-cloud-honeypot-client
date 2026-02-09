@@ -93,9 +93,9 @@ class ModernGUI:
         ctk.set_default_color_theme("blue")
 
         root.title(f"{self.t('app_title')} v{__version__}")
-        root.geometry("880x740")
+        root.geometry("900x760")
         root.configure(fg_color=COLORS["bg"])
-        root.minsize(800, 640)
+        root.minsize(820, 660)
 
         # ── İkon ── #
         self._set_window_icon(root)
@@ -106,18 +106,54 @@ class ModernGUI:
         # ── Kapatma → tray ── #
         root.protocol("WM_DELETE_WINDOW", self.app.on_close)
 
-        # ── Ana scroll container ── #
-        container = ctk.CTkScrollableFrame(root, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=16, pady=(4, 16))
-
         # ── Başlık Bandı ── #
-        self._build_header(container)
+        self._build_header(root)
 
-        # ── Dashboard İstatistik Kartları ── #
-        self._build_dashboard(container)
+        # ── Tab View (3 sekme) ── #
+        self._tabview = ctk.CTkTabview(
+            root, fg_color="transparent",
+            segmented_button_fg_color=COLORS["card"],
+            segmented_button_selected_color=COLORS["accent"],
+            segmented_button_selected_hover_color=COLORS["blue"],
+            segmented_button_unselected_color=COLORS["card"],
+            segmented_button_unselected_hover_color=COLORS["border"],
+            text_color=COLORS["text_bright"],
+            text_color_disabled=COLORS["text_dim"],
+            corner_radius=10,
+        )
+        self._tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # ── Honeypot Servisleri ── #
-        self._build_services_section(container)
+        # Tab isimleri — parantez içi sayılar _refresh_dashboard'da güncellenir
+        self._tab_status_name = "Anlık Durum"
+        self._tab_threat_name = "Tehdit Merkezi (0)"
+        self._tab_services_name = "Honeypot Servisleri (0)"
+
+        self._tabview.add(self._tab_status_name)
+        self._tabview.add(self._tab_threat_name)
+        self._tabview.add(self._tab_services_name)
+        self._tabview.set(self._tab_status_name)
+
+        # Scrollable content for each tab
+        tab1_scroll = ctk.CTkScrollableFrame(
+            self._tabview.tab(self._tab_status_name), fg_color="transparent")
+        tab1_scroll.pack(fill="both", expand=True)
+
+        tab2_scroll = ctk.CTkScrollableFrame(
+            self._tabview.tab(self._tab_threat_name), fg_color="transparent")
+        tab2_scroll.pack(fill="both", expand=True)
+
+        tab3_scroll = ctk.CTkScrollableFrame(
+            self._tabview.tab(self._tab_services_name), fg_color="transparent")
+        tab3_scroll.pack(fill="both", expand=True)
+
+        # ── Tab 1: Anlık Durum — Dashboard kartları ── #
+        self._build_dashboard(tab1_scroll)
+
+        # ── Tab 2: Tehdit Merkezi — Threat detection + response ── #
+        self._build_threat_center(tab2_scroll)
+
+        # ── Tab 3: Honeypot Servisleri ── #
+        self._build_services_section(tab3_scroll)
 
         # ── app referansları (eski alanlar artık yok) ── #
         self.app.ip_entry = None
@@ -243,8 +279,8 @@ class ModernGUI:
     #  BAŞLIK BANDI
     # ═══════════════════════════════════════════════════════════════
     def _build_header(self, parent):
-        hdr = ctk.CTkFrame(parent, fg_color=COLORS["accent"], corner_radius=12, height=52)
-        hdr.pack(fill="x", pady=(0, 12))
+        hdr = ctk.CTkFrame(parent, fg_color=COLORS["accent"], corner_radius=0, height=44)
+        hdr.pack(fill="x", pady=(0, 0))
         hdr.pack_propagate(False)
 
         lbl = ctk.CTkLabel(
@@ -284,7 +320,7 @@ class ModernGUI:
     #  DASHBOARD İSTATİSTİK KARTLARI
     # ═══════════════════════════════════════════════════════════════
     def _build_dashboard(self, parent):
-        """Mini dashboard — canlı istatistik kartları."""
+        """Mini dashboard — canlı istatistik kartları (Tab 1: Anlık Durum)."""
         sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
         sec.pack(fill="x", pady=(0, 12))
 
@@ -333,7 +369,7 @@ class ModernGUI:
         except Exception:
             pass
 
-        # ── Kartları oluştur ── #
+        # ── Kartları oluştur (Tab 1 — Anlık Durum) ── #
         cards_data = [
             # (key, emoji, label_key, value, color, row, col)
             ("total_attacks",   "🎯", "dash_total_attacks",   str(total_attacks),   COLORS["red"],    0, 0),
@@ -349,23 +385,11 @@ class ModernGUI:
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
-        # ── Threat Detection Kartları (v4.0) — Satır 3 ── #
-        threat_cards_data = [
-            ("threat_level",    "🛡️", "Threat Level",  "SAFE", COLORS["green"],    2, 0),
-            ("events_per_hour", "📊", "Events/Hour",   "0",    COLORS["text_dim"], 2, 1),
-            ("blocked_ips",     "🚫", "Tracked IPs",   "0",    COLORS["text_dim"], 2, 2),
-        ]
-
-        for key, emoji, label, value, color, row, col in threat_cards_data:
-            card = self._create_stat_card(grid, emoji, label, value, color)
-            card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
-            self._dash_cards[key] = card
-
-        # ── Faz 3 Kartları (v4.0) — Satır 4 ── #
+        # ── Faz 3 Durum Kartları — Satır 3 ── #
         faz3_cards_data = [
-            ("ransomware",      "🧬", "Ransomware",    "SAFE",  COLORS["green"],    3, 0),
-            ("cpu_usage",       "💻", "CPU / RAM",     "—",     COLORS["text_dim"], 3, 1),
-            ("self_protect",    "🔒", "Protection",    "ACTIVE", COLORS["green"],   3, 2),
+            ("ransomware",      "🧬", "Ransomware",    "SAFE",  COLORS["green"],    2, 0),
+            ("cpu_usage",       "💻", "CPU / RAM",     "—",     COLORS["text_dim"], 2, 1),
+            ("self_protect",    "🔒", "Protection",    "ACTIVE", COLORS["green"],   2, 2),
         ]
 
         for key, emoji, label, value, color, row, col in faz3_cards_data:
@@ -373,18 +397,54 @@ class ModernGUI:
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
-        # ── Live Threat Feed (v4.0 Faz 2) ── #
-        self._build_threat_feed(sec)
+    # ═══════════════════════════════════════════════════════════════
+    #  TAB 2: TEHDİT MERKEZİ
+    # ═══════════════════════════════════════════════════════════════
+    def _build_threat_center(self, parent):
+        """Tab 2 — Tehdit Merkezi: Threat kartlar + feed + response + history + trends."""
+        # ── Threat Detection Kartları ── #
+        threat_sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        threat_sec.pack(fill="x", pady=(0, 12))
 
-        # ── Quick Response Buttons (v4.0 Faz 2) ── #
-        self._build_response_buttons(sec)
+        ctk.CTkLabel(
+            threat_sec, text="🛡️  Threat Detection",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=16, pady=(12, 8))
 
-        # ── Command History + Active Sessions (v4.0 Faz 4) ── #
-        self._build_command_history(sec)
-        self._build_active_sessions(sec)
+        sep = ctk.CTkFrame(threat_sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(0, 10))
 
-        # ── Trend Mini-Charts (v4.0 Faz 4) ── #
-        self._build_trend_panel(sec)
+        threat_grid = ctk.CTkFrame(threat_sec, fg_color="transparent")
+        threat_grid.pack(fill="x", padx=12, pady=(0, 14))
+        for c in range(3):
+            threat_grid.columnconfigure(c, weight=1)
+
+        threat_cards_data = [
+            ("threat_level",    "🛡️", "Threat Level",  "SAFE", COLORS["green"],    0, 0),
+            ("events_per_hour", "📊", "Events/Hour",   "0",    COLORS["text_dim"], 0, 1),
+            ("blocked_ips",     "🚫", "Tracked IPs",   "0",    COLORS["text_dim"], 0, 2),
+        ]
+
+        for key, emoji, label, value, color, row, col in threat_cards_data:
+            card = self._create_stat_card(threat_grid, emoji, label, value, color)
+            card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
+            self._dash_cards[key] = card
+
+        # ── Live Threat Feed ── #
+        self._build_threat_feed(threat_sec)
+
+        # ── Quick Response Buttons ── #
+        self._build_response_buttons(threat_sec)
+
+        # ── Command History ── #
+        self._build_command_history(parent)
+
+        # ── Active Sessions ── #
+        self._build_active_sessions(parent)
+
+        # ── Trend Mini-Charts ── #
+        self._build_trend_panel(parent)
 
     # ─── Live Threat Feed (v4.0 Faz 2) ─── #
     def _build_threat_feed(self, parent):
@@ -568,23 +628,23 @@ class ModernGUI:
     # ─── Command History Panel (v4.0 Faz 4) ─── #
     def _build_command_history(self, parent):
         """Scrollable command execution history — last 50 remote commands & results."""
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", padx=12, pady=(0, 4))
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            frame, text="📋  Command History",
+            sec, text="📋  Command History",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w", padx=4, pady=(0, 4))
+        ).pack(anchor="w", padx=16, pady=(12, 4))
 
         self._cmd_history_box = ctk.CTkTextbox(
-            frame, height=80, fg_color=COLORS["bg"],
+            sec, height=100, fg_color=COLORS["bg"],
             border_width=1, border_color=COLORS["border"],
             font=ctk.CTkFont(family="Consolas", size=10),
             text_color=COLORS["text_dim"],
             state="disabled", wrap="word",
         )
-        self._cmd_history_box.pack(fill="x", padx=4, pady=(0, 6))
+        self._cmd_history_box.pack(fill="x", padx=16, pady=(0, 12))
 
     def append_command_history(self, text: str):
         """Append a line to command history (thread-safe)."""
@@ -608,11 +668,11 @@ class ModernGUI:
     # ─── Active Sessions Panel (v4.0 Faz 4) ─── #
     def _build_active_sessions(self, parent):
         """Active RDP/console sessions display with refresh button."""
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", padx=12, pady=(0, 4))
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=4, pady=(0, 4))
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
             hdr, text="👥  Active Sessions",
@@ -630,13 +690,13 @@ class ModernGUI:
         ).pack(side="right")
 
         self._sessions_box = ctk.CTkTextbox(
-            frame, height=60, fg_color=COLORS["bg"],
+            sec, height=80, fg_color=COLORS["bg"],
             border_width=1, border_color=COLORS["border"],
             font=ctk.CTkFont(family="Consolas", size=10),
             text_color=COLORS["text_dim"],
             state="disabled", wrap="word",
         )
-        self._sessions_box.pack(fill="x", padx=4, pady=(0, 6))
+        self._sessions_box.pack(fill="x", padx=16, pady=(0, 12))
 
     def _refresh_active_sessions(self):
         """Fetch and display active sessions via 'query session'."""
@@ -666,23 +726,23 @@ class ModernGUI:
     # ─── Trend Mini-Charts (v4.0 Faz 4) ─── #
     def _build_trend_panel(self, parent):
         """ASCII-style trend mini-charts for CPU, events/hour, and threat score."""
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", padx=12, pady=(0, 10))
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            frame, text="📈  Trends (last 30 min)",
+            sec, text="📈  Trends (last 30 min)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
-        ).pack(anchor="w", padx=4, pady=(0, 4))
+        ).pack(anchor="w", padx=16, pady=(12, 4))
 
         self._trend_box = ctk.CTkTextbox(
-            frame, height=70, fg_color=COLORS["bg"],
+            sec, height=80, fg_color=COLORS["bg"],
             border_width=1, border_color=COLORS["border"],
             font=ctk.CTkFont(family="Consolas", size=10),
             text_color=COLORS["text_dim"],
             state="disabled", wrap="none",
         )
-        self._trend_box.pack(fill="x", padx=4, pady=(0, 6))
+        self._trend_box.pack(fill="x", padx=16, pady=(0, 12))
 
     def _refresh_trend_panel(self):
         """Update trend mini-charts with ASCII sparklines."""
@@ -887,6 +947,46 @@ class ModernGUI:
             # Header badge senkronizasyonu
             self.update_header_status(active_count > 0)
 
+            # Tab badge güncelleme
+            self._update_tab_badges(active_count)
+
+        except Exception:
+            pass
+
+    def _update_tab_badges(self, active_service_count: int):
+        """Tab isimlerindeki parantez içi sayıları güncelle."""
+        try:
+            if not hasattr(self, '_tabview'):
+                return
+
+            # Tehdit sayısı — kritik seviye threat'ler
+            threat_count = 0
+            threat_engine = getattr(self.app, 'threat_engine', None)
+            if threat_engine:
+                try:
+                    stats = threat_engine.get_stats()
+                    threat_count = stats.get("alerts_generated", 0)
+                except Exception:
+                    pass
+
+            # Yeni tab isimleri
+            new_threat = f"Tehdit Merkezi ({threat_count})"
+            new_services = f"Honeypot Servisleri ({active_service_count})"
+
+            # Sadece değiştiyse güncelle (flicker önleme)
+            if new_threat != self._tab_threat_name:
+                try:
+                    self._tabview.rename(self._tab_threat_name, new_threat)
+                    self._tab_threat_name = new_threat
+                except Exception:
+                    pass
+
+            if new_services != self._tab_services_name:
+                try:
+                    self._tabview.rename(self._tab_services_name, new_services)
+                    self._tab_services_name = new_services
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1375,6 +1475,7 @@ class ModernGUI:
             self.row_controls = {}
             self.app.row_controls = {}
             self._active_popup = None
+            self._tabview = None
             # Yeniden oluştur (mevcut modda — görünürse gui, gizliyse minimized)
             mode = "minimized" if self.app._tray_mode.is_set() else "gui"
             self.build(self.root, mode)

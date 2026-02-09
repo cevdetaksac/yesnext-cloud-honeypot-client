@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.0.5"  # Active Sessions fix, user table columns, 3rd party services, son saldırı card layout
+VERSION = "4.0.6"  # Attack reporting fix, ThreatEngine honeypot integration, API endpoint audit
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

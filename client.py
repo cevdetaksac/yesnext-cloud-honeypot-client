@@ -223,6 +223,8 @@ class CloudHoneypotClient:
                 self.event_watcher = EventLogWatcher(
                     on_event=self.threat_engine.process_event,
                 )
+                # Wire ThreatEngine into ServiceManager for honeypot credential scoring
+                self.service_manager._threat_engine = self.threat_engine
                 log("✅ Threat detection modules initialized (v4.0)")
             except Exception as e:
                 log(f"⚠️ Threat detection init failed: {e}")

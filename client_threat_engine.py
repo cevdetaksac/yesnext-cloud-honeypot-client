@@ -61,6 +61,9 @@ THREAT_SCORES: Dict[str, int] = {
     "rdp_connection_succeeded":         85,
     "rdp_session_logon":                80,
     "rdp_session_reconnect":            60,
+
+    # Honeypot-specific
+    "honeypot_credential":              90,   # Anyone hitting a honeypot is malicious
 }
 
 # Correlation rule definitions
@@ -112,6 +115,17 @@ CORRELATION_RULES = [
         "severity": "critical",
         "auto_response": ["block_ip", "notify_urgent"],
     },
+    {
+        "name": "honeypot_brute_force",
+        "description": "Multiple honeypot hits from same IP — active attacker",
+        "precondition": None,
+        "trigger": "honeypot_credential",
+        "precondition_count": 3,
+        "precondition_window": 600,          # 10 min
+        "score": 95,
+        "severity": "critical",
+        "auto_response": ["block_ip", "notify_urgent"],
+    },
 ]
 
 # Severity thresholds for standalone events
@@ -131,7 +145,7 @@ LOGON_EVENT_TYPES: Set[str] = {
 
 # Events that qualify as "failed logon"
 FAILED_LOGON_TYPES: Set[str] = {
-    "failed_logon", "sql_failed_logon",
+    "failed_logon", "sql_failed_logon", "honeypot_credential",
 }
 
 # Events that qualify as "persistence action"
@@ -502,6 +516,19 @@ class ThreatEngine:
                 e["event_type"] in LOGON_EVENT_TYPES for e in recent
             )
             return has_logon
+
+        # ── honeypot_brute_force ──────────────────────────────────
+        if rule["name"] == "honeypot_brute_force":
+            if event_type != "honeypot_credential":
+                return False
+            window = rule.get("precondition_window", 600)
+            required = rule.get("precondition_count", 3)
+            recent = ctx.get_recent_events(window)
+            hp_count = sum(
+                1 for e in recent
+                if e["event_type"] == "honeypot_credential"
+            )
+            return hp_count >= required
 
         return False
 

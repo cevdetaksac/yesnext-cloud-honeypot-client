@@ -72,7 +72,7 @@ class HoneypotAPIClient:
             
             # Sık çağrılan endpointler için sessiz mod
             from client_constants import VERBOSE_LOGGING
-            is_frequent_endpoint = endpoint in ['attack-count', 'agent/heartbeat', 'agent/service-status']
+            is_frequent_endpoint = endpoint in ['attack-count', 'heartbeat', 'agent/tunnel-status', 'commands/pending', 'attack']
             show_logs = (verbose_logging or VERBOSE_LOGGING) and not is_frequent_endpoint
             
             if show_logs:

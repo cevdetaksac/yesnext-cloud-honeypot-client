@@ -80,17 +80,19 @@ class ServiceManager:
         4. Watchdog: çökmüş servisleri auto-restart (exponential backoff)
     """
 
-    def __init__(self, api_client, rdp_manager=None, token_getter=None):
+    def __init__(self, api_client, rdp_manager=None, token_getter=None, threat_engine=None):
         """
         Args:
             api_client: ClientAPI instance — report_attack_batch, get_service_statuses,
                         update_service_statuses, report_service_action metodlarını sağlar
             rdp_manager: RDPManager instance (opsiyonel) — RDP port migration koordinasyonu
             token_getter: callable — güncel token döndüren fonksiyon
+            threat_engine: ThreatEngine instance — honeypot credential'larını threat skorlamasına besler
         """
         self._api = api_client
         self._rdp_manager = rdp_manager
         self._token_getter = token_getter or (lambda: "")
+        self._threat_engine = threat_engine
 
         # Honeypot instances: {"SSH": SSHHoneypot(...), "FTP": FTPHoneypot(...), ...}
         self._honeypots: Dict[str, BaseHoneypot] = {}
@@ -274,7 +276,7 @@ class ServiceManager:
 
     def _on_credential(self, *, attacker_ip: str, username: str,
                        password: str, service: str, port: int):
-        """Her honeypot bu callback'i çağırır — queue'ya yazar."""
+        """Her honeypot bu callback'i çağırır — queue'ya yazar + ThreatEngine'e besler."""
         entry = {
             "attacker_ip": attacker_ip,
             "username": username,
@@ -298,6 +300,20 @@ class ServiceManager:
             s["last_attacker_ip"] = attacker_ip
             s["last_service"] = svc_upper
             s["unique_ips"].add(attacker_ip)
+
+        # Feed ThreatEngine — honeypot credential'ları threat skorlamasına girer
+        if self._threat_engine:
+            try:
+                self._threat_engine.process_event({
+                    "event_type": "honeypot_credential",
+                    "source_ip": attacker_ip,
+                    "username": username,
+                    "service": str(service).upper(),
+                    "port": port,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass  # ThreatEngine hatası credential akışını engellemesin
 
     # ==================== BATCH REPORTER THREAD ==================== #
 
@@ -327,26 +343,33 @@ class ServiceManager:
         return items
 
     def _send_batch(self, batch: list[dict]):
-        """Credential batch'ini API'ye gönder."""
+        """Credential'ları tek tek API'ye gönder (POST /api/attack)."""
         try:
-            attacks = []
-            for entry in batch:
-                attacks.append({
-                    "attacker_ip": entry["attacker_ip"],
-                    "username": entry["username"],
-                    "password": entry["password"],
-                    "service": entry["service"],
-                    "port": entry["port"],
-                })
             token = self._token_getter()
             if not token:
-                log(f"[BatchReporter] Token yok, {len(attacks)} credential gönderilemedi")
+                log(f"[BatchReporter] Token yok, {len(batch)} credential gönderilemedi")
                 return
-            success = self._api.report_attack_batch(token, attacks)
-            if success:
-                log(f"[BatchReporter] {len(attacks)} credential gönderildi")
+
+            sent = 0
+            for entry in batch:
+                try:
+                    ok = self._api.report_attack(
+                        token,
+                        attacker_ip=entry["attacker_ip"],
+                        target_ip="",
+                        username=entry["username"],
+                        password=entry["password"],
+                        service=entry["service"],
+                        port=entry["port"],
+                    )
+                    if ok:
+                        sent += 1
+                except Exception:
+                    pass
+            if sent:
+                log(f"[BatchReporter] {sent}/{len(batch)} credential gönderildi")
             else:
-                log(f"[BatchReporter] API batch gönderimi başarısız ({len(attacks)} kayıt)")
+                log(f"[BatchReporter] Hiçbir credential gönderilemedi ({len(batch)} kayıt)")
         except Exception as exc:
             log(f"[BatchReporter] API hatası: {exc}")
 

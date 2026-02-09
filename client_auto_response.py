@@ -40,7 +40,7 @@ from client_helpers import log
 
 # ── Constants ─────────────────────────────────────────────────────
 
-FIREWALL_RULE_PREFIX = "HONEYPOT_THREAT_BLOCK"
+FIREWALL_RULE_PREFIX = "HP-BLOCK"
 
 # Safety limits
 MAX_BLOCKS_PER_HOUR = 50
@@ -204,7 +204,7 @@ class AutoResponse:
             return False
 
         # Execute firewall command
-        rule_name = f"{FIREWALL_RULE_PREFIX}_{ip.replace('.', '_')}"
+        rule_name = f"{FIREWALL_RULE_PREFIX}-{ip}"
         cmd = [
             "netsh", "advfirewall", "firewall", "add", "rule",
             f"name={rule_name}", "dir=in", "action=block",
@@ -247,7 +247,7 @@ class AutoResponse:
         if record:
             rule_name = record.rule_name
         else:
-            rule_name = f"{FIREWALL_RULE_PREFIX}_{ip.replace('.', '_')}"
+            rule_name = f"{FIREWALL_RULE_PREFIX}-{ip}"
 
         cmd = [
             "netsh", "advfirewall", "firewall", "delete", "rule",

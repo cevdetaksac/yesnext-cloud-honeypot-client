@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.0.9"  # Firewall unblock fix: dashboard unblock now removes both HP-BLOCK and HONEYPOT_THREAT_BLOCK rules
+VERSION = "4.1.0"  # Unified firewall rule naming: all rules now use HP-BLOCK- prefix
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

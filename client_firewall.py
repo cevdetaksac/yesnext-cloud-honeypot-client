@@ -252,48 +252,34 @@ class WindowsFirewallBackend(FirewallBackend):
     def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
         """Remove firewall block rules.
 
-        Tries both naming conventions:
-          1. HP-BLOCK-{block_id}         — rules created by FirewallAgent (dashboard blocks)
-          2. HONEYPOT_THREAT_BLOCK_{ip}  — rules created by AutoResponse (threat engine blocks)
+        All rules use unified HP-BLOCK- prefix. Tries:
+          1. HP-BLOCK-{block_id}   — server-assigned block ID
+          2. HP-BLOCK-{ip}         — IP-based rule (AutoResponse)
         """
-        removed_any = False
-
-        # 1) Try HP-BLOCK-{block_id}
-        name = f"HP-BLOCK-{block_id}"
-        rc, out, err = run_cmd([
-            "netsh", "advfirewall", "firewall", "delete", "rule",
-            f"name={name}", "dir=in",
-        ])
-        if rc == 0:
-            if out.strip():
-                self.logger.info(out.strip())
-            removed_any = True
-        else:
-            msg = (out + "\n" + err).lower()
-            if "no rules match" in msg or "0 rule(s) deleted" in msg:
-                self.logger.info(f"No rules found for {name}")
-            else:
-                self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
-
-        # 2) Try HONEYPOT_THREAT_BLOCK_{ip} (AutoResponse naming)
+        names_to_try = [f"HP-BLOCK-{block_id}"]
         if ip_or_cidr:
-            ip_clean = ip_or_cidr.strip().split("/")[0]  # strip CIDR suffix
-            threat_name = f"HONEYPOT_THREAT_BLOCK_{ip_clean.replace('.', '_')}"
-            rc2, out2, err2 = run_cmd([
-                "netsh", "advfirewall", "firewall", "delete", "rule",
-                f"name={threat_name}", "dir=in",
-            ])
-            if rc2 == 0:
-                if out2.strip():
-                    self.logger.info(out2.strip())
-                removed_any = True
-                self.logger.info(f"Removed AutoResponse rule: {threat_name}")
-            else:
-                msg2 = (out2 + "\n" + err2).lower()
-                if "no rules match" not in msg2 and "0 rule(s) deleted" not in msg2:
-                    self.logger.error(err2.strip() or f"Failed to delete {threat_name}")
+            ip_clean = ip_or_cidr.strip().split("/")[0]
+            ip_name = f"HP-BLOCK-{ip_clean}"
+            if ip_name not in names_to_try:
+                names_to_try.append(ip_name)
+            # Backward compat: eski HONEYPOT_THREAT_BLOCK_ prefix'li kurallar
+            legacy_name = f"HONEYPOT_THREAT_BLOCK_{ip_clean.replace('.', '_')}"
+            names_to_try.append(legacy_name)
 
-        # Consider success if at least one rule was removed or none existed
+        for name in names_to_try:
+            rc, out, err = run_cmd([
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name={name}", "dir=in",
+            ])
+            if rc == 0:
+                if out.strip():
+                    self.logger.info(out.strip())
+                self.logger.info(f"Removed rule: {name}")
+            else:
+                msg = (out + "\n" + err).lower()
+                if "no rules match" not in msg and "0 rule(s) deleted" not in msg:
+                    self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
+
         return True
 
 

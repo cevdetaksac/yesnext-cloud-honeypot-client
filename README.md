@@ -1,6 +1,6 @@
 Cloud Honeypot Client
 =====================
-**Current Version: 4.0.9**
+**Current Version: 4.1.0**
 
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 
@@ -23,7 +23,7 @@ Son Sürüm Değişiklikleri (v2.9.x)
 - Firewall Agent: Dashboard'tan verilen IP/CIDR/ülke bloklarını (Windows/Linux) yerel firewall'a uygular.
 
 Firewall Agent
-- Kural adı: `HP-BLOCK-<id>`
+- Kural adı: `HP-BLOCK-<id>` (dashboard) / `HP-BLOCK-<ip>` (auto-response)
 - Windows: `netsh advfirewall firewall add rule ... action=block remoteip=<CIDR>`; büyük listelerde otomatik parçalama.
 - Linux: Tercihen `ipset` + `iptables -m set` (fallback: `iptables` + `comment`).
 - Ülke blokları: Varsayılan kaynak ipdeny.com (`https://www.ipdeny.com/ipblocks/data/countries/<cc>.zone`), günlük cache.

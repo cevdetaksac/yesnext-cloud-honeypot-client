@@ -767,7 +767,7 @@ class ModernGUI:
     # ─── Collector: User Accounts ─── #
     def _collect_user_accounts(self):
         """Windows kullanıcı hesaplarını topla — grup üyelikleri + IIS tespiti."""
-        import subprocess, json
+        import subprocess, json, base64
         CREATE_NW = 0x08000000
         users = []
 
@@ -787,16 +787,19 @@ class ModernGUI:
         except Exception:
             pass
 
-        # 2) Her kullanıcının grup üyeliklerini topla
+        # 2) Her kullanıcının grup üyeliklerini topla (EncodedCommand ile $_ escape)
         group_map: dict = {}   # username -> [group1, group2, ...]
         try:
+            ps_groups = (
+                'Get-LocalGroup | ForEach-Object { $g=$_.Name; '
+                'try { Get-LocalGroupMember -Group $g -ErrorAction Stop | '
+                'ForEach-Object { [PSCustomObject]@{Group=$g; User=$_.Name} } } '
+                'catch {} } | ConvertTo-Json -Depth 3'
+            )
+            encoded_g = base64.b64encode(ps_groups.encode('utf-16-le')).decode('ascii')
             r2 = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-LocalGroup | ForEach-Object { $g=$_.Name; "
-                 "try { Get-LocalGroupMember -Group $g -ErrorAction Stop | "
-                 "ForEach-Object { [PSCustomObject]@{Group=$g; User=$_.Name} } } "
-                 "catch {} } | ConvertTo-Json -Depth 3"],
-                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+                ["powershell", "-NoProfile", "-EncodedCommand", encoded_g],
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NW,
             )
             if r2.returncode == 0 and r2.stdout.strip():
                 memberships = json.loads(r2.stdout.strip())
@@ -810,16 +813,19 @@ class ModernGUI:
         except Exception:
             pass
 
-        # 3) IIS App Pool kimliklerini tespit et
+        # 3) IIS App Pool kimliklerini tespit et (EncodedCommand ile $_ escape)
         iis_pool_users: set = set()
         try:
+            ps_iis = (
+                'try { Import-Module WebAdministration -ErrorAction Stop; '
+                'Get-ChildItem IIS:\\AppPools | Select-Object Name, '
+                '@{N="Identity";E={$_.processModel.userName}}, '
+                '@{N="IdType";E={$_.processModel.identityType}} '
+                '| ConvertTo-Json } catch { "[]" }'
+            )
+            encoded_i = base64.b64encode(ps_iis.encode('utf-16-le')).decode('ascii')
             r3 = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Import-Module WebAdministration -ErrorAction Stop; "
-                 "Get-ChildItem IIS:\\AppPools | Select-Object Name, "
-                 "@{N='Identity';E={$_.processModel.userName}}, "
-                 "@{N='IdType';E={$_.processModel.identityType}} "
-                 "| ConvertTo-Json"],
+                ["powershell", "-NoProfile", "-EncodedCommand", encoded_i],
                 capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
             )
             if r3.returncode == 0 and r3.stdout.strip():
@@ -848,7 +854,8 @@ class ModernGUI:
         self._gui_safe(lambda: self._render_user_accounts(users))
 
     def _render_user_accounts(self, users: list):
-        """Kullanıcı hesaplarını GUI'de göster — grup, IIS, pasife al butonu."""
+        """Kullanıcı hesaplarını tablo formatında göster — Tür, Gruplar, Son Giriş, Aksiyon."""
+        import re as _re
         try:
             for w in self._users_content_frame.winfo_children():
                 w.destroy()
@@ -861,11 +868,11 @@ class ModernGUI:
                 ).pack(anchor="w", padx=4, pady=2)
                 return
 
-            # Bilinen Windows sistem hesapları
-            system_accounts = {
-                "administrator", "defaultaccount", "guest",
-                "wdagutilityaccount",
-            }
+            # ── Domain uzantısı ile IIS App Pool tespiti ──
+            domain_pattern = _re.compile(
+                r'^[a-zA-Z0-9][a-zA-Z0-9.-]+\.(com|com\.tr|net|org|io|dev|info|biz|co|co\.uk|edu|gov)$',
+                _re.IGNORECASE
+            )
 
             active_users = []
             disabled_users = []
@@ -876,7 +883,11 @@ class ModernGUI:
                 desc = u.get("Description", "") or ""
                 last_logon = u.get("LastLogon", "")
                 groups = u.get("_groups", [])
-                is_iis = u.get("_is_iis", False)
+                is_iis_pool = u.get("_is_iis", False)
+
+                # Domain adı benzeri kullanıcılar da IIS App Pool
+                if not is_iis_pool and domain_pattern.match(name):
+                    is_iis_pool = True
 
                 # Son giriş tarihini formatla
                 logon_str = ""
@@ -888,9 +899,57 @@ class ModernGUI:
                     except Exception:
                         logon_str = ""
 
+                # Kullanıcı türünü belirle
+                nl = name.lower()
+                if nl == "administrator":
+                    user_type = "Yönetici"
+                    type_color = COLORS["orange"]
+                elif is_iis_pool:
+                    user_type = "IIS App Pool"
+                    type_color = "#4fc3f7"
+                elif nl in ("defaultaccount", "guest", "wdagutilityaccount",
+                            "varsayılanhesap"):
+                    user_type = "Sistem"
+                    type_color = COLORS["text_dim"]
+                else:
+                    user_type = "Kullanıcı"
+                    type_color = COLORS["green"]
+
+                # Grup listesini oluştur
+                group_tags = []
+                gl = [g.lower() for g in groups]
+                if any("admin" in g for g in gl):
+                    group_tags.append("Admin")
+                if any(g in ("remote desktop users", "uzak masaüstü kullanıcıları") for g in gl):
+                    group_tags.append("RDP")
+                if any("iis" in g for g in gl):
+                    group_tags.append("IIS")
+                if any("users" in g and "admin" not in g and "remote" not in g for g in gl):
+                    group_tags.append("Users")
+                # Diğer özel gruplar
+                known_groups = {
+                    "administrators", "users", "remote desktop users",
+                    "uzak masaüstü kullanıcıları", "iis_iusrs",
+                    "guests", "system managed accounts group",
+                    "device owners", "performance log users",
+                    "performance monitor users", "event log readers",
+                    "distributed com users", "cryptographic operators",
+                    "network configuration operators",
+                    "access control assistance operators",
+                    "certificate service dcom access",
+                    "backup operators", "hyper-v administrators",
+                    "power users", "replicator",
+                }
+                for g in groups:
+                    if g.lower() not in known_groups:
+                        group_tags.append(g)
+                groups_str = ", ".join(group_tags) if group_tags else "—"
+
                 entry = {
                     "name": name, "enabled": enabled, "desc": desc,
-                    "logon": logon_str, "groups": groups, "is_iis": is_iis,
+                    "logon": logon_str, "groups_str": groups_str,
+                    "user_type": user_type, "type_color": type_color,
+                    "is_iis": is_iis_pool,
                 }
 
                 if not enabled:
@@ -902,49 +961,34 @@ class ModernGUI:
             total = len(users)
             active_count = len(active_users)
             disabled_count = len(disabled_users)
+            iis_count = sum(1 for u in active_users if u["is_iis"])
 
-            summary_color = COLORS["green"] if disabled_count <= 3 else COLORS["orange"]
+            parts = [f"Toplam: {total}", f"Aktif: {active_count}"]
+            if iis_count:
+                parts.append(f"IIS: {iis_count}")
+            parts.append(f"Devre dışı: {disabled_count}")
+
             ctk.CTkLabel(
                 self._users_content_frame,
-                text=f"👥  Toplam: {total}  |  Aktif: {active_count}  |  Devre dışı: {disabled_count}",
+                text="👥  " + "  |  ".join(parts),
                 font=ctk.CTkFont(size=12, weight="bold"),
-                text_color=summary_color,
-            ).pack(anchor="w", padx=4, pady=(0, 6))
+                text_color=COLORS["green"],
+            ).pack(anchor="w", padx=4, pady=(0, 4))
 
-            # ── Grup rozeti oluştur ──
-            def _group_badges(groups: list, is_iis: bool) -> str:
-                badges = []
-                gl = [g.lower() for g in groups]
-                if any("admin" in g for g in gl):
-                    badges.append("👑Admin")
-                if any(g in ("remote desktop users", "uzak masaüstü kullanıcıları")
-                       for g in gl):
-                    badges.append("🖥️RDP")
-                if is_iis or any("iis" in g for g in gl):
-                    badges.append("🌐IIS")
-                if any("users" in g and "admin" not in g and "remote" not in g
-                       for g in gl):
-                    badges.append("👤Users")
-                # Diğer özel gruplar
-                known = {"administrators", "users", "remote desktop users",
-                          "uzak masaüstü kullanıcıları", "iis_iusrs",
-                          "guests", "system managed accounts group",
-                          "device owners", "performance log users",
-                          "performance monitor users", "event log readers",
-                          "distributed com users", "cryptographic operators",
-                          "network configuration operators",
-                          "access control assistance operators",
-                          "certificate service dcom access",
-                          "backup operators", "hyper-v administrators",
-                          "power users", "replicator"}
-                for g in groups:
-                    if g.lower() not in known:
-                        badges.append(f"🏷️{g}")
-                return "  ".join(badges) if badges else ""
+            # ── Tablo başlığı ──
+            hdr = ctk.CTkFrame(self._users_content_frame, fg_color=COLORS["bg"],
+                               corner_radius=4)
+            hdr.pack(fill="x", padx=4, pady=(0, 2))
+            for text, w in [("Kullanıcı", 140), ("Tür", 90), ("Gruplar", 130),
+                            ("Son Giriş", 120), ("", 70)]:
+                ctk.CTkLabel(
+                    hdr, text=text, width=w, anchor="w",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=COLORS["text_dim"],
+                ).pack(side="left", padx=2)
 
             # ── Disable callback ──
             def _on_disable_click(username: str):
-                """Kullanıcıyı pasife al — onay dialogu göster."""
                 import tkinter.messagebox as mbox
                 if username.lower() == "administrator":
                     mbox.showwarning("Uyarı", "Administrator hesabı devre dışı bırakılamaz!")
@@ -961,7 +1005,6 @@ class ModernGUI:
                     result = auto_response.disable_account(username)
                     if result:
                         mbox.showinfo("Başarılı", f"'{username}' hesabı devre dışı bırakıldı.")
-                        # Yeniden yükle
                         import threading as _th
                         _th.Thread(target=self._collect_user_accounts, daemon=True).start()
                     else:
@@ -969,58 +1012,60 @@ class ModernGUI:
                 else:
                     mbox.showerror("Hata", "AutoResponse modülü yüklenemedi.")
 
-            # Aktif kullanıcılar
+            # ── Aktif kullanıcı satırları ──
             for u in active_users:
                 row = ctk.CTkFrame(self._users_content_frame, fg_color="transparent")
                 row.pack(fill="x", padx=4, pady=1)
 
                 is_admin = u["name"].lower() == "administrator"
-                is_iis = u.get("is_iis", False)
 
-                # İkon & renk
+                # İkon
                 if is_admin:
-                    icon, color = "👑", COLORS["orange"]
-                elif is_iis:
-                    icon, color = "🌐", COLORS["text_dim"]
+                    icon = "👑"
+                elif u["is_iis"]:
+                    icon = "🌐"
                 else:
-                    icon, color = "👤", COLORS["green"]
+                    icon = "👤"
 
+                # Kullanıcı adı
                 ctk.CTkLabel(
                     row, text=f"{icon} {u['name']}",
                     font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=color, width=140, anchor="w",
-                ).pack(side="left")
+                    text_color=u["type_color"], width=140, anchor="w",
+                ).pack(side="left", padx=2)
 
-                # Grup rozetleri
-                badges = _group_badges(u.get("groups", []), is_iis)
-                if badges:
-                    ctk.CTkLabel(
-                        row, text=badges,
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_dim"], anchor="w",
-                    ).pack(side="left", padx=(2, 4))
+                # Tür sütunu
+                ctk.CTkLabel(
+                    row, text=u["user_type"],
+                    font=ctk.CTkFont(size=10),
+                    text_color=u["type_color"], width=90, anchor="w",
+                ).pack(side="left", padx=2)
 
-                # Son giriş
-                logon_text = f"Son: {u['logon']}" if u["logon"] else ""
-                if logon_text:
-                    ctk.CTkLabel(
-                        row, text=logon_text,
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_dim"], anchor="w",
-                    ).pack(side="left", padx=(2, 0))
+                # Gruplar sütunu
+                ctk.CTkLabel(
+                    row, text=u["groups_str"],
+                    font=ctk.CTkFont(size=10),
+                    text_color=COLORS["text_dim"], width=130, anchor="w",
+                ).pack(side="left", padx=2)
+
+                # Son giriş sütunu
+                ctk.CTkLabel(
+                    row, text=u["logon"] if u["logon"] else "—",
+                    font=ctk.CTkFont(size=10),
+                    text_color=COLORS["text_dim"], width=120, anchor="w",
+                ).pack(side="left", padx=2)
 
                 # Pasife Al butonu (admin hariç)
                 if not is_admin:
                     uname = u["name"]
-                    btn = ctk.CTkButton(
+                    ctk.CTkButton(
                         row, text="Pasife Al", width=70, height=20,
                         font=ctk.CTkFont(size=10),
                         fg_color="#8B0000", hover_color="#B22222",
                         command=lambda n=uname: _on_disable_click(n),
-                    )
-                    btn.pack(side="right", padx=(4, 0))
+                    ).pack(side="right", padx=(4, 0))
 
-            # Devre dışı kullanıcılar (collapse)
+            # ── Devre dışı kullanıcılar ──
             if disabled_users:
                 ctk.CTkLabel(
                     self._users_content_frame,
@@ -1136,18 +1181,22 @@ class ModernGUI:
     # ─── Collector: Suspicious Services ─── #
     def _collect_suspicious_services(self):
         """Windows dışı 3. parti çalışan servisleri topla."""
-        import subprocess
+        import subprocess, base64
         CREATE_NW = 0x08000000
         services = []
 
         try:
-            # PathName içeren servisleri al, Microsoft/Windows olanları filtrele
+            # PowerShell scriptini EncodedCommand ile gönder ($_ escape sorununu önler)
+            ps_script = (
+                'Get-CimInstance Win32_Service | '
+                'Where-Object { $_.State -eq "Running" } | '
+                'Select-Object Name, DisplayName, PathName, StartMode, StartName | '
+                'ConvertTo-Json -Depth 2'
+            )
+            encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
             r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-WmiObject Win32_Service | Where-Object { $_.State -eq 'Running' } | "
-                 "Select-Object Name, DisplayName, PathName, StartMode, StartName | "
-                 "ConvertTo-Json -Depth 2"],
-                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+                ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NW,
             )
             if r.returncode == 0 and r.stdout.strip():
                 import json
@@ -1552,21 +1601,65 @@ class ModernGUI:
         self._refresh_active_sessions()
 
     def _refresh_active_sessions(self):
-        """Fetch and display active sessions via 'query session'."""
+        """Fetch and display active sessions via 'query user' + 'query session'."""
         import subprocess
+        CREATE_NW = 0x08000000
+
         def _do():
+            lines = []
             try:
-                result = subprocess.run(
-                    ["query", "session"],
+                # query user — RDP/console oturumlarını gösterir
+                r1 = subprocess.run(
+                    ["query", "user"],
                     capture_output=True, text=True, timeout=5,
-                    creationflags=0x08000000,
+                    creationflags=CREATE_NW,
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    output = result.stdout.strip()
-                else:
-                    output = "  ✅  Aktif uzak oturum bulunmuyor."
-            except Exception as e:
-                output = f"  ⚠️  Oturum bilgisi alınamadı: {e}"
+                raw = (r1.stdout or "").strip()
+                if raw:
+                    # Parse query user output into Turkish-friendly format
+                    for line in raw.splitlines():
+                        parts = line.split()
+                        if not parts:
+                            continue
+                        # Header line
+                        if parts[0].upper() in ("USERNAME", "KULLANICI"):
+                            lines.append("  Kullanıcı          Oturum        Durum     Giriş Zamanı")
+                            lines.append("  " + "─" * 60)
+                            continue
+                        # Data line — may start with > for current user
+                        marker = ""
+                        if parts[0].startswith(">"):
+                            parts[0] = parts[0][1:]
+                            marker = "► "
+                        username = parts[0] if len(parts) > 0 else ""
+                        session = parts[1] if len(parts) > 1 else ""
+                        sess_id = parts[2] if len(parts) > 2 else ""
+                        state = parts[3] if len(parts) > 3 else ""
+                        # Logon time is typically the last 2 parts
+                        logon = " ".join(parts[-2:]) if len(parts) >= 6 else ""
+                        state_tr = "Aktif" if state.lower() == "active" else (
+                            "Bağlantı kesik" if state.lower() == "disc" else state)
+                        icon = "🟢" if state.lower() == "active" else "🔴"
+                        lines.append(
+                            f"  {marker}{icon} {username:<18} {session:<13} {state_tr:<12} {logon}"
+                        )
+            except Exception:
+                pass
+
+            if not lines:
+                # Fallback: query session
+                try:
+                    r2 = subprocess.run(
+                        ["query", "session"],
+                        capture_output=True, text=True, timeout=5,
+                        creationflags=CREATE_NW,
+                    )
+                    if (r2.stdout or "").strip():
+                        lines = ["  " + l for l in r2.stdout.strip().splitlines()]
+                except Exception:
+                    pass
+
+            output = "\n".join(lines) if lines else "  ✅  Aktif uzak oturum bulunmuyor."
 
             def _update():
                 try:

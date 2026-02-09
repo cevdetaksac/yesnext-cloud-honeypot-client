@@ -1500,14 +1500,16 @@ class ModernGUI:
         value_lbl.pack(anchor="w", padx=12, pady=(2, 0))
 
         # Açıklama
-        ctk.CTkLabel(
+        label_lbl = ctk.CTkLabel(
             card, text=label,
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_dim"],
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+        )
+        label_lbl.pack(anchor="w", padx=12, pady=(0, 10))
 
-        # value_lbl referansı card objesine ekleniyor
+        # value_lbl ve label_lbl referansları card objesine ekleniyor
         card._value_lbl = value_lbl  # type: ignore[attr-defined]
+        card._label_lbl = label_lbl  # type: ignore[attr-defined]
         return card
 
     # ─── Command History Panel (v4.0 Faz 4) ─── #
@@ -1821,12 +1823,13 @@ class ModernGUI:
                 ago_sec = time.time() - last_ts
                 ago = self._format_ago(ago_sec)
                 if last_ip:
-                    display = f"{last_ip} ({last_svc}) — {ago}"
+                    display = f"{last_ip} ({last_svc})"
                 else:
                     display = ago
                 color = COLORS["red"] if ago_sec < 300 else (
                     COLORS["orange"] if ago_sec < 3600 else COLORS["text_dim"])
-                self._update_card("last_attack", display, color)
+                self._update_card("last_attack", display, color,
+                                  label=f"Son Saldırı — {ago}")
             else:
                 self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
 
@@ -1996,12 +1999,14 @@ class ModernGUI:
                 pass
         _blink()
 
-    def _update_card(self, key: str, value: str, color: str):
-        """Bir dashboard kartının değerini güncelle."""
+    def _update_card(self, key: str, value: str, color: str, label: str = ""):
+        """Bir dashboard kartının değerini (ve opsiyonel alt yazısını) güncelle."""
         card = self._dash_cards.get(key)
         if card and hasattr(card, '_value_lbl'):
             try:
                 card._value_lbl.configure(text=value, text_color=color)
+                if label and hasattr(card, '_label_lbl'):
+                    card._label_lbl.configure(text=label)
             except Exception:
                 pass
 

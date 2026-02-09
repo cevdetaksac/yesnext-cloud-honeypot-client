@@ -16,22 +16,33 @@ import subprocess
 from typing import Dict, Any, Optional
 
 def get_resource_path(relative_path: str) -> str:
-    """Get absolute path to resource, works for dev and for PyInstaller"""
+    """Get absolute path to resource, works for dev and for PyInstaller.
+
+    Priority order:
+    1. Exe directory (NSIS installer copies updated files here)
+    2. PyInstaller temp (_MEIPASS bundle)
+    3. Current working directory (dev mode)
+    """
+    # 1) Exe (installer) dizini — NSIS güncellenen dosyayı buraya koyar
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    exe_path = os.path.join(exe_dir, relative_path)
+    if os.path.exists(exe_path) and hasattr(sys, '_MEIPASS'):
+        return exe_path
+
+    # 2) PyInstaller bundle (_MEIPASS)
     try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        # If not running from PyInstaller bundle, use current directory
         base_path = os.path.abspath(".")
-    
+
     full_path = os.path.join(base_path, relative_path)
-    
-    # If file doesn't exist in PyInstaller temp, try current directory
-    if not os.path.exists(full_path) and hasattr(sys, '_MEIPASS'):
+
+    # 3) Fallback: current working directory
+    if not os.path.exists(full_path):
         fallback_path = os.path.join(os.path.abspath("."), relative_path)
         if os.path.exists(fallback_path):
             return fallback_path
-    
+
     return full_path
 
 class SystemUtils:
@@ -80,22 +91,60 @@ class SystemUtils:
             return None
 
 def load_i18n(lang_file: str = "client_lang.json", language: str = "tr") -> dict:
-    """Load all language data from JSON file"""
+    """Load all language data from JSON file.
+
+    İki kaynaktan okur ve merge eder (installer güncellemelerini garantile):
+    1. Exe (installer) dizinindeki dosya
+    2. PyInstaller bundle (_MEIPASS) içindeki dosya
+    Exe dizinindeki dosya daha güncel olabilir, öncelik ona verilir.
+    """
+    all_languages: dict = {"tr": {}, "en": {}}
+
+    def _load_from(path: str) -> dict:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[LANG] Error loading {path}: {e}")
+        return {}
+
+    # 1) PyInstaller bundle'dan yükle (base)
     try:
-        # Use get_resource_path for PyInstaller compatibility
+        meipass = sys._MEIPASS
+        bundle_path = os.path.join(meipass, lang_file)
+        base = _load_from(bundle_path)
+        if base:
+            for lang_code in base:
+                if isinstance(base[lang_code], dict):
+                    all_languages.setdefault(lang_code, {}).update(base[lang_code])
+            print(f"[LANG] Base loaded from bundle: {bundle_path}")
+    except AttributeError:
+        pass  # Not running from PyInstaller
+
+    # 2) Exe (installer) dizininden yükle (override) — en güncel
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    exe_path = os.path.join(exe_dir, lang_file)
+    exe_data = _load_from(exe_path)
+    if exe_data:
+        for lang_code in exe_data:
+            if isinstance(exe_data[lang_code], dict):
+                all_languages.setdefault(lang_code, {}).update(exe_data[lang_code])
+        print(f"[LANG] Override loaded from exe dir: {exe_path}")
+
+    # 3) Fallback: resolved path (dev mode / cwd)
+    if not exe_data and not any(all_languages.get(lc) for lc in all_languages):
         resolved = get_resource_path(lang_file)
-        if os.path.exists(resolved):
-            with open(resolved, "r", encoding="utf-8") as f:
-                all_languages = json.load(f)
-                print(f"[LANG] All languages loaded from {resolved}")
-                print(f"[LANG] Available languages: {list(all_languages.keys())}")
-                return all_languages
-        else:
-            print(f"[LANG] Language file not found: {resolved} (original: {lang_file})")
-            return {"tr": {}, "en": {}}
-    except Exception as e:
-        print(f"[LANG] Error loading language file: {e}")
-        return {"tr": {}, "en": {}}
+        fallback = _load_from(resolved)
+        if fallback:
+            all_languages = fallback
+            print(f"[LANG] Fallback loaded from: {resolved}")
+
+    print(f"[LANG] Available languages: {list(all_languages.keys())}")
+    tr_count = len(all_languages.get("tr", {}))
+    en_count = len(all_languages.get("en", {}))
+    print(f"[LANG] Key counts — TR: {tr_count}, EN: {en_count}")
+    return all_languages
 
 # ===================== TOKEN STORE ===================== #
 class TokenStore:

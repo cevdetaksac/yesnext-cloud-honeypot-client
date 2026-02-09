@@ -226,7 +226,16 @@ class RansomwareShield:
         log("[RANSOMWARE-SHIELD] ✅ Stopped")
 
     def get_stats(self) -> dict:
-        return dict(self._stats)
+        s = dict(self._stats)
+        s["running"] = self._running
+        s["canary_files"] = len(self._canaries)
+        s["alerts_total"] = (
+            s.get("canary_alerts", 0)
+            + s.get("fs_alerts", 0)
+            + s.get("process_alerts", 0)
+            + s.get("vss_alerts", 0)
+        )
+        return s
 
     def get_detections(self) -> list:
         return list(self._detections)

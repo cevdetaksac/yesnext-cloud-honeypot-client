@@ -766,11 +766,12 @@ class ModernGUI:
 
     # ─── Collector: User Accounts ─── #
     def _collect_user_accounts(self):
-        """Windows kullanıcı hesaplarını topla ve kategorize et."""
-        import subprocess
+        """Windows kullanıcı hesaplarını topla — grup üyelikleri + IIS tespiti."""
+        import subprocess, json
         CREATE_NW = 0x08000000
         users = []
 
+        # 1) Kullanıcı listesini al
         try:
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
@@ -779,7 +780,6 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
             )
             if r.returncode == 0 and r.stdout.strip():
-                import json
                 data = json.loads(r.stdout.strip())
                 if isinstance(data, dict):
                     data = [data]
@@ -787,10 +787,68 @@ class ModernGUI:
         except Exception:
             pass
 
+        # 2) Her kullanıcının grup üyeliklerini topla
+        group_map: dict = {}   # username -> [group1, group2, ...]
+        try:
+            r2 = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-LocalGroup | ForEach-Object { $g=$_.Name; "
+                 "try { Get-LocalGroupMember -Group $g -ErrorAction Stop | "
+                 "ForEach-Object { [PSCustomObject]@{Group=$g; User=$_.Name} } } "
+                 "catch {} } | ConvertTo-Json -Depth 3"],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+            )
+            if r2.returncode == 0 and r2.stdout.strip():
+                memberships = json.loads(r2.stdout.strip())
+                if isinstance(memberships, dict):
+                    memberships = [memberships]
+                for m in memberships:
+                    raw_user = m.get("User", "")
+                    # User can be DOMAIN\name or just name
+                    short = raw_user.split("\\")[-1] if "\\" in raw_user else raw_user
+                    group_map.setdefault(short, []).append(m.get("Group", ""))
+        except Exception:
+            pass
+
+        # 3) IIS App Pool kimliklerini tespit et
+        iis_pool_users: set = set()
+        try:
+            r3 = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Import-Module WebAdministration -ErrorAction Stop; "
+                 "Get-ChildItem IIS:\\AppPools | Select-Object Name, "
+                 "@{N='Identity';E={$_.processModel.userName}}, "
+                 "@{N='IdType';E={$_.processModel.identityType}} "
+                 "| ConvertTo-Json"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            )
+            if r3.returncode == 0 and r3.stdout.strip():
+                pools = json.loads(r3.stdout.strip())
+                if isinstance(pools, dict):
+                    pools = [pools]
+                for p in pools:
+                    id_type = str(p.get("IdType", ""))
+                    identity = p.get("Identity", "") or ""
+                    pool_name = p.get("Name", "") or ""
+                    # ApplicationPoolIdentity → IIS APPPOOL\<poolname>
+                    if "ApplicationPoolIdentity" in id_type:
+                        iis_pool_users.add(pool_name.lower())
+                    elif identity:
+                        short = identity.split("\\")[-1] if "\\" in identity else identity
+                        iis_pool_users.add(short.lower())
+        except Exception:
+            pass
+
+        # Attach enrichment to each user
+        for u in users:
+            name = u.get("Name", "")
+            u["_groups"] = group_map.get(name, [])
+            u["_is_iis"] = name.lower() in iis_pool_users
+
         self._gui_safe(lambda: self._render_user_accounts(users))
 
     def _render_user_accounts(self, users: list):
-        """Kullanıcı hesaplarını GUI'de göster."""
+        """Kullanıcı hesaplarını GUI'de göster — grup, IIS, pasife al butonu."""
         try:
             for w in self._users_content_frame.winfo_children():
                 w.destroy()
@@ -811,13 +869,14 @@ class ModernGUI:
 
             active_users = []
             disabled_users = []
-            hidden_suspect = []
 
             for u in users:
                 name = u.get("Name", "")
                 enabled = u.get("Enabled", False)
                 desc = u.get("Description", "") or ""
                 last_logon = u.get("LastLogon", "")
+                groups = u.get("_groups", [])
+                is_iis = u.get("_is_iis", False)
 
                 # Son giriş tarihini formatla
                 logon_str = ""
@@ -829,13 +888,13 @@ class ModernGUI:
                     except Exception:
                         logon_str = ""
 
-                entry = {"name": name, "enabled": enabled, "desc": desc, "logon": logon_str}
+                entry = {
+                    "name": name, "enabled": enabled, "desc": desc,
+                    "logon": logon_str, "groups": groups, "is_iis": is_iis,
+                }
 
                 if not enabled:
                     disabled_users.append(entry)
-                elif name.lower() not in system_accounts:
-                    # Aktif ama bilinen sistem hesabı değil — dikkat et
-                    active_users.append(entry)
                 else:
                     active_users.append(entry)
 
@@ -852,27 +911,114 @@ class ModernGUI:
                 text_color=summary_color,
             ).pack(anchor="w", padx=4, pady=(0, 6))
 
+            # ── Grup rozeti oluştur ──
+            def _group_badges(groups: list, is_iis: bool) -> str:
+                badges = []
+                gl = [g.lower() for g in groups]
+                if any("admin" in g for g in gl):
+                    badges.append("👑Admin")
+                if any(g in ("remote desktop users", "uzak masaüstü kullanıcıları")
+                       for g in gl):
+                    badges.append("🖥️RDP")
+                if is_iis or any("iis" in g for g in gl):
+                    badges.append("🌐IIS")
+                if any("users" in g and "admin" not in g and "remote" not in g
+                       for g in gl):
+                    badges.append("👤Users")
+                # Diğer özel gruplar
+                known = {"administrators", "users", "remote desktop users",
+                          "uzak masaüstü kullanıcıları", "iis_iusrs",
+                          "guests", "system managed accounts group",
+                          "device owners", "performance log users",
+                          "performance monitor users", "event log readers",
+                          "distributed com users", "cryptographic operators",
+                          "network configuration operators",
+                          "access control assistance operators",
+                          "certificate service dcom access",
+                          "backup operators", "hyper-v administrators",
+                          "power users", "replicator"}
+                for g in groups:
+                    if g.lower() not in known:
+                        badges.append(f"🏷️{g}")
+                return "  ".join(badges) if badges else ""
+
+            # ── Disable callback ──
+            def _on_disable_click(username: str):
+                """Kullanıcıyı pasife al — onay dialogu göster."""
+                import tkinter.messagebox as mbox
+                if username.lower() == "administrator":
+                    mbox.showwarning("Uyarı", "Administrator hesabı devre dışı bırakılamaz!")
+                    return
+                ok = mbox.askyesno(
+                    "Kullanıcı Pasife Al",
+                    f"'{username}' hesabını devre dışı bırakmak istediğinize emin misiniz?\n\n"
+                    "Bu işlem geri alınabilir."
+                )
+                if not ok:
+                    return
+                auto_response = getattr(self.app, 'auto_response', None)
+                if auto_response:
+                    result = auto_response.disable_account(username)
+                    if result:
+                        mbox.showinfo("Başarılı", f"'{username}' hesabı devre dışı bırakıldı.")
+                        # Yeniden yükle
+                        import threading as _th
+                        _th.Thread(target=self._collect_user_accounts, daemon=True).start()
+                    else:
+                        mbox.showerror("Hata", f"'{username}' hesabı devre dışı bırakılamadı.")
+                else:
+                    mbox.showerror("Hata", "AutoResponse modülü yüklenemedi.")
+
             # Aktif kullanıcılar
             for u in active_users:
                 row = ctk.CTkFrame(self._users_content_frame, fg_color="transparent")
                 row.pack(fill="x", padx=4, pady=1)
 
                 is_admin = u["name"].lower() == "administrator"
-                icon = "👑" if is_admin else "👤"
-                color = COLORS["orange"] if is_admin else COLORS["green"]
+                is_iis = u.get("is_iis", False)
+
+                # İkon & renk
+                if is_admin:
+                    icon, color = "👑", COLORS["orange"]
+                elif is_iis:
+                    icon, color = "🌐", COLORS["text_dim"]
+                else:
+                    icon, color = "👤", COLORS["green"]
 
                 ctk.CTkLabel(
                     row, text=f"{icon} {u['name']}",
                     font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=color, width=160, anchor="w",
+                    text_color=color, width=140, anchor="w",
                 ).pack(side="left")
 
-                logon_text = f"Son giriş: {u['logon']}" if u["logon"] else ""
-                ctk.CTkLabel(
-                    row, text=logon_text,
-                    font=ctk.CTkFont(size=11),
-                    text_color=COLORS["text_dim"], anchor="w",
-                ).pack(side="left", padx=(4, 0))
+                # Grup rozetleri
+                badges = _group_badges(u.get("groups", []), is_iis)
+                if badges:
+                    ctk.CTkLabel(
+                        row, text=badges,
+                        font=ctk.CTkFont(size=10),
+                        text_color=COLORS["text_dim"], anchor="w",
+                    ).pack(side="left", padx=(2, 4))
+
+                # Son giriş
+                logon_text = f"Son: {u['logon']}" if u["logon"] else ""
+                if logon_text:
+                    ctk.CTkLabel(
+                        row, text=logon_text,
+                        font=ctk.CTkFont(size=10),
+                        text_color=COLORS["text_dim"], anchor="w",
+                    ).pack(side="left", padx=(2, 0))
+
+                # Pasife Al butonu (admin hariç)
+                if not is_admin:
+                    uname = u["name"]
+                    btn = ctk.CTkButton(
+                        row, text="Pasife Al", width=70, height=20,
+                        font=ctk.CTkFont(size=10),
+                        fg_color="#8B0000", hover_color="#B22222",
+                        command=lambda n=uname: _on_disable_click(n),
+                    )
+                    btn.pack(side="right", padx=(4, 0))
 
             # Devre dışı kullanıcılar (collapse)
             if disabled_users:
@@ -1521,14 +1667,39 @@ class ModernGUI:
             elapsed = int(time.time() - self._start_time)
             self._update_card("uptime", self._format_uptime(elapsed), COLORS["blue"])
 
-            # 5) Son saldırı zamanı
+            # 5) Son saldırı zamanı — honeypot credential + threat engine birleştir
             last_ts = sess.get("last_attack_ts")
+            last_ip = sess.get("last_attacker_ip", "")
+            last_svc = sess.get("last_service", "")
+
+            # Threat Engine'den daha yeni bir alert var mı kontrol et
+            threat_engine = getattr(self.app, 'threat_engine', None)
+            if threat_engine:
+                try:
+                    recent = threat_engine.get_recent_threats(
+                        max_age_seconds=86400, min_score=30
+                    )
+                    if recent:
+                        top = recent[0]  # En yüksek skor
+                        te_ts = top.get("last_seen", 0)
+                        if not last_ts or te_ts > last_ts:
+                            last_ts = te_ts
+                            last_ip = top.get("ip", "")
+                            svcs = top.get("services", [])
+                            last_svc = svcs[0] if svcs else "SCAN"
+                except Exception:
+                    pass
+
             if last_ts:
-                ago = self._format_ago(time.time() - last_ts)
-                last_ip = sess.get("last_attacker_ip", "")
-                last_svc = sess.get("last_service", "")
-                display = f"{last_ip} ({last_svc})" if last_ip else ago
-                self._update_card("last_attack", display, COLORS["orange"])
+                ago_sec = time.time() - last_ts
+                ago = self._format_ago(ago_sec)
+                if last_ip:
+                    display = f"{last_ip} ({last_svc}) — {ago}"
+                else:
+                    display = ago
+                color = COLORS["red"] if ago_sec < 300 else (
+                    COLORS["orange"] if ago_sec < 3600 else COLORS["text_dim"])
+                self._update_card("last_attack", display, color)
             else:
                 self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
 

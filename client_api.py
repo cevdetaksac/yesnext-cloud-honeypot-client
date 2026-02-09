@@ -346,6 +346,140 @@ class HoneypotAPIClient:
             self.log(f"[API] Saldırı sayısı alma hatası: {e}")
             return None
 
+    # ===================== THREAT DETECTION v4.0 — Faz 2 ===================== #
+
+    def report_auto_block(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/auto-block — Otomatik engelleme bildirimi"""
+        try:
+            payload = {"token": token, **data}
+            resp = self.api_request("POST", "alerts/auto-block", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "created")
+        except Exception as e:
+            self.log(f"[API] auto-block report error: {e}")
+            return False
+
+    def fetch_pending_commands(self, token: str) -> list:
+        """GET /api/commands/pending — Bekleyen uzak komutları çek"""
+        try:
+            resp = self.api_request(
+                "GET", "commands/pending",
+                params={"token": token},
+                timeout=8, verbose_logging=False,
+            )
+            if isinstance(resp, dict):
+                return resp.get("commands", [])
+            return []
+        except Exception as e:
+            self.log(f"[API] fetch pending commands error: {e}")
+            return []
+
+    def report_command_result(self, token: str, command_id: str, status: str,
+                              result: dict) -> bool:
+        """POST /api/commands/result — Komut sonucunu raporla"""
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "token": token,
+                "command_id": command_id,
+                "status": status,
+                "result": result,
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            resp = self.api_request("POST", "commands/result", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success")
+        except Exception as e:
+            self.log(f"[API] command result report error: {e}")
+            return False
+
+    def fetch_threat_config(self, token: str) -> Optional[Dict]:
+        """GET /api/threats/config — Tehdit algılama + sessiz saat konfigürasyonu"""
+        try:
+            resp = self.api_request(
+                "GET", "threats/config",
+                params={"token": token},
+                timeout=8, verbose_logging=False,
+            )
+            if isinstance(resp, dict):
+                return resp
+            return None
+        except Exception as e:
+            self.log(f"[API] fetch threat config error: {e}")
+            return None
+
+    def report_silent_hours_event(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/silent-hours — Sessiz saat ihlali bildirimi"""
+        try:
+            payload = {"token": token, **data}
+            resp = self.api_request("POST", "alerts/silent-hours", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "created")
+        except Exception as e:
+            self.log(f"[API] silent hours event report error: {e}")
+            return False
+
+    # ───────── Faz 3  ─  System Health ─────────
+    def report_health(self, token: str, snapshot: dict) -> bool:
+        """POST /api/health/report — Sistem sağlık raporu gönder"""
+        try:
+            payload = {"token": token, **snapshot}
+            resp = self.api_request("POST", "health/report", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "created")
+        except Exception as e:
+            self.log(f"[API] health report error: {e}")
+            return False
+
+    def report_ransomware_event(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/ransomware — Ransomware algılama bildirimi"""
+        try:
+            payload = {"token": token, **data}
+            resp = self.api_request("POST", "alerts/ransomware", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "created")
+        except Exception as e:
+            self.log(f"[API] ransomware event report error: {e}")
+            return False
+
+    def report_self_protection_event(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/self-protection — Self-protection olay bildirimi"""
+        try:
+            payload = {"token": token, **data}
+            resp = self.api_request("POST", "alerts/self-protection", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "created")
+        except Exception as e:
+            self.log(f"[API] self-protection event report error: {e}")
+            return False
+
+    # ───────── Faz 4  ─  Threat Summary + Notification Preferences ─────────
+    def fetch_threat_summary(self, token: str, period: str = "24h") -> Optional[Dict]:
+        """GET /api/threats/summary — Tehdit özeti çek"""
+        try:
+            resp = self.api_request(
+                "GET", "threats/summary",
+                params={"token": token, "period": period},
+            )
+            return resp if isinstance(resp, dict) else None
+        except Exception as e:
+            self.log(f"[API] threat summary fetch error: {e}")
+            return None
+
+    def update_notification_preferences(self, token: str, prefs: dict) -> bool:
+        """PUT /api/notifications/preferences — Bildirim tercihleri güncelle"""
+        try:
+            payload = {"token": token, **prefs}
+            resp = self.api_request("PUT", "notifications/preferences", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "updated")
+        except Exception as e:
+            self.log(f"[API] notification preferences update error: {e}")
+            return False
+
+    def report_events_batch(self, token: str, events: list) -> bool:
+        """POST /api/events/batch — Toplu olay gönderimi (trend analizi için)"""
+        try:
+            payload = {"token": token, "events": events}
+            resp = self.api_request("POST", "events/batch", data=payload)
+            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "received")
+        except Exception as e:
+            self.log(f"[API] events batch report error: {e}")
+            return False
+
 # ===================== API WRAPPER FUNCTIONS ===================== #
 # Purpose: High-level API request functions for client integration
 

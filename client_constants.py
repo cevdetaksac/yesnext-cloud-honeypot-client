@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "3.1.0"  # UI polish, installer fixes, service auto-restore
+VERSION = "4.0.0"  # Threat detection, auto-response, ransomware shield, performance optimizer
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -271,6 +271,83 @@ VERBOSE_LOGGING = get_from_config("debug.verbose_logging", False)
 SILENT_ADMIN_ELEVATION = get_from_config("deployment.silent_admin", True)  # Auto-elevate without asking
 SKIP_USER_DIALOGS = get_from_config("deployment.skip_dialogs", False)  # Skip all user confirmations
 
+# ===================== THREAT DETECTION (v4.0) ===================== #
+
+# Enable/disable threat detection engine
+ENABLE_THREAT_DETECTION = get_from_config("threat_detection.enabled", True)
+
+# EventLog Watcher — refresh & watchdog intervals
+EVENTLOG_WATCHDOG_INTERVAL = 60           # Check subscription health every 60s
+
+# Threat Engine — scoring & correlation
+THREAT_SCORE_DECAY_INTERVAL = 300         # Decay scores every 5 min
+THREAT_CONTEXT_MAX_AGE = 86400            # Remove IP context after 24h inactivity
+THREAT_ALERT_MIN_SCORE = 31              # Minimum score to generate an alert
+
+# Alert Pipeline — batch & rate limiting
+ALERT_BATCH_FLUSH_INTERVAL = 60           # Flush batch buffer every 60s
+ALERT_BATCH_MAX_SIZE = 50                 # Force flush at 50 buffered events
+ALERT_THREAT_LOG_FILE = "threats.log"     # Local threat log filename
+ALERT_THREAT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+ALERT_THREAT_LOG_BACKUP_COUNT = 3
+
+# Dashboard refresh for threat data
+THREAT_DASHBOARD_REFRESH = 5000           # ms — refresh threat cards every 5s
+
+# Auto-Response Engine — rate limits & safety
+AUTO_RESPONSE_MAX_BLOCKS_PER_HOUR = 50    # Max firewall blocks per hour
+AUTO_RESPONSE_MAX_BLOCKS_PER_DAY = 200    # Max firewall blocks per day
+AUTO_RESPONSE_DEFAULT_BLOCK_HOURS = 24    # Default block duration (hours)
+
+# Remote Command Executor — polling & security
+REMOTE_CMD_POLL_INTERVAL = 5              # Poll API every 5 seconds
+REMOTE_CMD_EXPIRY_SECONDS = 300           # Commands expire after 5 minutes
+REMOTE_CMD_MAX_PER_MINUTE = 10            # Rate limit: max 10 commands/minute
+
+# Silent Hours — defaults
+SILENT_HOURS_ENABLED = get_from_config("silent_hours.enabled", True)
+SILENT_HOURS_DEFAULT_MODE = "night_only"  # night_only | outside_working | always | custom
+SILENT_HOURS_NIGHT_START = "00:00"
+SILENT_HOURS_NIGHT_END = "07:00"
+SILENT_HOURS_WORK_START = "08:00"
+SILENT_HOURS_WORK_END = "18:00"
+SILENT_HOURS_WEEKEND_SILENT = True        # All-day silent on weekends
+
+# Config sync — pull threat/silent hours config from backend
+THREAT_CONFIG_SYNC_INTERVAL = 120         # Re-fetch config every 2 minutes
+
+# Ransomware Shield — canary & detection intervals
+RANSOMWARE_CANARY_CHECK_INTERVAL = 10     # Check canary files every 10s
+RANSOMWARE_PROCESS_CHECK_INTERVAL = 5     # Check suspicious processes every 5s
+RANSOMWARE_VSS_CHECK_INTERVAL = 120       # Check VSS shadow copies every 2min
+ENABLE_RANSOMWARE_SHIELD = get_from_config("ransomware_shield.enabled", True)
+
+# System Health Monitor — collection & reporting
+HEALTH_COLLECT_INTERVAL = 10              # Collect metrics every 10s
+HEALTH_REPORT_INTERVAL = 300              # Report to API every 5 min
+HEALTH_ANOMALY_Z_THRESHOLD = 3.0          # Z-score threshold for anomaly
+
+# Self-Protection — last breath & DACL
+ENABLE_SELF_PROTECTION = get_from_config("self_protection.enabled", True)
+LAST_BREATH_THREAT_WINDOW = 60            # Consider threats within 60s
+LAST_BREATH_MIN_SCORE = 70                # Min threat score to trigger block
+
+# Performance Optimizer — adaptive throttling (v4.0 Faz 4)
+PERF_ADAPTIVE_CHECK_INTERVAL = 30         # Re-evaluate resource usage every 30s
+PERF_CPU_HIGH_THRESHOLD = 85              # Start throttling above 85% CPU
+PERF_CPU_CRITICAL_THRESHOLD = 95          # Aggressive throttling above 95%
+PERF_MAX_EVENTS_PER_SECOND = 50           # Event processing rate limit
+ENABLE_PERFORMANCE_OPTIMIZER = get_from_config("performance_optimizer.enabled", True)
+
+# False Positive Tuner — cooldown & whitelist learning (v4.0 Faz 4)
+FP_AUTO_WHITELIST_MIN_EVENTS = 50         # Min events before auto-whitelist
+FP_AUTO_WHITELIST_MAX_SCORE = 10          # Max score for auto-whitelist
+FP_COOLDOWN_CLEANUP_INTERVAL = 3600       # Clean stale cooldowns every hour
+ENABLE_FALSE_POSITIVE_TUNER = get_from_config("false_positive_tuner.enabled", True)
+
+# Threat Summary — periodic fetch (v4.0 Faz 4)
+THREAT_SUMMARY_FETCH_INTERVAL = 300       # Fetch threat summary every 5 min
+
 # ===================== EXPORT ALL CONSTANTS ===================== #
 
 # For easy importing: from client_constants import *
@@ -318,6 +395,37 @@ __all__ = [
     # Feature flags
     'ENABLE_AUTO_UPDATE', 'ENABLE_TRAY_ICON', 'ENABLE_ADMIN_ELEVATION',
     'DEBUG_MODE', 'VERBOSE_LOGGING', 'SILENT_ADMIN_ELEVATION', 'SKIP_USER_DIALOGS',
+    
+    # Threat detection (v4.0)
+    'ENABLE_THREAT_DETECTION',
+    'EVENTLOG_WATCHDOG_INTERVAL',
+    'THREAT_SCORE_DECAY_INTERVAL', 'THREAT_CONTEXT_MAX_AGE', 'THREAT_ALERT_MIN_SCORE',
+    'ALERT_BATCH_FLUSH_INTERVAL', 'ALERT_BATCH_MAX_SIZE',
+    'ALERT_THREAT_LOG_FILE', 'ALERT_THREAT_LOG_MAX_BYTES', 'ALERT_THREAT_LOG_BACKUP_COUNT',
+    'THREAT_DASHBOARD_REFRESH',
+
+    # Auto-response & remote commands (v4.0 Faz 2)
+    'AUTO_RESPONSE_MAX_BLOCKS_PER_HOUR', 'AUTO_RESPONSE_MAX_BLOCKS_PER_DAY',
+    'AUTO_RESPONSE_DEFAULT_BLOCK_HOURS',
+    'REMOTE_CMD_POLL_INTERVAL', 'REMOTE_CMD_EXPIRY_SECONDS', 'REMOTE_CMD_MAX_PER_MINUTE',
+    'SILENT_HOURS_ENABLED', 'SILENT_HOURS_DEFAULT_MODE',
+    'SILENT_HOURS_NIGHT_START', 'SILENT_HOURS_NIGHT_END',
+    'SILENT_HOURS_WORK_START', 'SILENT_HOURS_WORK_END',
+    'SILENT_HOURS_WEEKEND_SILENT',
+    'THREAT_CONFIG_SYNC_INTERVAL',
+
+    # Ransomware shield & system health & self-protection (v4.0 Faz 3)
+    'RANSOMWARE_CANARY_CHECK_INTERVAL', 'RANSOMWARE_PROCESS_CHECK_INTERVAL',
+    'RANSOMWARE_VSS_CHECK_INTERVAL', 'ENABLE_RANSOMWARE_SHIELD',
+    'HEALTH_COLLECT_INTERVAL', 'HEALTH_REPORT_INTERVAL', 'HEALTH_ANOMALY_Z_THRESHOLD',
+    'ENABLE_SELF_PROTECTION', 'LAST_BREATH_THREAT_WINDOW', 'LAST_BREATH_MIN_SCORE',
+
+    # Performance optimizer & false positive tuner (v4.0 Faz 4)
+    'PERF_ADAPTIVE_CHECK_INTERVAL', 'PERF_CPU_HIGH_THRESHOLD', 'PERF_CPU_CRITICAL_THRESHOLD',
+    'PERF_MAX_EVENTS_PER_SECOND', 'ENABLE_PERFORMANCE_OPTIMIZER',
+    'FP_AUTO_WHITELIST_MIN_EVENTS', 'FP_AUTO_WHITELIST_MAX_SCORE',
+    'FP_COOLDOWN_CLEANUP_INTERVAL', 'ENABLE_FALSE_POSITIVE_TUNER',
+    'THREAT_SUMMARY_FETCH_INTERVAL',
     
     # Helper functions
     'get_app_config', 'get_app_directory', 'get_window_dimensions',

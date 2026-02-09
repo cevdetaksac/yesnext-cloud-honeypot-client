@@ -55,7 +55,8 @@ from client_constants import (
     API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH,
     CONSENT_FILE, STATUS_FILE,
     WATCHDOG_TOKEN_FILE, __version__, GITHUB_OWNER, GITHUB_REPO,
-    WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT
+    WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT,
+    ENABLE_THREAT_DETECTION
 )
 
 # Import RDP management module
@@ -69,6 +70,24 @@ from client_security import SecurityManager
 from client_updater import UpdateManager
 from client_tray import TrayManager
 from client_gui import ModernGUI
+
+# Import threat detection modules (v4.0)
+from client_eventlog import EventLogWatcher
+from client_threat_engine import ThreatEngine
+from client_alerts import AlertPipeline
+
+# Import Faz 2 modules (v4.0)
+from client_auto_response import AutoResponse
+from client_remote_commands import RemoteCommandExecutor
+from client_silent_hours import SilentHoursGuard
+
+# Import Faz 3 modules (v4.0)
+from client_ransomware_shield import RansomwareShield
+from client_system_health import SystemHealthMonitor
+from client_self_protection import ProcessProtection
+
+# Import Faz 4 modules (v4.0)
+from client_performance import PerformanceOptimizer, FalsePositiveTuner
 
 try:
     from client_memory_restart import enable_simple_memory_restart, get_current_memory_mb, check_previous_restart_state
@@ -183,6 +202,113 @@ class CloudHoneypotClient:
         # Initialize Service Manager — central lifecycle manager for all honeypots
         self.service_manager = ServiceManager(api_client=self.api_client, rdp_manager=self.rdp_manager)
         
+        # Initialize Threat Detection Pipeline (v4.0)
+        self.alert_pipeline = None
+        self.threat_engine = None
+        self.event_watcher = None
+        if ENABLE_THREAT_DETECTION:
+            try:
+                self.alert_pipeline = AlertPipeline(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    machine_name=SERVER_NAME,
+                )
+                self.threat_engine = ThreatEngine(
+                    on_alert=self.alert_pipeline.handle_alert
+                )
+                self.event_watcher = EventLogWatcher(
+                    on_event=self.threat_engine.process_event,
+                )
+                log("✅ Threat detection modules initialized (v4.0)")
+            except Exception as e:
+                log(f"⚠️ Threat detection init failed: {e}")
+                self.alert_pipeline = None
+                self.threat_engine = None
+                self.event_watcher = None
+
+        # Initialize Faz 2 modules (v4.0) — Auto-Response, Remote Commands, Silent Hours
+        self.auto_response = None
+        self.remote_commands = None
+        self.silent_hours_guard = None
+        if ENABLE_THREAT_DETECTION:
+            try:
+                self.auto_response = AutoResponse(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                )
+                self.remote_commands = RemoteCommandExecutor(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    auto_response=self.auto_response,
+                )
+                self.silent_hours_guard = SilentHoursGuard(
+                    auto_response=self.auto_response,
+                    alert_pipeline=self.alert_pipeline,
+                )
+                # Wire silent hours guard into threat engine
+                if self.threat_engine:
+                    self.threat_engine.silent_hours_guard = self.silent_hours_guard
+                log("✅ Faz 2 modules initialized (AutoResponse, RemoteCmd, SilentHours)")
+            except Exception as e:
+                log(f"⚠️ Faz 2 init failed: {e}")
+                self.auto_response = None
+                self.remote_commands = None
+                self.silent_hours_guard = None
+
+        # Initialize Faz 3 modules (v4.0) — Ransomware Shield, System Health, Self-Protection
+        self.ransomware_shield = None
+        self.health_monitor = None
+        self.process_protection = None
+        if ENABLE_THREAT_DETECTION:
+            try:
+                from client_constants import (
+                    ENABLE_RANSOMWARE_SHIELD, ENABLE_SELF_PROTECTION,
+                )
+                if ENABLE_RANSOMWARE_SHIELD:
+                    self.ransomware_shield = RansomwareShield(
+                        on_alert=self.alert_pipeline.handle_alert if self.alert_pipeline else None,
+                        threat_engine=self.threat_engine,
+                    )
+                self.health_monitor = SystemHealthMonitor(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    threat_engine=self.threat_engine,
+                )
+                if ENABLE_SELF_PROTECTION:
+                    self.process_protection = ProcessProtection(
+                        threat_engine=self.threat_engine,
+                        alert_pipeline=self.alert_pipeline,
+                        api_client=self.api_client,
+                        token_getter=lambda: self.state.get("token", ""),
+                    )
+                log("✅ Faz 3 modules initialized (RansomwareShield, HealthMonitor, SelfProtection)")
+            except Exception as e:
+                log(f"⚠️ Faz 3 init failed: {e}")
+                self.ransomware_shield = None
+                self.health_monitor = None
+                self.process_protection = None
+
+        # Initialize Faz 4 modules (v4.0) — Performance Optimizer, False Positive Tuner
+        self.perf_optimizer = None
+        self.fp_tuner = None
+        if ENABLE_THREAT_DETECTION:
+            try:
+                from client_constants import (
+                    ENABLE_PERFORMANCE_OPTIMIZER, ENABLE_FALSE_POSITIVE_TUNER,
+                )
+                if ENABLE_PERFORMANCE_OPTIMIZER:
+                    self.perf_optimizer = PerformanceOptimizer()
+                if ENABLE_FALSE_POSITIVE_TUNER:
+                    self.fp_tuner = FalsePositiveTuner(
+                        threat_engine=self.threat_engine,
+                        event_watcher=getattr(self, 'event_watcher', None),
+                    )
+                log("✅ Faz 4 modules initialized (PerfOptimizer, FPTuner)")
+            except Exception as e:
+                log(f"⚠️ Faz 4 init failed: {e}")
+                self.perf_optimizer = None
+                self.fp_tuner = None
+
         # Load token early - before any API operations
         try:
             token = self.token_manager.load_token(self.root if hasattr(self, 'root') else None, self.t)
@@ -362,6 +488,57 @@ class CloudHoneypotClient:
             # ServiceManager daemon thread'lerini başlat (sync, watchdog, batch reporter)
             self.service_manager.start()
             log("ServiceManager başlatıldı (sync + watchdog + batch reporter)")
+            
+            # Start Threat Detection Pipeline (v4.0)
+            if ENABLE_THREAT_DETECTION and self.event_watcher:
+                try:
+                    self.alert_pipeline.start()
+                    self.threat_engine.start()
+                    self.event_watcher.start()
+                    log("🛡️ Threat detection pipeline started (EventLog → Engine → Alerts)")
+                except Exception as e:
+                    log(f"⚠️ Threat detection start failed: {e}")
+
+            # Start Faz 2 modules (v4.0)
+            if ENABLE_THREAT_DETECTION:
+                try:
+                    if self.remote_commands:
+                        self.remote_commands.start()
+                    if self.auto_response:
+                        self.auto_response.start()
+                    # Fetch initial threat/silent-hours config from backend
+                    self._sync_threat_config()
+                    log("🛡️ Faz 2 started (AutoResponse + RemoteCommands + SilentHours)")
+                except Exception as e:
+                    log(f"⚠️ Faz 2 start failed: {e}")
+                # Start periodic config sync
+                threading.Thread(
+                    target=self._threat_config_sync_loop,
+                    name="ThreatConfigSync",
+                    daemon=True,
+                ).start()
+
+            # Start Faz 3 modules (v4.0)
+            if ENABLE_THREAT_DETECTION:
+                try:
+                    if self.ransomware_shield:
+                        self.ransomware_shield.start()
+                    if self.health_monitor:
+                        self.health_monitor.start()
+                    if self.process_protection:
+                        self.process_protection.setup()
+                    log("🛡️ Faz 3 started (RansomwareShield + HealthMonitor + SelfProtection)")
+                except Exception as e:
+                    log(f"⚠️ Faz 3 start failed: {e}")
+
+            # Start Faz 4 modules (v4.0)
+            if ENABLE_THREAT_DETECTION:
+                try:
+                    if self.perf_optimizer:
+                        self.perf_optimizer.start()
+                    log("⚙️ Faz 4 started (PerfOptimizer + FPTuner)")
+                except Exception as e:
+                    log(f"⚠️ Faz 4 start failed: {e}")
 
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
@@ -466,6 +643,34 @@ class CloudHoneypotClient:
             if show_error and hasattr(self, 'root') and self.root:
                 messagebox.showwarning("Uyarı", f"API bağlantı kontrolünde hata: {e}")
             return False
+
+    # ---------- Threat Config Sync (v4.0 Faz 2) ---------- #
+
+    def _sync_threat_config(self):
+        """Fetch threat detection + silent hours config from backend."""
+        try:
+            token = self.state.get("token", "")
+            if not token or not self.api_client:
+                return
+            config = self.api_client.fetch_threat_config(token)
+            if config and isinstance(config, dict):
+                # Update silent hours config
+                sh_cfg = config.get("silent_hours")
+                if sh_cfg and self.silent_hours_guard:
+                    self.silent_hours_guard.update_config(sh_cfg)
+                log("[CONFIG-SYNC] Threat config refreshed from backend")
+        except Exception as e:
+            log(f"[CONFIG-SYNC] Error: {e}")
+
+    def _threat_config_sync_loop(self):
+        """Periodically re-fetch threat config from backend."""
+        from client_constants import THREAT_CONFIG_SYNC_INTERVAL
+        while getattr(self, '_running', True):
+            time.sleep(THREAT_CONFIG_SYNC_INTERVAL)
+            try:
+                self._sync_threat_config()
+            except Exception:
+                pass
 
     def api_retry_loop(self):
         # Arkaplanda API bağlantısını sürekli dener
@@ -1402,6 +1607,34 @@ class CloudHoneypotClient:
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
             if hasattr(self, 'monitoring_manager'): self.monitoring_manager.stop_heartbeat_system()
+            # Stop threat detection pipeline (v4.0)
+            if getattr(self, 'event_watcher', None):
+                try: self.event_watcher.stop()
+                except Exception: pass
+            if getattr(self, 'threat_engine', None):
+                try: self.threat_engine.stop()
+                except Exception: pass
+            if getattr(self, 'alert_pipeline', None):
+                try: self.alert_pipeline.stop()
+                except Exception: pass
+            # Stop Faz 4 modules (v4.0)
+            if getattr(self, 'perf_optimizer', None):
+                try: self.perf_optimizer.stop()
+                except Exception: pass
+            # Stop Faz 3 modules (v4.0)
+            if getattr(self, 'ransomware_shield', None):
+                try: self.ransomware_shield.stop()
+                except Exception: pass
+            if getattr(self, 'health_monitor', None):
+                try: self.health_monitor.stop()
+                except Exception: pass
+            # Stop Faz 2 modules (v4.0)
+            if getattr(self, 'remote_commands', None):
+                try: self.remote_commands.stop()
+                except Exception: pass
+            if getattr(self, 'auto_response', None):
+                try: self.auto_response.stop()
+                except Exception: pass
             # Tray cleanup
             if hasattr(self, 'tray_manager') and self.tray_manager:
                 try: self.tray_manager.stop_tray_system()
@@ -1624,6 +1857,10 @@ class CloudHoneypotClient:
         # Build the full interface
         self.gui.build(self.root, startup_mode)
 
+        # Wire threat detection GUI toast (v4.0)
+        if self.alert_pipeline and self.gui:
+            self.alert_pipeline.gui_toast_func = self.gui.show_toast
+
         # Attack count polling
         self.poll_attack_count()
         if token:
@@ -1640,6 +1877,11 @@ class CloudHoneypotClient:
         # Initialize tray system
         if TRY_TRAY:
             self.initialize_tray_manager()
+            # Wire tray notifications to alert pipeline (v4.0)
+            if self.alert_pipeline and hasattr(self, 'tray_manager') and self.tray_manager:
+                self.alert_pipeline.tray_notify_func = getattr(
+                    self.tray_manager, 'notify', None
+                )
 
         # Önceki oturumdan kalan servisleri geri yükle
         self._restore_saved_services()

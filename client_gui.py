@@ -349,6 +349,193 @@ class ModernGUI:
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
+        # ── Threat Detection Kartları (v4.0) — Satır 3 ── #
+        threat_cards_data = [
+            ("threat_level",    "🛡️", "Threat Level",  "SAFE", COLORS["green"],    2, 0),
+            ("events_per_hour", "📊", "Events/Hour",   "0",    COLORS["text_dim"], 2, 1),
+            ("blocked_ips",     "🚫", "Tracked IPs",   "0",    COLORS["text_dim"], 2, 2),
+        ]
+
+        for key, emoji, label, value, color, row, col in threat_cards_data:
+            card = self._create_stat_card(grid, emoji, label, value, color)
+            card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
+            self._dash_cards[key] = card
+
+        # ── Faz 3 Kartları (v4.0) — Satır 4 ── #
+        faz3_cards_data = [
+            ("ransomware",      "🧬", "Ransomware",    "SAFE",  COLORS["green"],    3, 0),
+            ("cpu_usage",       "💻", "CPU / RAM",     "—",     COLORS["text_dim"], 3, 1),
+            ("self_protect",    "🔒", "Protection",    "ACTIVE", COLORS["green"],   3, 2),
+        ]
+
+        for key, emoji, label, value, color, row, col in faz3_cards_data:
+            card = self._create_stat_card(grid, emoji, label, value, color)
+            card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
+            self._dash_cards[key] = card
+
+        # ── Live Threat Feed (v4.0 Faz 2) ── #
+        self._build_threat_feed(sec)
+
+        # ── Quick Response Buttons (v4.0 Faz 2) ── #
+        self._build_response_buttons(sec)
+
+        # ── Command History + Active Sessions (v4.0 Faz 4) ── #
+        self._build_command_history(sec)
+        self._build_active_sessions(sec)
+
+        # ── Trend Mini-Charts (v4.0 Faz 4) ── #
+        self._build_trend_panel(sec)
+
+    # ─── Live Threat Feed (v4.0 Faz 2) ─── #
+    def _build_threat_feed(self, parent):
+        """Scrollable live threat feed — shows last 20 alerts in real-time."""
+        feed_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        feed_frame.pack(fill="x", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(
+            feed_frame, text="📋  Live Threat Feed",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+
+        self._threat_feed_box = ctk.CTkTextbox(
+            feed_frame, height=100, fg_color=COLORS["bg"],
+            border_width=1, border_color=COLORS["border"],
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=COLORS["text_dim"],
+            state="disabled", wrap="word",
+        )
+        self._threat_feed_box.pack(fill="x", padx=4, pady=(0, 6))
+
+    def _build_response_buttons(self, parent):
+        """Quick-action response buttons for dashboard."""
+        btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(0, 10))
+
+        ctk.CTkLabel(
+            btn_frame, text="⚡  Quick Response",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=4, pady=(0, 6))
+
+        btn_row = ctk.CTkFrame(btn_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=4)
+
+        buttons = [
+            ("🚫 Block IP",   self._on_block_ip_click),
+            ("🚪 Logoff",     self._on_logoff_click),
+            ("🔒 Disable",    self._on_disable_click),
+            ("📸 Snapshot",   self._on_snapshot_click),
+        ]
+        for i, (label, cmd) in enumerate(buttons):
+            btn = ctk.CTkButton(
+                btn_row, text=label, width=100, height=28,
+                font=ctk.CTkFont(size=11),
+                fg_color=COLORS.get("bg", "#1a1b2e"),
+                border_width=1, border_color=COLORS["border"],
+                hover_color="#2a2b3e",
+                command=cmd,
+            )
+            btn.pack(side="left", padx=(0, 6), pady=2)
+
+        # Silent hours status indicator
+        self._silent_hours_label = ctk.CTkLabel(
+            btn_row, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"],
+        )
+        self._silent_hours_label.pack(side="right", padx=4)
+
+    def append_threat_feed(self, text: str):
+        """Append a line to the live threat feed (thread-safe via root.after)."""
+        def _append():
+            try:
+                if not hasattr(self, '_threat_feed_box'):
+                    return
+                self._threat_feed_box.configure(state="normal")
+                self._threat_feed_box.insert("end", text + "\n")
+                self._threat_feed_box.see("end")
+                # Keep only last 200 lines
+                content = self._threat_feed_box.get("1.0", "end")
+                lines = content.splitlines()
+                if len(lines) > 200:
+                    self._threat_feed_box.delete("1.0", f"{len(lines)-200}.0")
+                self._threat_feed_box.configure(state="disabled")
+            except Exception:
+                pass
+        if self.root:
+            self.root.after(0, _append)
+
+    # ─── Quick Response Button Handlers ─── #
+    def _on_block_ip_click(self):
+        """Prompt for IP and block it via AutoResponse."""
+        dialog = ctk.CTkInputDialog(
+            text="Enter IP address to block:", title="Block IP",
+        )
+        ip = dialog.get_input()
+        if ip and ip.strip():
+            ip = ip.strip()
+            auto_response = getattr(self.app, 'auto_response', None)
+            if auto_response:
+                ok = auto_response.block_ip(ip, reason="Manual block from dashboard")
+                self.show_toast(
+                    "IP Blocked" if ok else "Block Failed",
+                    f"{ip} {'engellendi ✅' if ok else 'engellenemedi ❌'}",
+                    "high" if ok else "warning",
+                )
+
+    def _on_logoff_click(self):
+        """Prompt for username and logoff."""
+        dialog = ctk.CTkInputDialog(
+            text="Enter username to logoff:", title="Logoff User",
+        )
+        username = dialog.get_input()
+        if username and username.strip():
+            username = username.strip()
+            auto_response = getattr(self.app, 'auto_response', None)
+            if auto_response:
+                ok = auto_response.logoff_user(username)
+                self.show_toast(
+                    "Session Closed" if ok else "Logoff Failed",
+                    f"{username} {'oturumu kapatıldı ✅' if ok else 'başarısız ❌'}",
+                    "high" if ok else "warning",
+                )
+
+    def _on_disable_click(self):
+        """Prompt for username and disable account."""
+        dialog = ctk.CTkInputDialog(
+            text="Enter username to disable:", title="Disable Account",
+        )
+        username = dialog.get_input()
+        if username and username.strip():
+            username = username.strip()
+            auto_response = getattr(self.app, 'auto_response', None)
+            if auto_response:
+                ok = auto_response.disable_account(username)
+                self.show_toast(
+                    "Account Disabled" if ok else "Disable Failed",
+                    f"{username} {'hesabı devre dışı ✅' if ok else 'başarısız ❌'}",
+                    "high" if ok else "warning",
+                )
+
+    def _on_snapshot_click(self):
+        """Take a system snapshot via RemoteCommandExecutor."""
+        remote_cmd = getattr(self.app, 'remote_commands', None)
+        if remote_cmd:
+            result = remote_cmd._cmd_snapshot({})
+            if result.get("success"):
+                cpu = result.get("cpu_percent", 0)
+                mem = result.get("memory", {})
+                mem_pct = mem.get("percent", 0)
+                conns = result.get("connections", 0)
+                self.show_toast(
+                    "📸 System Snapshot",
+                    f"CPU: {cpu}%  |  RAM: {mem_pct}%  |  Connections: {conns}",
+                    "info", duration_ms=8000,
+                )
+            else:
+                self.show_toast("Snapshot Failed", result.get("error", "Unknown error"), "warning")
+
     def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
         """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""
         card = ctk.CTkFrame(parent, fg_color=COLORS["bg"], corner_radius=10,
@@ -377,6 +564,173 @@ class ModernGUI:
         # value_lbl referansı card objesine ekleniyor
         card._value_lbl = value_lbl  # type: ignore[attr-defined]
         return card
+
+    # ─── Command History Panel (v4.0 Faz 4) ─── #
+    def _build_command_history(self, parent):
+        """Scrollable command execution history — last 50 remote commands & results."""
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(fill="x", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(
+            frame, text="📋  Command History",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+
+        self._cmd_history_box = ctk.CTkTextbox(
+            frame, height=80, fg_color=COLORS["bg"],
+            border_width=1, border_color=COLORS["border"],
+            font=ctk.CTkFont(family="Consolas", size=10),
+            text_color=COLORS["text_dim"],
+            state="disabled", wrap="word",
+        )
+        self._cmd_history_box.pack(fill="x", padx=4, pady=(0, 6))
+
+    def append_command_history(self, text: str):
+        """Append a line to command history (thread-safe)."""
+        def _do():
+            try:
+                if not hasattr(self, '_cmd_history_box'):
+                    return
+                self._cmd_history_box.configure(state="normal")
+                self._cmd_history_box.insert("end", text + "\n")
+                self._cmd_history_box.see("end")
+                content = self._cmd_history_box.get("1.0", "end")
+                lines = content.splitlines()
+                if len(lines) > 50:
+                    self._cmd_history_box.delete("1.0", f"{len(lines)-50}.0")
+                self._cmd_history_box.configure(state="disabled")
+            except Exception:
+                pass
+        if self.root:
+            self.root.after(0, _do)
+
+    # ─── Active Sessions Panel (v4.0 Faz 4) ─── #
+    def _build_active_sessions(self, parent):
+        """Active RDP/console sessions display with refresh button."""
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(fill="x", padx=12, pady=(0, 4))
+
+        hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        hdr.pack(fill="x", padx=4, pady=(0, 4))
+
+        ctk.CTkLabel(
+            hdr, text="👥  Active Sessions",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            hdr, text="🔄", width=28, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS.get("bg", "#1a1b2e"),
+            border_width=1, border_color=COLORS["border"],
+            hover_color="#2a2b3e",
+            command=self._refresh_active_sessions,
+        ).pack(side="right")
+
+        self._sessions_box = ctk.CTkTextbox(
+            frame, height=60, fg_color=COLORS["bg"],
+            border_width=1, border_color=COLORS["border"],
+            font=ctk.CTkFont(family="Consolas", size=10),
+            text_color=COLORS["text_dim"],
+            state="disabled", wrap="word",
+        )
+        self._sessions_box.pack(fill="x", padx=4, pady=(0, 6))
+
+    def _refresh_active_sessions(self):
+        """Fetch and display active sessions via 'query session'."""
+        import subprocess
+        def _do():
+            try:
+                result = subprocess.run(
+                    ["query", "session"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=0x08000000,
+                )
+                output = result.stdout.strip() if result.returncode == 0 else "No sessions found"
+                if hasattr(self, '_sessions_box'):
+                    self._sessions_box.configure(state="normal")
+                    self._sessions_box.delete("1.0", "end")
+                    self._sessions_box.insert("1.0", output)
+                    self._sessions_box.configure(state="disabled")
+            except Exception as e:
+                if hasattr(self, '_sessions_box'):
+                    self._sessions_box.configure(state="normal")
+                    self._sessions_box.delete("1.0", "end")
+                    self._sessions_box.insert("1.0", f"Error: {e}")
+                    self._sessions_box.configure(state="disabled")
+        import threading as _th
+        _th.Thread(target=_do, daemon=True).start()
+
+    # ─── Trend Mini-Charts (v4.0 Faz 4) ─── #
+    def _build_trend_panel(self, parent):
+        """ASCII-style trend mini-charts for CPU, events/hour, and threat score."""
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(fill="x", padx=12, pady=(0, 10))
+
+        ctk.CTkLabel(
+            frame, text="📈  Trends (last 30 min)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+
+        self._trend_box = ctk.CTkTextbox(
+            frame, height=70, fg_color=COLORS["bg"],
+            border_width=1, border_color=COLORS["border"],
+            font=ctk.CTkFont(family="Consolas", size=10),
+            text_color=COLORS["text_dim"],
+            state="disabled", wrap="none",
+        )
+        self._trend_box.pack(fill="x", padx=4, pady=(0, 6))
+
+    def _refresh_trend_panel(self):
+        """Update trend mini-charts with ASCII sparklines."""
+        try:
+            perf = getattr(self.app, 'perf_optimizer', None)
+            if not perf or not hasattr(perf, 'get_trend_data'):
+                return
+
+            data = perf.get_trend_data(30)
+            if not data:
+                return
+
+            # Build ASCII sparklines
+            bars = " ▁▂▃▄▅▆▇█"
+
+            def sparkline(values, max_val=None):
+                if not values:
+                    return ""
+                if max_val is None:
+                    max_val = max(values) if max(values) > 0 else 1
+                return "".join(bars[min(8, int(v / max_val * 8))] for v in values)
+
+            cpus = [d["cpu"] for d in data]
+            mems = [d["mem"] for d in data]
+            eps_vals = [d["eps"] for d in data]
+
+            cpu_spark = sparkline(cpus, 100)
+            mem_spark = sparkline(mems, 100)
+            eps_spark = sparkline(eps_vals)
+
+            cpu_now = f"{cpus[-1]:.0f}%" if cpus else "—"
+            mem_now = f"{mems[-1]:.0f}%" if mems else "—"
+            eps_now = f"{eps_vals[-1]:.1f}" if eps_vals else "—"
+
+            text = (
+                f"CPU  {cpu_spark}  {cpu_now}\n"
+                f"RAM  {mem_spark}  {mem_now}\n"
+                f"E/s  {eps_spark}  {eps_now}"
+            )
+
+            if hasattr(self, '_trend_box'):
+                self._trend_box.configure(state="normal")
+                self._trend_box.delete("1.0", "end")
+                self._trend_box.insert("1.0", text)
+                self._trend_box.configure(state="disabled")
+
+        except Exception:
+            pass
 
     # ─── Dashboard Refresh ─── #
     def _schedule_dashboard_refresh(self):
@@ -435,6 +789,100 @@ class ModernGUI:
                 self._update_card("connection", self.t("dash_connected"), COLORS["green"])
             else:
                 self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
+
+            # 7) Threat Detection cards (v4.0)
+            threat_engine = getattr(self.app, 'threat_engine', None)
+            if threat_engine:
+                try:
+                    level, level_color = threat_engine.get_threat_level()
+                    self._update_card("threat_level", level, level_color)
+
+                    engine_stats = threat_engine.get_stats()
+                    events_scored = engine_stats.get("events_scored", 0)
+                    uptime_sec = int(time.time() - self._start_time) or 1
+                    events_per_hour = int(events_scored / (uptime_sec / 3600)) if uptime_sec > 60 else 0
+                    eph_color = COLORS["red"] if events_per_hour > 100 else (
+                        COLORS["orange"] if events_per_hour > 20 else COLORS["text_dim"])
+                    self._update_card("events_per_hour", str(events_per_hour), eph_color)
+
+                    active_ips = engine_stats.get("active_ips", 0)
+                    blocked_color = COLORS["red"] if active_ips > 5 else (
+                        COLORS["orange"] if active_ips > 0 else COLORS["text_dim"])
+                    self._update_card("blocked_ips", str(active_ips), blocked_color)
+                except Exception:
+                    pass
+
+            # 8) Silent Hours status (v4.0 Faz 2)
+            sh_guard = getattr(self.app, 'silent_hours_guard', None)
+            if sh_guard and hasattr(self, '_silent_hours_label'):
+                try:
+                    if sh_guard.is_silent_now():
+                        self._silent_hours_label.configure(
+                            text="🔇 Silent Hours ACTIVE",
+                            text_color=COLORS["orange"],
+                        )
+                    else:
+                        self._silent_hours_label.configure(
+                            text="🔊 Normal Hours",
+                            text_color=COLORS["text_dim"],
+                        )
+                except Exception:
+                    pass
+
+            # 9) Ransomware Shield status (v4.0 Faz 3)
+            rs = getattr(self.app, 'ransomware_shield', None)
+            if rs:
+                try:
+                    rs_stats = rs.get_stats() if hasattr(rs, 'get_stats') else {}
+                    rs_running = rs_stats.get("running", False)
+                    rs_alerts = rs_stats.get("alerts_total", 0)
+                    if rs_alerts > 0:
+                        self._update_card("ransomware", f"⚠ {rs_alerts}", COLORS["red"])
+                    elif rs_running:
+                        self._update_card("ransomware", "SAFE", COLORS["green"])
+                    else:
+                        self._update_card("ransomware", "OFF", COLORS["text_dim"])
+                except Exception:
+                    pass
+
+            # 10) CPU / RAM usage (v4.0 Faz 3)
+            hm = getattr(self.app, 'health_monitor', None)
+            if hm:
+                try:
+                    snap = hm.get_snapshot() if hasattr(hm, 'get_snapshot') else {}
+                    cpu = snap.get("cpu_percent", 0)
+                    ram = snap.get("memory_percent", 0)
+                    cpu_color = COLORS["red"] if cpu > 90 else (
+                        COLORS["orange"] if cpu > 70 else COLORS["text_dim"])
+                    self._update_card("cpu_usage", f"{cpu:.0f}% / {ram:.0f}%", cpu_color)
+                except Exception:
+                    pass
+
+            # 11) Self-Protection status (v4.0 Faz 3)
+            pp = getattr(self.app, 'process_protection', None)
+            if pp:
+                try:
+                    self._update_card("self_protect", "ACTIVE", COLORS["green"])
+                except Exception:
+                    pass
+            else:
+                self._update_card("self_protect", "OFF", COLORS["text_dim"])
+
+            # 12) Trend mini-charts (v4.0 Faz 4)
+            self._refresh_trend_panel()
+
+            # 13) Performance throttle info (v4.0 Faz 4)
+            perf = getattr(self.app, 'perf_optimizer', None)
+            if perf:
+                try:
+                    ps = perf.get_stats()
+                    mode = ps.get("throttle_mode", "NORMAL")
+                    if mode == "CRITICAL":
+                        self.append_threat_feed(
+                            f"⚠️ PERF: Throttle mode CRITICAL — CPU/RAM high"
+                        )
+                except Exception:
+                    pass
 
             # Header badge senkronizasyonu
             self.update_header_status(active_count > 0)
@@ -501,6 +949,68 @@ class ModernGUI:
             return self.t("dash_ago").format(val=f"{s // 3600}{self.t('dash_hours')}")
         else:
             return self.t("dash_ago").format(val=f"{s // 86400}{self.t('dash_days')}")
+
+    # ─── Toast Notification (v4.0) ─── #
+    def show_toast(self, title: str, message: str, severity: str = "info",
+                   duration_ms: int = 5000):
+        """
+        Show a temporary toast notification at the bottom-right of the window.
+        Severity: info (blue), warning (orange), high (red), critical (pulsing red).
+        """
+        self._gui_safe(lambda: self._render_toast(title, message, severity, duration_ms))
+
+    def _render_toast(self, title: str, message: str, severity: str, duration_ms: int):
+        """Render toast on the GUI thread."""
+        try:
+            if not self.root or not self.root.winfo_exists():
+                return
+
+            severity_colors = {
+                "info":     COLORS["blue"],
+                "warning":  COLORS["orange"],
+                "high":     COLORS["red"],
+                "critical": "#FF0000",
+            }
+            bg_color = severity_colors.get(severity, COLORS["blue"])
+            severity_icons = {
+                "info": "ℹ️", "warning": "⚠️", "high": "🚨", "critical": "💀",
+            }
+            icon = severity_icons.get(severity, "ℹ️")
+
+            toast = ctk.CTkFrame(
+                self.root, fg_color=COLORS["card"], corner_radius=12,
+                border_width=2, border_color=bg_color,
+            )
+            toast.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+
+            # Title row
+            title_lbl = ctk.CTkLabel(
+                toast, text=f"{icon}  {title}",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=bg_color,
+            )
+            title_lbl.pack(anchor="w", padx=12, pady=(10, 2))
+
+            # Message
+            msg_lbl = ctk.CTkLabel(
+                toast, text=message,
+                font=ctk.CTkFont(size=11),
+                text_color=COLORS["text"],
+                wraplength=280,
+            )
+            msg_lbl.pack(anchor="w", padx=12, pady=(0, 10))
+
+            # Auto-dismiss
+            def _dismiss():
+                try:
+                    toast.destroy()
+                except Exception:
+                    pass
+
+            self.root.after(duration_ms, _dismiss)
+
+        except Exception as e:
+            log(f"Toast render error: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     #  HONEYPOT SERVİSLERİ

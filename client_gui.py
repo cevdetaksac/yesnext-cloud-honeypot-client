@@ -401,7 +401,7 @@ class ModernGUI:
     #  TAB 2: TEHDİT MERKEZİ
     # ═══════════════════════════════════════════════════════════════
     def _build_threat_center(self, parent):
-        """Tab 2 — Tehdit Merkezi: Threat kartlar + feed + response + history + trends."""
+        """Tab 2 — Tehdit Merkezi: Threat kartlar + güvenlik istihbaratı + feed + response."""
         # ── Threat Detection Kartları ── #
         threat_sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
         threat_sec.pack(fill="x", pady=(0, 12))
@@ -437,6 +437,18 @@ class ModernGUI:
         # ── Quick Response Buttons ── #
         self._build_response_buttons(threat_sec)
 
+        # ── System Security Overview (v4.0.2) ── #
+        self._build_security_overview(parent)
+
+        # ── User Accounts (v4.0.2) ── #
+        self._build_user_accounts_panel(parent)
+
+        # ── Network Shares (v4.0.2) ── #
+        self._build_network_shares_panel(parent)
+
+        # ── Suspicious Services (v4.0.2) ── #
+        self._build_suspicious_services_panel(parent)
+
         # ── Command History ── #
         self._build_command_history(parent)
 
@@ -445,6 +457,674 @@ class ModernGUI:
 
         # ── Trend Mini-Charts ── #
         self._build_trend_panel(parent)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  SECURITY INTELLIGENCE PANELS (v4.0.2)
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── System Security Overview ─── #
+    def _build_security_overview(self, parent):
+        """Genel güvenlik durumu — yeşil/kırmızı check listesi."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text="🔒  Sistem Güvenlik Durumu",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            hdr, text="🔄", width=28, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
+            hover_color="#2a2b3e",
+            command=self._refresh_security_intel,
+        ).pack(side="right")
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(4, 8))
+
+        self._security_checks_frame = ctk.CTkFrame(sec, fg_color="transparent")
+        self._security_checks_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        # Başlangıç: "Taranıyor..." göster
+        self._security_check_label = ctk.CTkLabel(
+            self._security_checks_frame,
+            text="⏳  Sistem taranıyor...",
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_dim"],
+        )
+        self._security_check_label.pack(anchor="w", padx=4, pady=2)
+
+        # İlk taramayı başlat
+        self._refresh_security_intel()
+
+    # ─── User Accounts Panel ─── #
+    def _build_user_accounts_panel(self, parent):
+        """Windows kullanıcı hesapları — aktif, devre dışı, gizli."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text="👥  Kullanıcı Hesapları",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            hdr, text="🔄", width=28, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
+            hover_color="#2a2b3e",
+            command=self._refresh_user_accounts,
+        ).pack(side="right")
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(4, 8))
+
+        self._users_content_frame = ctk.CTkFrame(sec, fg_color="transparent")
+        self._users_content_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._users_loading_label = ctk.CTkLabel(
+            self._users_content_frame,
+            text="⏳  Kullanıcılar taranıyor...",
+            font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+        )
+        self._users_loading_label.pack(anchor="w", padx=4, pady=2)
+
+    # ─── Network Shares Panel ─── #
+    def _build_network_shares_panel(self, parent):
+        """Ağ paylaşımları — açık paylaşımlar."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text="📂  Ağ Paylaşımları",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(4, 8))
+
+        self._shares_content_frame = ctk.CTkFrame(sec, fg_color="transparent")
+        self._shares_content_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._shares_loading_label = ctk.CTkLabel(
+            self._shares_content_frame,
+            text="⏳  Paylaşımlar taranıyor...",
+            font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+        )
+        self._shares_loading_label.pack(anchor="w", padx=4, pady=2)
+
+    # ─── Suspicious Services Panel ─── #
+    def _build_suspicious_services_panel(self, parent):
+        """Windows dışı 3. parti çalışan servisler."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text="⚙️  3. Parti Servisler",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
+        sep.pack(fill="x", padx=16, pady=(4, 8))
+
+        self._services_content_frame = ctk.CTkFrame(sec, fg_color="transparent")
+        self._services_content_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        self._services_loading_label = ctk.CTkLabel(
+            self._services_content_frame,
+            text="⏳  Servisler taranıyor...",
+            font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+        )
+        self._services_loading_label.pack(anchor="w", padx=4, pady=2)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  SECURITY DATA COLLECTORS (v4.0.2) — background threads
+    # ═══════════════════════════════════════════════════════════════
+
+    def _refresh_security_intel(self):
+        """Tüm güvenlik panellerini arka planda yenile."""
+        import threading as _th
+        _th.Thread(target=self._collect_security_overview, daemon=True).start()
+        _th.Thread(target=self._collect_user_accounts, daemon=True).start()
+        _th.Thread(target=self._collect_network_shares, daemon=True).start()
+        _th.Thread(target=self._collect_suspicious_services, daemon=True).start()
+
+    def _refresh_user_accounts(self):
+        """Sadece kullanıcı hesaplarını yenile."""
+        import threading as _th
+        _th.Thread(target=self._collect_user_accounts, daemon=True).start()
+
+    # ─── Collector: System Security Overview ─── #
+    def _collect_security_overview(self):
+        """Sistem güvenlik kontrollerini çalıştır ve GUI'yi güncelle."""
+        import subprocess
+        checks = []
+        CREATE_NW = 0x08000000
+
+        # 1) Windows Firewall
+        try:
+            r = subprocess.run(
+                ["netsh", "advfirewall", "show", "allprofiles", "state"],
+                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
+            )
+            fw_on = "ON" in r.stdout.upper() if r.returncode == 0 else False
+            checks.append(("Firewall", fw_on, "Aktif" if fw_on else "KAPALI!"))
+        except Exception:
+            checks.append(("Firewall", None, "Kontrol edilemedi"))
+
+        # 2) Windows Defender / Antivirus
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-MpComputerStatus | Select-Object -ExpandProperty RealTimeProtectionEnabled"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            )
+            av_on = "TRUE" in r.stdout.upper().strip() if r.returncode == 0 else False
+            checks.append(("Antivirüs", av_on, "Gerçek zamanlı koruma aktif" if av_on else "KAPALI!"))
+        except Exception:
+            checks.append(("Antivirüs", None, "Kontrol edilemedi"))
+
+        # 3) WinRM (uzaktan yönetim — kapalı olmalı)
+        try:
+            r = subprocess.run(
+                ["sc", "query", "WinRM"],
+                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
+            )
+            winrm_running = "RUNNING" in r.stdout.upper() if r.returncode == 0 else False
+            checks.append(("WinRM", not winrm_running,
+                           "Kapalı (güvenli)" if not winrm_running else "AÇIK — Uzaktan erişim riski!"))
+        except Exception:
+            checks.append(("WinRM", True, "Servis bulunamadı (güvenli)"))
+
+        # 4) RDP Network Level Authentication
+        try:
+            r = subprocess.run(
+                ["reg", "query",
+                 r"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
+                 "/v", "UserAuthentication"],
+                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
+            )
+            nla_on = "0x1" in r.stdout if r.returncode == 0 else False
+            checks.append(("RDP NLA", nla_on,
+                           "Ağ Düzeyinde Doğrulama aktif" if nla_on else "NLA kapalı — risk!"))
+        except Exception:
+            checks.append(("RDP NLA", None, "Kontrol edilemedi"))
+
+        # 5) Ransomware Shield
+        rs = getattr(self.app, 'ransomware_shield', None)
+        if rs:
+            try:
+                stats = rs.get_stats() if hasattr(rs, 'get_stats') else {}
+                running = stats.get("running", False)
+                alerts = stats.get("canary_alerts", 0)
+                canary_count = stats.get("canary_files", 0)
+                if running and alerts == 0:
+                    checks.append(("Ransomware Kalkanı", True,
+                                   f"Aktif — {canary_count} tuzak dosya izleniyor"))
+                elif running and alerts > 0:
+                    checks.append(("Ransomware Kalkanı", False,
+                                   f"⚠️ {alerts} alarm tespit edildi!"))
+                else:
+                    checks.append(("Ransomware Kalkanı", False, "Çalışmıyor!"))
+            except Exception:
+                checks.append(("Ransomware Kalkanı", None, "Kontrol edilemedi"))
+        else:
+            checks.append(("Ransomware Kalkanı", False, "Yüklenmemiş"))
+
+        # 6) Windows Update (son güncelleme tarihi)
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-HotFix | Sort-Object InstalledOn -Descending | "
+                 "Select-Object -First 1).InstalledOn.ToString('dd.MM.yyyy')"],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                last_update = r.stdout.strip()
+                checks.append(("Son Windows Update", True, last_update))
+            else:
+                checks.append(("Son Windows Update", None, "Bilgi alınamadı"))
+        except Exception:
+            checks.append(("Son Windows Update", None, "Kontrol edilemedi"))
+
+        # GUI'yi güncelle (thread-safe)
+        self._gui_safe(lambda: self._render_security_checks(checks))
+
+    def _render_security_checks(self, checks: list):
+        """Güvenlik kontrol sonuçlarını GUI'de göster."""
+        try:
+            # Mevcut widget'ları temizle
+            for w in self._security_checks_frame.winfo_children():
+                w.destroy()
+
+            all_ok = all(c[1] is True for c in checks)
+
+            # Genel durum banner
+            if all_ok:
+                banner_text = "✅  Tüm güvenlik kontrolleri başarılı — Her şey yolunda!"
+                banner_color = COLORS["green"]
+            else:
+                fail_count = sum(1 for c in checks if c[1] is False)
+                banner_text = f"⚠️  {fail_count} güvenlik uyarısı tespit edildi"
+                banner_color = COLORS["orange"]
+
+            banner = ctk.CTkLabel(
+                self._security_checks_frame,
+                text=banner_text,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=banner_color,
+            )
+            banner.pack(anchor="w", padx=4, pady=(0, 8))
+
+            # Her kontrol için satır
+            for name, status, detail in checks:
+                row = ctk.CTkFrame(self._security_checks_frame, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=1)
+
+                if status is True:
+                    icon = "✅"
+                    color = COLORS["green"]
+                elif status is False:
+                    icon = "❌"
+                    color = COLORS["red"]
+                else:
+                    icon = "⚪"
+                    color = COLORS["text_dim"]
+
+                ctk.CTkLabel(
+                    row, text=f"{icon}  {name}:",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=color, width=180, anchor="w",
+                ).pack(side="left")
+
+                ctk.CTkLabel(
+                    row, text=detail,
+                    font=ctk.CTkFont(size=12),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=(4, 0))
+
+        except Exception:
+            pass
+
+    # ─── Collector: User Accounts ─── #
+    def _collect_user_accounts(self):
+        """Windows kullanıcı hesaplarını topla ve kategorize et."""
+        import subprocess
+        CREATE_NW = 0x08000000
+        users = []
+
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-LocalUser | Select-Object Name, Enabled, "
+                 "LastLogon, Description | ConvertTo-Json"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                import json
+                data = json.loads(r.stdout.strip())
+                if isinstance(data, dict):
+                    data = [data]
+                users = data
+        except Exception:
+            pass
+
+        self._gui_safe(lambda: self._render_user_accounts(users))
+
+    def _render_user_accounts(self, users: list):
+        """Kullanıcı hesaplarını GUI'de göster."""
+        try:
+            for w in self._users_content_frame.winfo_children():
+                w.destroy()
+
+            if not users:
+                ctk.CTkLabel(
+                    self._users_content_frame,
+                    text="⚪  Kullanıcı bilgisi alınamadı",
+                    font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=2)
+                return
+
+            # Bilinen Windows sistem hesapları
+            system_accounts = {
+                "administrator", "defaultaccount", "guest",
+                "wdagutilityaccount",
+            }
+
+            active_users = []
+            disabled_users = []
+            hidden_suspect = []
+
+            for u in users:
+                name = u.get("Name", "")
+                enabled = u.get("Enabled", False)
+                desc = u.get("Description", "") or ""
+                last_logon = u.get("LastLogon", "")
+
+                # Son giriş tarihini formatla
+                logon_str = ""
+                if last_logon and isinstance(last_logon, str) and "/Date(" in last_logon:
+                    try:
+                        ts = int(last_logon.split("(")[1].split(")")[0]) / 1000
+                        from datetime import datetime
+                        logon_str = datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
+                    except Exception:
+                        logon_str = ""
+
+                entry = {"name": name, "enabled": enabled, "desc": desc, "logon": logon_str}
+
+                if not enabled:
+                    disabled_users.append(entry)
+                elif name.lower() not in system_accounts:
+                    # Aktif ama bilinen sistem hesabı değil — dikkat et
+                    active_users.append(entry)
+                else:
+                    active_users.append(entry)
+
+            # Genel özet
+            total = len(users)
+            active_count = len(active_users)
+            disabled_count = len(disabled_users)
+
+            summary_color = COLORS["green"] if disabled_count <= 3 else COLORS["orange"]
+            ctk.CTkLabel(
+                self._users_content_frame,
+                text=f"👥  Toplam: {total}  |  Aktif: {active_count}  |  Devre dışı: {disabled_count}",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=summary_color,
+            ).pack(anchor="w", padx=4, pady=(0, 6))
+
+            # Aktif kullanıcılar
+            for u in active_users:
+                row = ctk.CTkFrame(self._users_content_frame, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=1)
+
+                is_admin = u["name"].lower() == "administrator"
+                icon = "👑" if is_admin else "👤"
+                color = COLORS["orange"] if is_admin else COLORS["green"]
+
+                ctk.CTkLabel(
+                    row, text=f"{icon} {u['name']}",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=color, width=160, anchor="w",
+                ).pack(side="left")
+
+                logon_text = f"Son giriş: {u['logon']}" if u["logon"] else ""
+                ctk.CTkLabel(
+                    row, text=logon_text,
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=(4, 0))
+
+            # Devre dışı kullanıcılar (collapse)
+            if disabled_users:
+                ctk.CTkLabel(
+                    self._users_content_frame,
+                    text=f"🔒  Devre dışı hesaplar ({disabled_count}):",
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=(6, 2))
+
+                names = ", ".join(u["name"] for u in disabled_users)
+                ctk.CTkLabel(
+                    self._users_content_frame,
+                    text=f"    {names}",
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"],
+                    wraplength=700,
+                ).pack(anchor="w", padx=4, pady=0)
+
+        except Exception:
+            pass
+
+    # ─── Collector: Network Shares ─── #
+    def _collect_network_shares(self):
+        """Ağ paylaşımlarını topla."""
+        import subprocess
+        CREATE_NW = 0x08000000
+        shares = []
+
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-SmbShare | Select-Object Name, Path, Description, "
+                 "ShareType, CurrentUsers | ConvertTo-Json"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                import json
+                data = json.loads(r.stdout.strip())
+                if isinstance(data, dict):
+                    data = [data]
+                shares = data
+        except Exception:
+            pass
+
+        self._gui_safe(lambda: self._render_network_shares(shares))
+
+    def _render_network_shares(self, shares: list):
+        """Ağ paylaşımlarını GUI'de göster."""
+        try:
+            for w in self._shares_content_frame.winfo_children():
+                w.destroy()
+
+            if not shares:
+                ctk.CTkLabel(
+                    self._shares_content_frame,
+                    text="⚪  Paylaşım bilgisi alınamadı",
+                    font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=2)
+                return
+
+            # Varsayılan Windows paylaşımları
+            default_shares = {"ADMIN$", "C$", "IPC$", "D$", "E$"}
+
+            custom_shares = [s for s in shares
+                             if s.get("Name", "") not in default_shares]
+            default_only = len(custom_shares) == 0
+
+            if default_only:
+                ctk.CTkLabel(
+                    self._shares_content_frame,
+                    text="✅  Sadece varsayılan Windows paylaşımları — Ekstra paylaşım yok",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLORS["green"],
+                ).pack(anchor="w", padx=4, pady=(0, 4))
+            else:
+                ctk.CTkLabel(
+                    self._shares_content_frame,
+                    text=f"⚠️  {len(custom_shares)} özel paylaşım tespit edildi",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLORS["orange"],
+                ).pack(anchor="w", padx=4, pady=(0, 4))
+
+            for s in shares:
+                name = s.get("Name", "")
+                path = s.get("Path", "")
+                desc = s.get("Description", "") or ""
+                users = s.get("CurrentUsers", 0) or 0
+                is_default = name in default_shares
+
+                row = ctk.CTkFrame(self._shares_content_frame, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=1)
+
+                icon = "📁" if is_default else "📂"
+                color = COLORS["text_dim"] if is_default else COLORS["orange"]
+
+                ctk.CTkLabel(
+                    row, text=f"{icon} {name}",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=color, width=120, anchor="w",
+                ).pack(side="left")
+
+                detail = path or desc
+                if users > 0:
+                    detail += f"  ({users} bağlı)"
+                ctk.CTkLabel(
+                    row, text=detail,
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=(4, 0))
+
+        except Exception:
+            pass
+
+    # ─── Collector: Suspicious Services ─── #
+    def _collect_suspicious_services(self):
+        """Windows dışı 3. parti çalışan servisleri topla."""
+        import subprocess
+        CREATE_NW = 0x08000000
+        services = []
+
+        try:
+            # PathName içeren servisleri al, Microsoft/Windows olanları filtrele
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-WmiObject Win32_Service | Where-Object { $_.State -eq 'Running' } | "
+                 "Select-Object Name, DisplayName, PathName, StartMode, StartName | "
+                 "ConvertTo-Json -Depth 2"],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                import json
+                data = json.loads(r.stdout.strip())
+                if isinstance(data, dict):
+                    data = [data]
+                services = data
+        except Exception:
+            pass
+
+        self._gui_safe(lambda: self._render_suspicious_services(services))
+
+    def _render_suspicious_services(self, services: list):
+        """3. parti servisleri GUI'de göster."""
+        try:
+            for w in self._services_content_frame.winfo_children():
+                w.destroy()
+
+            if not services:
+                ctk.CTkLabel(
+                    self._services_content_frame,
+                    text="⚪  Servis bilgisi alınamadı",
+                    font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=2)
+                return
+
+            # Microsoft/Windows path'leri (güvenli kabul)
+            safe_paths = [
+                "c:\\windows\\", "c:\\program files\\common files\\microsoft",
+                "c:\\program files\\windows", "\\systemroot\\",
+                "c:\\windows\\system32\\", "c:\\windows\\syswow64\\",
+            ]
+
+            # Bilinen güvenli 3. parti uygulamalar
+            known_safe = [
+                "mysql", "mssql", "sqlserver", "apache", "nginx", "iis",
+                "maestropanel", "google", "chrome", "honeypot", "yesnext",
+                "sqlbackup", "php", "node", "cloudflare", "defender",
+            ]
+
+            third_party = []
+            for svc in services:
+                path = (svc.get("PathName") or "").lower()
+                name = (svc.get("Name") or "").lower()
+                display = svc.get("DisplayName") or svc.get("Name", "")
+
+                # Windows/Microsoft yolundan çalışanları atla
+                is_system = any(path.startswith(sp) for sp in safe_paths)
+                if is_system:
+                    continue
+
+                # Bilinen güvenli mi?
+                is_known = any(k in name or k in path for k in known_safe)
+                third_party.append({
+                    "name": svc.get("Name", ""),
+                    "display": display,
+                    "path": svc.get("PathName", ""),
+                    "start_mode": svc.get("StartMode", ""),
+                    "account": svc.get("StartName", ""),
+                    "known": is_known,
+                })
+
+            if not third_party:
+                ctk.CTkLabel(
+                    self._services_content_frame,
+                    text="✅  Şüpheli 3. parti servis bulunamadı",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLORS["green"],
+                ).pack(anchor="w", padx=4, pady=2)
+                return
+
+            unknown_count = sum(1 for s in third_party if not s["known"])
+            if unknown_count == 0:
+                summary = f"✅  {len(third_party)} 3. parti servis — Tümü bilinen uygulamalar"
+                summary_color = COLORS["green"]
+            else:
+                summary = f"⚠️  {unknown_count} bilinmeyen servis tespit edildi"
+                summary_color = COLORS["orange"]
+
+            ctk.CTkLabel(
+                self._services_content_frame,
+                text=summary,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=summary_color,
+            ).pack(anchor="w", padx=4, pady=(0, 6))
+
+            # Bilinmeyenleri önce göster
+            sorted_svcs = sorted(third_party, key=lambda x: x["known"])
+            for svc in sorted_svcs[:15]:  # En fazla 15 göster
+                row = ctk.CTkFrame(self._services_content_frame, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=1)
+
+                if svc["known"]:
+                    icon = "✅"
+                    color = COLORS["text_dim"]
+                else:
+                    icon = "⚠️"
+                    color = COLORS["orange"]
+
+                ctk.CTkLabel(
+                    row, text=f"{icon} {svc['display']}",
+                    font=ctk.CTkFont(size=11, weight="bold" if not svc["known"] else "normal"),
+                    text_color=color, anchor="w",
+                ).pack(side="left")
+
+                # Kısa path göster
+                short_path = svc["path"][:60] + "..." if len(svc["path"]) > 60 else svc["path"]
+                ctk.CTkLabel(
+                    row, text=f"  {short_path}",
+                    font=ctk.CTkFont(size=10),
+                    text_color=COLORS["text_dim"], anchor="w",
+                ).pack(side="left", padx=(4, 0))
+
+            if len(third_party) > 15:
+                ctk.CTkLabel(
+                    self._services_content_frame,
+                    text=f"  ... ve {len(third_party) - 15} servis daha",
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=4, pady=(4, 0))
+
+        except Exception:
+            pass
 
     # ─── Live Threat Feed (v4.0 Faz 2) ─── #
     def _build_threat_feed(self, parent):
@@ -796,6 +1476,15 @@ class ModernGUI:
     def _schedule_dashboard_refresh(self):
         """Her 5 saniyede bir dashboard kartlarını günceller."""
         self._refresh_dashboard()
+
+        # Security intel panellerini her 60 saniyede bir güncelle (12 × 5s)
+        if not hasattr(self, '_security_tick'):
+            self._security_tick = 0
+        self._security_tick += 1
+        if self._security_tick >= 12:
+            self._security_tick = 0
+            self._refresh_security_intel()
+
         try:
             if self.root and self.root.winfo_exists():
                 self.root.after(5000, self._schedule_dashboard_refresh)

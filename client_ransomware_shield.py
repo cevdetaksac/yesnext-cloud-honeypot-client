@@ -43,20 +43,43 @@ from client_helpers import log
 
 CREATE_NO_WINDOW = 0x08000000
 
-# Canary file deployment locations (relative to user profile or root)
-CANARY_FOLDER_NAMES = [
-    "IMPORTANT_DOCUMENTS",
-    "Financial_Reports",
-    "Company_Data",
+# Canary file deployment — hidden sentinel folders with realistic bait files.
+# Folders are placed in non-intrusive locations, marked hidden via Windows
+# attrib, and each contains a README explaining their purpose so admins
+# don't panic.
+CANARY_ROOT_FOLDER = ".cloud-honeypot-canary"   # single hidden root
+
+CANARY_SUBFOLDER_NAMES = [
+    "reports",
+    "finance",
+    "archive",
 ]
 
 CANARY_FILES = [
-    ("Q4_Financial_Report_2025.xlsx", 4096),
-    ("Employee_Database.csv", 3072),
-    ("Client_Contracts.pdf", 5120),
-    ("Server_Passwords.docx", 2048),
-    ("Backup_Keys.txt", 1024),
+    ("quarterly_report.xlsx", 4096),
+    ("employee_list.csv", 3072),
+    ("contract_draft.pdf", 5120),
+    ("credentials_backup.docx", 2048),
+    ("recovery_keys.txt", 1024),
 ]
+
+CANARY_README_CONTENT = """╔══════════════════════════════════════════════════════╗
+║  Cloud Honeypot Client — Ransomware Shield           ║
+║  Canary / Tuzak Dosyaları                            ║
+╚══════════════════════════════════════════════════════╝
+
+Bu klasör ve içindeki dosyalar Cloud Honeypot Client tarafından
+otomatik olarak oluşturulmuştur.
+
+Amaç: Ransomware saldırılarını erken tespit etmek.
+Nasıl çalışır: Bu sahte dosyalar izlenir. Bir ransomware bunları
+şifrelemeye veya silmeye kalkarsa, sistem anında alarm verir.
+
+⚠️  BU DOSYALARI SİLMEYİN veya DEĞİŞTİRMEYİN.
+    Silmeniz halinde ransomware koruması devre dışı kalır.
+
+📧  Sorularınız için: destek@yesnext.com.tr
+"""
 
 # Suspicious file extensions commonly used by ransomware
 SUSPICIOUS_EXTENSIONS: Set[str] = {
@@ -211,19 +234,45 @@ class RansomwareShield:
     # ── Katman 1: Canary Files ────────────────────────────────────
 
     def _deploy_canaries(self):
-        """Create canary files in strategic locations."""
+        """Create canary files in hidden, non-intrusive locations.
+
+        Strategy:
+        - NEVER use Desktop (admins would think they are hacked!)
+        - Place under a single hidden root folder: .cloud-honeypot-canary
+        - Set Windows hidden + system attribute on root folder
+        - Include a README.txt explaining the purpose
+        - Locations: Documents, Public Documents, ProgramData
+        """
         try:
-            # Primary location: user profile Desktop
             user_profile = os.environ.get("USERPROFILE", "C:\\Users\\Public")
             base_dirs = [
-                os.path.join(user_profile, "Desktop"),
                 os.path.join(user_profile, "Documents"),
                 os.path.join("C:\\Users\\Public", "Documents"),
+                os.path.join(os.environ.get("ProgramData", "C:\\ProgramData")),
             ]
 
             for base_dir in base_dirs:
-                for folder_name in CANARY_FOLDER_NAMES:
-                    canary_dir = os.path.join(base_dir, folder_name)
+                # Create the hidden root canary folder
+                canary_root = os.path.join(base_dir, CANARY_ROOT_FOLDER)
+                try:
+                    os.makedirs(canary_root, exist_ok=True)
+                except OSError:
+                    continue
+
+                # Write README so admins understand what this is
+                readme_path = os.path.join(canary_root, "README.txt")
+                try:
+                    if not os.path.exists(readme_path):
+                        with open(readme_path, "w", encoding="utf-8") as f:
+                            f.write(CANARY_README_CONTENT)
+                except OSError:
+                    pass
+
+                # Set Windows hidden + system attribute on root folder
+                self._set_hidden_attribute(canary_root)
+
+                for subfolder in CANARY_SUBFOLDER_NAMES:
+                    canary_dir = os.path.join(canary_root, subfolder)
                     try:
                         os.makedirs(canary_dir, exist_ok=True)
                     except OSError:
@@ -233,12 +282,10 @@ class RansomwareShield:
                         filepath = os.path.join(canary_dir, filename)
                         try:
                             if not os.path.exists(filepath):
-                                # Generate realistic-looking random content
                                 content = secrets.token_bytes(target_size)
                                 with open(filepath, "wb") as f:
                                     f.write(content)
 
-                            # Compute hash for change detection
                             file_hash = self._file_hash(filepath)
                             if file_hash:
                                 self._canaries.append(CanaryState(
@@ -249,9 +296,54 @@ class RansomwareShield:
                         except OSError:
                             continue
 
-            log(f"[RANSOMWARE-SHIELD] 🎯 Deployed {len(self._canaries)} canary files")
+            # Clean up legacy canary folders from older versions (Desktop)
+            self._cleanup_legacy_canaries()
+
+            log(f"[RANSOMWARE-SHIELD] 🎯 Deployed {len(self._canaries)} canary files (hidden)")
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] Canary deploy error: {e}")
+
+    @staticmethod
+    def _set_hidden_attribute(folder_path: str):
+        """Set Windows hidden + system attribute so folder is invisible in Explorer."""
+        try:
+            FILE_ATTRIBUTE_HIDDEN = 0x02
+            FILE_ATTRIBUTE_SYSTEM = 0x04
+            ctypes.windll.kernel32.SetFileAttributesW(
+                str(folder_path),
+                FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+            )
+        except Exception:
+            pass  # Non-Windows or permission issue, silently skip
+
+    def _cleanup_legacy_canaries(self):
+        """Remove old-style canary folders from Desktop (pre-v4.0.2).
+
+        Previous versions placed highly visible folders on the Desktop
+        which alarmed administrators.  Clean them up silently.
+        """
+        import shutil
+
+        legacy_folder_names = ["IMPORTANT_DOCUMENTS", "Financial_Reports", "Company_Data"]
+        user_profile = os.environ.get("USERPROFILE", "")
+        if not user_profile:
+            return
+
+        legacy_bases = [
+            os.path.join(user_profile, "Desktop"),
+            os.path.join(user_profile, "Documents"),
+            os.path.join("C:\\Users\\Public", "Documents"),
+        ]
+
+        for base in legacy_bases:
+            for folder_name in legacy_folder_names:
+                legacy_path = os.path.join(base, folder_name)
+                if os.path.isdir(legacy_path):
+                    try:
+                        shutil.rmtree(legacy_path)
+                        log(f"[RANSOMWARE-SHIELD] 🧹 Cleaned legacy canary: {legacy_path}")
+                    except OSError:
+                        pass
 
     def _canary_watch_loop(self):
         """Periodically check canary file integrity (every 10s)."""

@@ -86,6 +86,7 @@ class AlertPipeline:
         gui_toast_func: Optional[Callable] = None,
         tray_notify_func: Optional[Callable] = None,
         machine_name: Optional[str] = None,
+        auto_response=None,
     ):
         """
         Args:
@@ -94,12 +95,14 @@ class AlertPipeline:
             gui_toast_func:   Callable(title, message, severity) for GUI toast.
             tray_notify_func: Callable(title, message) for tray balloon.
             machine_name:     This machine's hostname.
+            auto_response:    AutoResponse instance for executing block/logoff/disable.
         """
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.gui_toast_func = gui_toast_func
         self.tray_notify_func = tray_notify_func
         self.machine_name = machine_name or socket.gethostname()
+        self.auto_response = auto_response
 
         # Batch buffers
         self._batch_buffer: List[dict] = []
@@ -175,6 +178,11 @@ class AlertPipeline:
         # Always log locally
         self._log_threat(alert)
 
+        # Execute auto-response actions (block_ip, logoff, disable_account)
+        actions = alert.get("auto_response", [])
+        if actions and self.auto_response:
+            self._execute_auto_response(actions, alert)
+
         # Route based on severity
         if severity in ("critical", "high"):
             self._send_urgent(alert)
@@ -194,6 +202,48 @@ class AlertPipeline:
         """Get recent alerts from the batch buffer for dashboard display."""
         with self._batch_lock:
             return list(self._batch_buffer[-count:])
+
+    # ── Auto-Response Execution ────────────────────────────────
+
+    def _execute_auto_response(self, actions: List[str], alert: dict):
+        """Execute auto-response actions from threat correlation rules.
+
+        Supported actions:
+          - block_ip:        Block source IP via Windows Firewall
+          - logoff_user:     Force logoff the attacker session
+          - disable_account: Disable the targeted user account
+          - notify_urgent:   (handled separately in routing)
+        """
+        source_ip = alert.get("source_ip", "")
+        username = alert.get("username", "")
+        reason = (f"{alert.get('correlation_rule', '')} — "
+                  f"{alert.get('title', 'Threat detected')}")
+
+        for action in actions:
+            try:
+                if action == "block_ip" and source_ip:
+                    ok = self.auto_response.block_ip(
+                        source_ip, reason=reason, duration_hours=24
+                    )
+                    if ok:
+                        self._stats.setdefault("auto_blocks", 0)
+                        self._stats["auto_blocks"] += 1
+                        log(f"[ALERTS] 🚫 Auto-blocked IP: {source_ip} — {reason}")
+
+                elif action == "logoff_user" and username:
+                    self.auto_response.logoff_user(username)
+                    log(f"[ALERTS] 🚪 Auto-logoff: {username}")
+
+                elif action == "disable_account" and username:
+                    self.auto_response.disable_account(username)
+                    log(f"[ALERTS] 🔒 Auto-disabled: {username}")
+
+                elif action == "notify_urgent":
+                    pass  # Handled in severity routing below
+
+            except Exception as e:
+                self._stats["errors"] += 1
+                log(f"[ALERTS] ❌ Auto-response '{action}' failed: {e}")
 
     # ── Urgent Channel (instant API) ──────────────────────────────
 

@@ -245,6 +245,9 @@ class CloudHoneypotClient:
                     auto_response=self.auto_response,
                     alert_pipeline=self.alert_pipeline,
                 )
+                # Wire auto_response into alert pipeline for auto-blocking
+                if self.alert_pipeline:
+                    self.alert_pipeline.auto_response = self.auto_response
                 # Wire silent hours guard into threat engine
                 if self.threat_engine:
                     self.threat_engine.silent_hours_guard = self.silent_hours_guard

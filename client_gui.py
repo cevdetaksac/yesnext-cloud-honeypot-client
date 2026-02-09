@@ -1941,7 +1941,12 @@ class ModernGUI:
             pass
 
     def _update_tab_badges(self, active_service_count: int):
-        """Tab isimlerindeki parantez içi sayıları güncelle."""
+        """Tab isimlerindeki parantez içi sayıları güncelle.
+
+        NOT: CTkTabview.rename() kullanılmaz — internal segmented button
+        state'ini bozar ve tab tıklamalarının çalışmamasına yol açar.
+        Bunun yerine segmented button'un text'ini doğrudan güncelliyoruz.
+        """
         try:
             if not hasattr(self, '_tabview'):
                 return
@@ -1960,17 +1965,45 @@ class ModernGUI:
             new_threat = f"Tehdit Merkezi ({threat_count})"
             new_services = f"Honeypot Servisleri ({active_service_count})"
 
-            # Sadece değiştiyse güncelle (flicker önleme)
+            # Segmented button text'lerini doğrudan güncelle (rename yerine)
+            seg_btn = self._tabview._segmented_button
             if new_threat != self._tab_threat_name:
                 try:
-                    self._tabview.rename(self._tab_threat_name, new_threat)
+                    idx = list(seg_btn._buttons_dict.keys()).index(self._tab_threat_name)
+                    btn = list(seg_btn._buttons_dict.values())[idx]
+                    btn.configure(text=new_threat)
+                    # Internal dict key'ini güncelle
+                    keys = list(seg_btn._buttons_dict.keys())
+                    vals = list(seg_btn._buttons_dict.values())
+                    keys[idx] = new_threat
+                    seg_btn._buttons_dict = dict(zip(keys, vals))
+                    # TabView internal mapping güncelle
+                    if hasattr(self._tabview, '_tab_dict'):
+                        tab_frame = self._tabview._tab_dict.pop(self._tab_threat_name, None)
+                        if tab_frame:
+                            self._tabview._tab_dict[new_threat] = tab_frame
+                    # Seçili tab değeri güncelle
+                    if seg_btn._current_value == self._tab_threat_name:
+                        seg_btn._current_value = new_threat
                     self._tab_threat_name = new_threat
                 except Exception:
                     pass
 
             if new_services != self._tab_services_name:
                 try:
-                    self._tabview.rename(self._tab_services_name, new_services)
+                    idx = list(seg_btn._buttons_dict.keys()).index(self._tab_services_name)
+                    btn = list(seg_btn._buttons_dict.values())[idx]
+                    btn.configure(text=new_services)
+                    keys = list(seg_btn._buttons_dict.keys())
+                    vals = list(seg_btn._buttons_dict.values())
+                    keys[idx] = new_services
+                    seg_btn._buttons_dict = dict(zip(keys, vals))
+                    if hasattr(self._tabview, '_tab_dict'):
+                        tab_frame = self._tabview._tab_dict.pop(self._tab_services_name, None)
+                        if tab_frame:
+                            self._tabview._tab_dict[new_services] = tab_frame
+                    if seg_btn._current_value == self._tab_services_name:
+                        seg_btn._current_value = new_services
                     self._tab_services_name = new_services
                 except Exception:
                     pass

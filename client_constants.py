@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.1.1"  # Firewall rule migration & API sync on startup
+VERSION = "4.1.2"  # Fix GUI tab freeze + firewall unblock IP lookup
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

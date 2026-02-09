@@ -249,13 +249,43 @@ class WindowsFirewallBackend(FirewallBackend):
             ok_all = ok_all and ok
         return ok_all
 
+    def _lookup_rule_remoteip(self, rule_name: str) -> str:
+        """Query netsh for a rule's remoteip before deleting it."""
+        try:
+            rc, out, _ = run_cmd([
+                "netsh", "advfirewall", "firewall", "show", "rule",
+                f"name={rule_name}", "dir=in",
+            ], timeout=10)
+            if rc != 0:
+                return ""
+            for line in out.splitlines():
+                low = line.strip().lower()
+                if any(k in low for k in ("remoteip", "uzak ip", "remote ip")):
+                    _, _, val = line.partition(":")
+                    val = val.strip()
+                    if val and val.lower() not in ("any", "herhangi"):
+                        return val.split(",")[0].strip().split("/")[0]
+        except Exception:
+            pass
+        return ""
+
     def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
         """Remove firewall block rules.
 
         All rules use unified HP-BLOCK- prefix. Tries:
           1. HP-BLOCK-{block_id}   — server-assigned block ID
           2. HP-BLOCK-{ip}         — IP-based rule (AutoResponse)
+          3. HONEYPOT_THREAT_BLOCK_ — legacy backward compat
+
+        If ip_or_cidr is not provided, looks up the remoteip from the
+        existing rule so the IP-based variant can also be removed.
         """
+        # If API didn't provide IP, look it up from the rule itself
+        if not ip_or_cidr:
+            ip_or_cidr = self._lookup_rule_remoteip(f"HP-BLOCK-{block_id}")
+            if ip_or_cidr:
+                self.logger.info(f"Resolved IP from rule HP-BLOCK-{block_id}: {ip_or_cidr}")
+
         names_to_try = [f"HP-BLOCK-{block_id}"]
         if ip_or_cidr:
             ip_clean = ip_or_cidr.strip().split("/")[0]
@@ -266,19 +296,24 @@ class WindowsFirewallBackend(FirewallBackend):
             legacy_name = f"HONEYPOT_THREAT_BLOCK_{ip_clean.replace('.', '_')}"
             names_to_try.append(legacy_name)
 
+        removed_any = False
         for name in names_to_try:
             rc, out, err = run_cmd([
                 "netsh", "advfirewall", "firewall", "delete", "rule",
                 f"name={name}", "dir=in",
             ])
             if rc == 0:
-                if out.strip():
-                    self.logger.info(out.strip())
-                self.logger.info(f"Removed rule: {name}")
+                out_s = out.strip()
+                if out_s and "0 rule" not in out_s.lower():
+                    self.logger.info(f"Removed rule: {name} ({out_s})")
+                    removed_any = True
             else:
                 msg = (out + "\n" + err).lower()
                 if "no rules match" not in msg and "0 rule(s) deleted" not in msg:
                     self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
+
+        if not removed_any:
+            self.logger.warning(f"No firewall rules found for block {block_id} / {ip_or_cidr}")
 
         return True
 

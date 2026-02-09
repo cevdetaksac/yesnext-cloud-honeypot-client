@@ -377,6 +377,32 @@ class ThreatEngine:
                     })
         return sorted(threats, key=lambda t: t["threat_score"], reverse=True)
 
+    def get_last_attacker(self) -> Optional[dict]:
+        """
+        Return the most recently seen attacker IP (by last_seen timestamp).
+        Used by the dashboard "Son Saldırı" card.
+        Returns None if no attackers tracked.
+        """
+        latest = None
+        with self._lock:
+            for ip, ctx in self._ip_pool.items():
+                if ip == "local":
+                    continue
+                if ctx.threat_score < 1:
+                    continue
+                if latest is None or ctx.last_seen > latest.last_seen:
+                    latest = ctx
+        if latest:
+            return {
+                "ip": latest.ip,
+                "threat_score": latest.threat_score,
+                "last_seen": latest.last_seen,
+                "failed_attempts": latest.failed_attempts,
+                "successful_logins": latest.successful_logins,
+                "services": list(latest.services_targeted),
+            }
+        return None
+
     def get_stats(self) -> dict:
         """Return engine statistics."""
         stats = dict(self._stats)

@@ -1801,20 +1801,17 @@ class ModernGUI:
             last_ip = sess.get("last_attacker_ip", "")
             last_svc = sess.get("last_service", "")
 
-            # Threat Engine'den daha yeni bir alert var mı kontrol et
+            # Threat Engine'den en son saldıranı al
             threat_engine = getattr(self.app, 'threat_engine', None)
             if threat_engine:
                 try:
-                    recent = threat_engine.get_recent_threats(
-                        max_age_seconds=86400, min_score=30
-                    )
-                    if recent:
-                        top = recent[0]  # En yüksek skor
-                        te_ts = top.get("last_seen", 0)
+                    latest = threat_engine.get_last_attacker()
+                    if latest:
+                        te_ts = latest.get("last_seen", 0)
                         if not last_ts or te_ts > last_ts:
                             last_ts = te_ts
-                            last_ip = top.get("ip", "")
-                            svcs = top.get("services", [])
+                            last_ip = latest.get("ip", "")
+                            svcs = latest.get("services", [])
                             last_svc = svcs[0] if svcs else "SCAN"
                 except Exception:
                     pass

@@ -200,7 +200,7 @@ class FirewallBackend:
     def apply_block(self, block_id: str, cidrs: List[str]) -> bool:
         raise NotImplementedError
 
-    def remove_block(self, block_id: str) -> bool:
+    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
         raise NotImplementedError
 
 
@@ -249,7 +249,16 @@ class WindowsFirewallBackend(FirewallBackend):
             ok_all = ok_all and ok
         return ok_all
 
-    def remove_block(self, block_id: str) -> bool:
+    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
+        """Remove firewall block rules.
+
+        Tries both naming conventions:
+          1. HP-BLOCK-{block_id}         — rules created by FirewallAgent (dashboard blocks)
+          2. HONEYPOT_THREAT_BLOCK_{ip}  — rules created by AutoResponse (threat engine blocks)
+        """
+        removed_any = False
+
+        # 1) Try HP-BLOCK-{block_id}
         name = f"HP-BLOCK-{block_id}"
         rc, out, err = run_cmd([
             "netsh", "advfirewall", "firewall", "delete", "rule",
@@ -258,14 +267,34 @@ class WindowsFirewallBackend(FirewallBackend):
         if rc == 0:
             if out.strip():
                 self.logger.info(out.strip())
-            return True
-        # If nothing to delete, netsh may return a message but rc can be non-zero; treat as success if mentions 0 rules
-        msg = (out + "\n" + err).lower()
-        if "no rules match" in msg or "0 rule(s) deleted" in msg:
-            self.logger.info(f"No rules found for {name}; considered removed")
-            return True
-        self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
-        return False
+            removed_any = True
+        else:
+            msg = (out + "\n" + err).lower()
+            if "no rules match" in msg or "0 rule(s) deleted" in msg:
+                self.logger.info(f"No rules found for {name}")
+            else:
+                self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
+
+        # 2) Try HONEYPOT_THREAT_BLOCK_{ip} (AutoResponse naming)
+        if ip_or_cidr:
+            ip_clean = ip_or_cidr.strip().split("/")[0]  # strip CIDR suffix
+            threat_name = f"HONEYPOT_THREAT_BLOCK_{ip_clean.replace('.', '_')}"
+            rc2, out2, err2 = run_cmd([
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name={threat_name}", "dir=in",
+            ])
+            if rc2 == 0:
+                if out2.strip():
+                    self.logger.info(out2.strip())
+                removed_any = True
+                self.logger.info(f"Removed AutoResponse rule: {threat_name}")
+            else:
+                msg2 = (out2 + "\n" + err2).lower()
+                if "no rules match" not in msg2 and "0 rule(s) deleted" not in msg2:
+                    self.logger.error(err2.strip() or f"Failed to delete {threat_name}")
+
+        # Consider success if at least one rule was removed or none existed
+        return True
 
 
 class LinuxFirewallBackend(FirewallBackend):
@@ -371,7 +400,7 @@ class LinuxFirewallBackend(FirewallBackend):
         else:
             return self._iptables_add_with_comment(block_id, cidrs)
 
-    def remove_block(self, block_id: str) -> bool:
+    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
         if self.has_ipset:
             return self._remove_with_ipset(block_id)
         else:
@@ -391,11 +420,13 @@ class FirewallAgent:
         refresh_interval: int = 10,
         cidr_feed_base: str = "https://www.ipdeny.com/ipblocks/data/countries",
         logger: Optional[logging.Logger] = None,
+        auto_response=None,
     ) -> None:
         self.api_base = api_base.rstrip("/")
         self.token = token
         self.refresh_interval = max(1, int(refresh_interval))
         self.logger = logger or make_logger()
+        self.auto_response = auto_response
         self.session = make_session()
         cache_root = _default_cache_dir()
         self.country_cache = CountryCIDRCache(cidr_feed_base, cache_root / "country", self.logger)
@@ -494,15 +525,23 @@ class FirewallAgent:
         for item in data:
             try:
                 block_id = str(item["id"]).strip()
+                ip_or_cidr = str(item.get("ip_or_cidr", "")).strip()
             except Exception as e:
                 self.logger.error(f"Invalid unblock item: {e}")
                 continue
-            ok = self.backend.remove_block(block_id)
+            ok = self.backend.remove_block(block_id, ip_or_cidr=ip_or_cidr)
             if ok:
-                self.logger.info(f"Removed block {block_id}")
+                self.logger.info(f"Removed block {block_id} ({ip_or_cidr})")
                 removed_ids.append(block_id)
+                # Also clean up AutoResponse tracking if available
+                if ip_or_cidr and self.auto_response:
+                    ip_clean = ip_or_cidr.strip().split("/")[0]
+                    try:
+                        self.auto_response.unblock_ip(ip_clean)
+                    except Exception:
+                        pass
             else:
-                self.logger.error(f"Failed to remove block {block_id}")
+                self.logger.error(f"Failed to remove block {block_id} ({ip_or_cidr})")
         if removed_ids:
             body = {"token": self.token, "block_ids": removed_ids}
             _, code = self._post_json("/api/agent/block-removed", body)

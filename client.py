@@ -1854,6 +1854,7 @@ class CloudHoneypotClient:
                     refresh_interval=int(os.environ.get("REFRESH_INTERVAL_SEC", "10")),
                     cidr_feed_base=cidr_feed,
                     logger=LOGGER,
+                    auto_response=getattr(self, 'auto_response', None),
                 )
                 log(f"Firewall agent starting; API_BASE={api_base_root}, FEED={cidr_feed}")
                 agent.run_forever()

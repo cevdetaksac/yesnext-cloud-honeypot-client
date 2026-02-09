@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.1.9"  # Dynamic IP table: block/unblock/whitelist sync, accurate status
+VERSION = "4.2.0"  # Fix auto-block API: blocked_ip field + ISO timestamp + unblock reporting
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

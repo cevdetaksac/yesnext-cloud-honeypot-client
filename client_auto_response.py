@@ -257,6 +257,7 @@ class AutoResponse:
         if success:
             self._stats["blocks_removed"] += 1
             log(f"[AUTO-RESPONSE] ✅ Unblocked: {ip}")
+            self._report_unblock_to_api(ip)
         return success
 
     # ── Session Management ────────────────────────────────────────
@@ -462,7 +463,11 @@ class AutoResponse:
     # ── API Reporting ─────────────────────────────────────────────
 
     def _report_block_to_api(self, ip: str, reason: str, duration_hours: int):
-        """Report block action to API (fire-and-forget)."""
+        """Report block action to API (fire-and-forget).
+
+        POST /api/alerts/auto-block
+        Body: {token, blocked_ip, reason, duration_hours, blocked_at (ISO)}
+        """
         if not self.api_client:
             return
 
@@ -471,15 +476,59 @@ class AutoResponse:
                 token = self.token_getter()
                 if not token:
                     return
-                self.api_client.api_request("POST", "alerts/auto-block", data={
+
+                from datetime import datetime, timezone
+                blocked_at = datetime.now(timezone.utc).isoformat()
+
+                payload = {
                     "token": token,
-                    "ip": ip,
+                    "blocked_ip": ip,
                     "reason": reason,
                     "duration_hours": duration_hours,
-                    "blocked_at": time.time(),
-                })
+                    "blocked_at": blocked_at,
+                }
+                result = self.api_client.api_request(
+                    "POST", "alerts/auto-block", data=payload
+                )
+                if result:
+                    log(f"[AUTO-RESPONSE] ✅ Block reported to API: {ip}")
+                else:
+                    log(f"[AUTO-RESPONSE] ⚠️ Block report failed for: {ip}")
             except Exception as e:
                 log(f"[AUTO-RESPONSE] API report error: {e}")
+
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _report_unblock_to_api(self, ip: str):
+        """Report unblock action to API (fire-and-forget).
+
+        POST /api/alerts/auto-unblock
+        Body: {token, blocked_ip, unblocked_at (ISO)}
+        """
+        if not self.api_client:
+            return
+
+        def _send():
+            try:
+                token = self.token_getter()
+                if not token:
+                    return
+
+                from datetime import datetime, timezone
+                payload = {
+                    "token": token,
+                    "blocked_ip": ip,
+                    "unblocked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                result = self.api_client.api_request(
+                    "POST", "alerts/auto-unblock", data=payload
+                )
+                if result:
+                    log(f"[AUTO-RESPONSE] ✅ Unblock reported to API: {ip}")
+                else:
+                    log(f"[AUTO-RESPONSE] ⚠️ Unblock report failed for: {ip}")
+            except Exception as e:
+                log(f"[AUTO-RESPONSE] API unblock report error: {e}")
 
         threading.Thread(target=_send, daemon=True).start()
 

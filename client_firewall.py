@@ -794,6 +794,7 @@ class FirewallAgent:
                         "reason": b.get("reason", "migration_sync"),
                         "duration_hours": 24,
                         "firewall_rule_name": b.get("rule_name", ""),
+                        "blocked_at": b.get("blocked_at") or _dt.datetime.now(_dt.timezone.utc).isoformat(),
                     }
                     self._post_json("/api/alerts/auto-block", fallback_body)
 

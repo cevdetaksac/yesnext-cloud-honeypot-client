@@ -668,6 +668,21 @@ class CloudHoneypotClient:
                 sh_cfg = config.get("silent_hours")
                 if sh_cfg and self.silent_hours_guard:
                     self.silent_hours_guard.update_config(sh_cfg)
+
+                # Whitelist IP/subnet'lerini EventLogWatcher, AutoResponse
+                # ve ThreatEngine'e ilet — dashboard'dan gelen güvenli IP'ler
+                wl_ips = set(config.get("whitelist_ips", []))
+                wl_subnets = config.get("whitelist_subnets", [])
+                if wl_ips or wl_subnets:
+                    if self.event_watcher:
+                        self.event_watcher.update_whitelist(wl_ips)
+                    if self.auto_response:
+                        self.auto_response.update_whitelist(wl_ips, wl_subnets)
+                    if self.threat_engine:
+                        self.threat_engine.update_whitelist(wl_ips)
+                    log(f"[CONFIG-SYNC] Whitelist synced: {len(wl_ips)} IP(s), "
+                        f"{len(wl_subnets)} subnet(s)")
+
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
             # Fetch block rules from dashboard (GET /api/premium/rules)

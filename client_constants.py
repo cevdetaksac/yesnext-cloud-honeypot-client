@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.1.6"  # Default block rules for all services + honeypot credential counting
+VERSION = "4.1.7"  # Whitelist sync + RDP grace period + Network rule removed
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

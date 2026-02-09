@@ -208,14 +208,9 @@ DEFAULT_BLOCK_RULES = [
         "actions": "email,block",
         "enabled": True,
     },
-    {
-        "name": "default_network",
-        "services": "Network",
-        "threshold_count": 3,
-        "window_minutes": 30,
-        "actions": "email,block",
-        "enabled": True,
-    },
+    # Network (LogonType 3) varsayılan kurallardan çıkarıldı — SMB/dosya paylaşımı
+    # gibi meşru erişimlerden çok fazla false positive üretiyordu.
+    # Kullanıcı dashboard'dan isterse ekleyebilir.
 ]
 
 
@@ -307,6 +302,15 @@ class ThreatEngine:
         # Track which IPs were already blocked by rule engine
         self._rule_blocked_ips: Set[str] = set()
 
+        # Whitelist — dashboard'dan gelen güvenli IP'ler
+        self._whitelist_ips: Set[str] = set()
+
+        # RDP Grace — bağlantı koptuğunda yeniden bağlanma süresince
+        # failed logon eventlerini blok kuralından muaf tut.
+        # {ip: disconnect_timestamp}
+        self._rdp_grace: Dict[str, float] = {}
+        self._RDP_GRACE_WINDOW = 300  # 5 dakika grace süresi
+
         # Stats
         self._stats = {
             "events_scored": 0,
@@ -331,6 +335,11 @@ class ThreatEngine:
             self._block_rules = enabled if enabled else list(DEFAULT_BLOCK_RULES)
         rule_names = [r.get("name", "?") for r in self._block_rules]
         log(f"[THREAT] 📋 Block rules updated: {rule_names}")
+
+    def update_whitelist(self, ips: Set[str]):
+        """Update whitelisted IPs from dashboard/API."""
+        self._whitelist_ips = set(ips)
+        log(f"[THREAT] 🛡️ Whitelist updated: {len(ips)} IP(s)")
 
     def start(self):
         """Start the housekeeping (cleanup + score decay) thread."""
@@ -366,12 +375,29 @@ class ThreatEngine:
             if not event_type:
                 return
 
+            ip_key = source_ip if source_ip else "local"
+
+            # ── RDP bağlantı kopma/yeniden bağlanma yönetimi ─────
+            # Event 24 = rdp_session_disconnect → grace süresi başlat
+            if event_type == "rdp_session_disconnect" and source_ip:
+                self._rdp_grace[source_ip] = time.time()
+                log(f"[THREAT] 🔄 RDP disconnect from {source_ip} — "
+                    f"{self._RDP_GRACE_WINDOW}s grace started")
+
+            # Başarılı oturum açma → o IP'nin fail counter'ını temizle
+            # (kullanıcı yeniden bağlandıysa, önceki fail'ler saldırı değildi)
+            if event_type in LOGON_EVENT_TYPES and source_ip:
+                if source_ip in self._rule_blocked_ips:
+                    self._rule_blocked_ips.discard(source_ip)
+                    log(f"[THREAT] ✅ Successful logon from {source_ip} — "
+                        f"removed from rule-blocked set")
+                # Grace süresini de temizle
+                self._rdp_grace.pop(source_ip, None)
+
             # 1. Score the event
             score = self._calculate_score(event)
 
             # 2. Update IP context (even for events without IP, use "local")
-            ip_key = source_ip if source_ip else "local"
-
             with self._lock:
                 if ip_key not in self._ip_pool:
                     self._ip_pool[ip_key] = IPContext(ip=ip_key)
@@ -577,6 +603,27 @@ class ThreatEngine:
             return
         if ip in self._rule_blocked_ips:
             return  # zaten bu kural ile bloklanmış
+
+        # Whitelist kontrolü — dashboard'dan gelen güvenli IP'ler
+        if ip in self._whitelist_ips:
+            return
+
+        # RDP grace kontrolü — bağlantı kopmasından sonra yeniden
+        # bağlanma denemeleri saldırı olarak sayılmaz
+        grace_ts = self._rdp_grace.get(ip)
+        if grace_ts:
+            if (time.time() - grace_ts) < self._RDP_GRACE_WINDOW:
+                event_service = (
+                    event.get("target_service", "") or
+                    event.get("service", "") or ""
+                ).upper()
+                if event_service == "RDP":
+                    log(f"[THREAT] 🔄 RDP fail from {ip} ignored — "
+                        f"within grace period")
+                    return
+            else:
+                # Grace süresi dolmuş, temizle
+                del self._rdp_grace[ip]
 
         # Servis tespiti: EventLog → target_service, Honeypot → service
         event_service = (

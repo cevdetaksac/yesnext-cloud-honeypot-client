@@ -123,10 +123,12 @@ class ModernGUI:
         )
         self._tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # Tab isimleri — parantez içi sayılar _refresh_dashboard'da güncellenir
-        self._tab_status_name = "Anlık Durum"
-        self._tab_threat_name = "Tehdit Merkezi (0)"
-        self._tab_services_name = "Honeypot Servisleri (0)"
+        # Tab isimleri — build() anında self.t() ile çözümlenir.
+        # CTkTabview rename/dict manipulation tab click'i bozar,
+        # bu yüzden runtime'da DEĞİŞTİRİLMEZ. Dil değişince _rebuild_gui() çağrılır.
+        self._tab_status_name = self.t("tab_status")
+        self._tab_threat_name = f"🛡️ {self.t('tab_threat_center')}"
+        self._tab_services_name = f"🍯 {self.t('tab_services')}"
 
         self._tabview.add(self._tab_status_name)
         self._tabview.add(self._tab_threat_name)
@@ -247,7 +249,7 @@ class ModernGUI:
 
         # Dashboard butonu
         ctk.CTkButton(
-            bar, text="📊 Dashboard",
+            bar, text=self.t("btn_dashboard"),
             font=ctk.CTkFont(size=11), width=90, height=26,
             fg_color=COLORS["accent"], hover_color=COLORS["blue"],
             text_color=COLORS["text_bright"], corner_radius=5,
@@ -387,9 +389,9 @@ class ModernGUI:
 
         # ── Faz 3 Durum Kartları — Satır 3 ── #
         faz3_cards_data = [
-            ("ransomware",      "🧬", "Ransomware",    "SAFE",  COLORS["green"],    2, 0),
-            ("cpu_usage",       "💻", "CPU / RAM",     "—",     COLORS["text_dim"], 2, 1),
-            ("self_protect",    "🔒", "Protection",    "ACTIVE", COLORS["green"],   2, 2),
+            ("ransomware",      "🧬", self.t("card_ransomware"),    "SAFE",  COLORS["green"],    2, 0),
+            ("cpu_usage",       "💻", self.t("card_cpu_ram"),     "—",     COLORS["text_dim"], 2, 1),
+            ("self_protect",    "🔒", self.t("card_protection"),    "ACTIVE", COLORS["green"],   2, 2),
         ]
 
         for key, emoji, label, value, color, row, col in faz3_cards_data:
@@ -407,7 +409,7 @@ class ModernGUI:
         threat_sec.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            threat_sec, text="🛡️  Threat Detection",
+            threat_sec, text=self.t("section_threat_detection"),
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=16, pady=(12, 8))
@@ -421,9 +423,9 @@ class ModernGUI:
             threat_grid.columnconfigure(c, weight=1)
 
         threat_cards_data = [
-            ("threat_level",    "🛡️", "Threat Level",  "SAFE", COLORS["green"],    0, 0),
-            ("events_per_hour", "📊", "Events/Hour",   "0",    COLORS["text_dim"], 0, 1),
-            ("blocked_ips",     "🚫", "Tracked IPs",   "0",    COLORS["text_dim"], 0, 2),
+            ("threat_level",    "🛡️", self.t("card_threat_level"),  "SAFE", COLORS["green"],    0, 0),
+            ("events_per_hour", "📊", self.t("card_events_per_hour"),   "0",    COLORS["text_dim"], 0, 1),
+            ("blocked_ips",     "🚫", self.t("card_tracked_ips"),   "0",    COLORS["text_dim"], 0, 2),
         ]
 
         for key, emoji, label, value, color, row, col in threat_cards_data:
@@ -472,7 +474,7 @@ class ModernGUI:
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
-            hdr, text="🔒  Sistem Güvenlik Durumu",
+            hdr, text=self.t("section_system_security"),
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -494,7 +496,7 @@ class ModernGUI:
         # Başlangıç: "Taranıyor..." göster
         self._security_check_label = ctk.CTkLabel(
             self._security_checks_frame,
-            text="⏳  Sistem taranıyor...",
+            text=self.t("loading_system_scanning"),
             font=ctk.CTkFont(size=12),
             text_color=COLORS["text_dim"],
         )
@@ -513,7 +515,7 @@ class ModernGUI:
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
-            hdr, text="👥  Kullanıcı Hesapları",
+            hdr, text=self.t("section_user_accounts"),
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -534,7 +536,7 @@ class ModernGUI:
 
         self._users_loading_label = ctk.CTkLabel(
             self._users_content_frame,
-            text="⏳  Kullanıcılar taranıyor...",
+            text=self.t("loading_users_scanning"),
             font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
         )
         self._users_loading_label.pack(anchor="w", padx=4, pady=2)
@@ -549,7 +551,7 @@ class ModernGUI:
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
-            hdr, text="📂  Ağ Paylaşımları",
+            hdr, text=self.t("section_network_shares"),
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -562,7 +564,7 @@ class ModernGUI:
 
         self._shares_loading_label = ctk.CTkLabel(
             self._shares_content_frame,
-            text="⏳  Paylaşımlar taranıyor...",
+            text=self.t("loading_shares_scanning"),
             font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
         )
         self._shares_loading_label.pack(anchor="w", padx=4, pady=2)
@@ -577,7 +579,7 @@ class ModernGUI:
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
-            hdr, text="⚙️  3. Parti Servisler",
+            hdr, text=self.t("section_third_party_services"),
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -590,7 +592,7 @@ class ModernGUI:
 
         self._services_loading_label = ctk.CTkLabel(
             self._services_content_frame,
-            text="⏳  Servisler taranıyor...",
+            text=self.t("loading_services_scanning"),
             font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
         )
         self._services_loading_label.pack(anchor="w", padx=4, pady=2)
@@ -626,9 +628,9 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
             )
             fw_on = "ON" in r.stdout.upper() if r.returncode == 0 else False
-            checks.append(("Firewall", fw_on, "Aktif" if fw_on else "KAPALI!"))
+            checks.append((self.t("check_firewall"), fw_on, self.t("check_active") if fw_on else self.t("check_disabled_warning")))
         except Exception:
-            checks.append(("Firewall", None, "Kontrol edilemedi"))
+            checks.append((self.t("check_firewall"), None, self.t("check_unable_to_verify")))
 
         # 2) Windows Defender / Antivirus
         try:
@@ -638,9 +640,9 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
             )
             av_on = "TRUE" in r.stdout.upper().strip() if r.returncode == 0 else False
-            checks.append(("Antivirüs", av_on, "Gerçek zamanlı koruma aktif" if av_on else "KAPALI!"))
+            checks.append((self.t("check_antivirus"), av_on, self.t("check_realtime_on") if av_on else self.t("check_disabled_warning")))
         except Exception:
-            checks.append(("Antivirüs", None, "Kontrol edilemedi"))
+            checks.append((self.t("check_antivirus"), None, self.t("check_unable_to_verify")))
 
         # 3) WinRM (uzaktan yönetim — kapalı olmalı)
         try:
@@ -649,10 +651,10 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
             )
             winrm_running = "RUNNING" in r.stdout.upper() if r.returncode == 0 else False
-            checks.append(("WinRM", not winrm_running,
-                           "Kapalı (güvenli)" if not winrm_running else "AÇIK — Uzaktan erişim riski!"))
+            checks.append((self.t("check_winrm"), not winrm_running,
+                           self.t("check_closed_safe") if not winrm_running else self.t("check_open_remote_risk")))
         except Exception:
-            checks.append(("WinRM", True, "Servis bulunamadı (güvenli)"))
+            checks.append((self.t("check_winrm"), True, self.t("check_service_not_found")))
 
         # 4) RDP Network Level Authentication
         try:
@@ -663,10 +665,10 @@ class ModernGUI:
                 capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
             )
             nla_on = "0x1" in r.stdout if r.returncode == 0 else False
-            checks.append(("RDP NLA", nla_on,
-                           "Ağ Düzeyinde Doğrulama aktif" if nla_on else "NLA kapalı — risk!"))
+            checks.append((self.t("check_rdp_nla"), nla_on,
+                           self.t("check_nla_active") if nla_on else self.t("check_nla_off_risk")))
         except Exception:
-            checks.append(("RDP NLA", None, "Kontrol edilemedi"))
+            checks.append((self.t("check_rdp_nla"), None, self.t("check_unable_to_verify")))
 
         # 5) Ransomware Shield
         rs = getattr(self.app, 'ransomware_shield', None)
@@ -677,17 +679,17 @@ class ModernGUI:
                 alerts = stats.get("canary_alerts", 0)
                 canary_count = stats.get("canary_files", 0)
                 if running and alerts == 0:
-                    checks.append(("Ransomware Kalkanı", True,
-                                   f"Aktif — {canary_count} tuzak dosya izleniyor"))
+                    checks.append((self.t("check_ransomware_shield"), True,
+                                   self.t("check_rs_active").format(count=canary_count)))
                 elif running and alerts > 0:
-                    checks.append(("Ransomware Kalkanı", False,
-                                   f"⚠️ {alerts} alarm tespit edildi!"))
+                    checks.append((self.t("check_ransomware_shield"), False,
+                                   f"⚠️ {self.t('check_rs_alerts').format(count=alerts)}"))
                 else:
-                    checks.append(("Ransomware Kalkanı", False, "Çalışmıyor!"))
+                    checks.append((self.t("check_ransomware_shield"), False, self.t("check_rs_not_running")))
             except Exception:
-                checks.append(("Ransomware Kalkanı", None, "Kontrol edilemedi"))
+                checks.append((self.t("check_ransomware_shield"), None, self.t("check_unable_to_verify")))
         else:
-            checks.append(("Ransomware Kalkanı", False, "Yüklenmemiş"))
+            checks.append((self.t("check_ransomware_shield"), False, self.t("check_rs_not_installed")))
 
         # 6) Windows Update (son güncelleme tarihi)
         try:
@@ -699,11 +701,11 @@ class ModernGUI:
             )
             if r.returncode == 0 and r.stdout.strip():
                 last_update = r.stdout.strip()
-                checks.append(("Son Windows Update", True, last_update))
+                checks.append((self.t("check_last_update"), True, last_update))
             else:
-                checks.append(("Son Windows Update", None, "Bilgi alınamadı"))
+                checks.append((self.t("check_last_update"), None, self.t("check_info_unavailable")))
         except Exception:
-            checks.append(("Son Windows Update", None, "Kontrol edilemedi"))
+            checks.append((self.t("check_last_update"), None, self.t("check_unable_to_verify")))
 
         # GUI'yi güncelle (thread-safe)
         self._gui_safe(lambda: self._render_security_checks(checks))
@@ -719,11 +721,11 @@ class ModernGUI:
 
             # Genel durum banner
             if all_ok:
-                banner_text = "✅  Tüm güvenlik kontrolleri başarılı — Her şey yolunda!"
+                banner_text = self.t("security_all_ok")
                 banner_color = COLORS["green"]
             else:
                 fail_count = sum(1 for c in checks if c[1] is False)
-                banner_text = f"⚠️  {fail_count} güvenlik uyarısı tespit edildi"
+                banner_text = self.t("security_warnings_found").format(count=fail_count)
                 banner_color = COLORS["orange"]
 
             banner = ctk.CTkLabel(
@@ -863,7 +865,7 @@ class ModernGUI:
             if not users:
                 ctk.CTkLabel(
                     self._users_content_frame,
-                    text="⚪  Kullanıcı bilgisi alınamadı",
+                    text=self.t("users_info_unavailable"),
                     font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=2)
                 return
@@ -902,17 +904,17 @@ class ModernGUI:
                 # Kullanıcı türünü belirle
                 nl = name.lower()
                 if nl == "administrator":
-                    user_type = "Yönetici"
+                    user_type = self.t("user_type_admin")
                     type_color = COLORS["orange"]
                 elif is_iis_pool:
                     user_type = "IIS App Pool"
                     type_color = "#4fc3f7"
                 elif nl in ("defaultaccount", "guest", "wdagutilityaccount",
                             "varsayılanhesap"):
-                    user_type = "Sistem"
+                    user_type = self.t("user_type_system")
                     type_color = COLORS["text_dim"]
                 else:
-                    user_type = "Kullanıcı"
+                    user_type = self.t("user_type_user")
                     type_color = COLORS["green"]
 
                 # Grup listesini oluştur
@@ -963,10 +965,10 @@ class ModernGUI:
             disabled_count = len(disabled_users)
             iis_count = sum(1 for u in active_users if u["is_iis"])
 
-            parts = [f"Toplam: {total}", f"Aktif: {active_count}"]
+            parts = [f"{self.t('users_total')}: {total}", f"{self.t('users_active')}: {active_count}"]
             if iis_count:
-                parts.append(f"IIS: {iis_count}")
-            parts.append(f"Devre dışı: {disabled_count}")
+                parts.append(f"{self.t('users_iis')}: {iis_count}")
+            parts.append(f"{self.t('users_disabled')}: {disabled_count}")
 
             ctk.CTkLabel(
                 self._users_content_frame,
@@ -979,8 +981,8 @@ class ModernGUI:
             hdr = ctk.CTkFrame(self._users_content_frame, fg_color=COLORS["bg"],
                                corner_radius=4)
             hdr.pack(fill="x", padx=4, pady=(0, 2))
-            for text, w in [("Kullanıcı", 140), ("Tür", 90), ("Gruplar", 130),
-                            ("Son Giriş", 120), ("", 70)]:
+            for text, w in [(self.t("users_col_name"), 140), (self.t("users_col_type"), 90), (self.t("users_col_groups"), 130),
+                            (self.t("users_col_last_logon"), 120), ("", 70)]:
                 ctk.CTkLabel(
                     hdr, text=text, width=w, anchor="w",
                     font=ctk.CTkFont(size=10, weight="bold"),
@@ -991,12 +993,11 @@ class ModernGUI:
             def _on_disable_click(username: str):
                 import tkinter.messagebox as mbox
                 if username.lower() == "administrator":
-                    mbox.showwarning("Uyarı", "Administrator hesabı devre dışı bırakılamaz!")
+                    mbox.showwarning(self.t("warn"), self.t("users_admin_no_disable"))
                     return
                 ok = mbox.askyesno(
-                    "Kullanıcı Pasife Al",
-                    f"'{username}' hesabını devre dışı bırakmak istediğinize emin misiniz?\n\n"
-                    "Bu işlem geri alınabilir."
+                    self.t("msgbox_disable_user_title"),
+                    self.t("msgbox_disable_user_confirm").format(user=username),
                 )
                 if not ok:
                     return
@@ -1004,13 +1005,13 @@ class ModernGUI:
                 if auto_response:
                     result = auto_response.disable_account(username)
                     if result:
-                        mbox.showinfo("Başarılı", f"'{username}' hesabı devre dışı bırakıldı.")
+                        mbox.showinfo(self.t("info"), self.t("msgbox_user_disabled_ok").format(user=username))
                         import threading as _th
                         _th.Thread(target=self._collect_user_accounts, daemon=True).start()
                     else:
-                        mbox.showerror("Hata", f"'{username}' hesabı devre dışı bırakılamadı.")
+                        mbox.showerror(self.t("error"), self.t("msgbox_user_disabled_fail").format(user=username))
                 else:
-                    mbox.showerror("Hata", "AutoResponse modülü yüklenemedi.")
+                    mbox.showerror(self.t("error"), self.t("msgbox_autoresponse_unavailable"))
 
             # ── Aktif kullanıcı satırları ──
             for u in active_users:
@@ -1059,7 +1060,7 @@ class ModernGUI:
                 if not is_admin:
                     uname = u["name"]
                     ctk.CTkButton(
-                        row, text="Pasife Al", width=70, height=20,
+                        row, text=self.t("btn_disable_user"), width=70, height=20,
                         font=ctk.CTkFont(size=10),
                         fg_color="#8B0000", hover_color="#B22222",
                         command=lambda n=uname: _on_disable_click(n),
@@ -1069,7 +1070,7 @@ class ModernGUI:
             if disabled_users:
                 ctk.CTkLabel(
                     self._users_content_frame,
-                    text=f"🔒  Devre dışı hesaplar ({disabled_count}):",
+                    text=f"🔒  {self.t('users_disabled_accounts')} ({disabled_count}):",
                     font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=(6, 2))
@@ -1120,7 +1121,7 @@ class ModernGUI:
             if not shares:
                 ctk.CTkLabel(
                     self._shares_content_frame,
-                    text="⚪  Paylaşım bilgisi alınamadı",
+                    text=self.t("shares_info_unavailable"),
                     font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=2)
                 return
@@ -1135,14 +1136,14 @@ class ModernGUI:
             if default_only:
                 ctk.CTkLabel(
                     self._shares_content_frame,
-                    text="✅  Sadece varsayılan Windows paylaşımları — Ekstra paylaşım yok",
+                    text=self.t("shares_default_only"),
                     font=ctk.CTkFont(size=12, weight="bold"),
                     text_color=COLORS["green"],
                 ).pack(anchor="w", padx=4, pady=(0, 4))
             else:
                 ctk.CTkLabel(
                     self._shares_content_frame,
-                    text=f"⚠️  {len(custom_shares)} özel paylaşım tespit edildi",
+                    text=self.t("shares_custom_detected").format(count=len(custom_shares)),
                     font=ctk.CTkFont(size=12, weight="bold"),
                     text_color=COLORS["orange"],
                 ).pack(anchor="w", padx=4, pady=(0, 4))
@@ -1168,7 +1169,7 @@ class ModernGUI:
 
                 detail = path or desc
                 if users > 0:
-                    detail += f"  ({users} bağlı)"
+                    detail += f"  ({users} {self.t('shares_connected_users')})"
                 ctk.CTkLabel(
                     row, text=detail,
                     font=ctk.CTkFont(size=11),
@@ -1218,7 +1219,7 @@ class ModernGUI:
             if not services:
                 ctk.CTkLabel(
                     self._services_content_frame,
-                    text="⚪  Servis bilgisi alınamadı",
+                    text=self.t("services_info_unavailable"),
                     font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=2)
                 return
@@ -1262,7 +1263,7 @@ class ModernGUI:
             if not third_party:
                 ctk.CTkLabel(
                     self._services_content_frame,
-                    text="✅  Şüpheli 3. parti servis bulunamadı",
+                    text=self.t("services_no_suspicious"),
                     font=ctk.CTkFont(size=12, weight="bold"),
                     text_color=COLORS["green"],
                 ).pack(anchor="w", padx=4, pady=2)
@@ -1270,10 +1271,10 @@ class ModernGUI:
 
             unknown_count = sum(1 for s in third_party if not s["known"])
             if unknown_count == 0:
-                summary = f"✅  {len(third_party)} 3. parti servis — Tümü bilinen uygulamalar"
+                summary = self.t("services_all_known").format(count=len(third_party))
                 summary_color = COLORS["green"]
             else:
-                summary = f"⚠️  {unknown_count} bilinmeyen servis tespit edildi"
+                summary = self.t("services_unknown_detected").format(count=unknown_count)
                 summary_color = COLORS["orange"]
 
             ctk.CTkLabel(
@@ -1313,7 +1314,7 @@ class ModernGUI:
             if len(third_party) > 15:
                 ctk.CTkLabel(
                     self._services_content_frame,
-                    text=f"  ... ve {len(third_party) - 15} servis daha",
+                    text=self.t("services_more_count").format(count=len(third_party) - 15),
                     font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=(4, 0))
@@ -1328,7 +1329,7 @@ class ModernGUI:
         feed_frame.pack(fill="x", padx=12, pady=(0, 4))
 
         ctk.CTkLabel(
-            feed_frame, text="📋  Live Threat Feed",
+            feed_frame, text=self.t("section_live_threat_feed"),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=4, pady=(0, 4))
@@ -1344,7 +1345,7 @@ class ModernGUI:
 
         # Placeholder — veri gelince otomatik temizlenir
         self._threat_feed_box.configure(state="normal")
-        self._threat_feed_box.insert("1.0", "  ⏳  Tehdit beslemesi dinleniyor...\n  Saldırı tespit edildiğinde burada anlık olarak görünecektir.")
+        self._threat_feed_box.insert("1.0", self.t("placeholder_threat_feed"))
         self._threat_feed_box.configure(state="disabled")
         self._threat_feed_has_data = False
 
@@ -1354,7 +1355,7 @@ class ModernGUI:
         btn_frame.pack(fill="x", padx=12, pady=(0, 10))
 
         ctk.CTkLabel(
-            btn_frame, text="⚡  Quick Response",
+            btn_frame, text=self.t("section_quick_response"),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=4, pady=(0, 6))
@@ -1363,10 +1364,10 @@ class ModernGUI:
         btn_row.pack(fill="x", padx=4)
 
         buttons = [
-            ("🚫 Block IP",   self._on_block_ip_click),
-            ("🚪 Logoff",     self._on_logoff_click),
-            ("🔒 Disable",    self._on_disable_click),
-            ("📸 Snapshot",   self._on_snapshot_click),
+            (self.t("btn_block_ip"),   self._on_block_ip_click),
+            (self.t("btn_logoff"),     self._on_logoff_click),
+            (self.t("btn_disable"),    self._on_disable_click),
+            (self.t("btn_snapshot"),   self._on_snapshot_click),
         ]
         for i, (label, cmd) in enumerate(buttons):
             btn = ctk.CTkButton(
@@ -1415,7 +1416,7 @@ class ModernGUI:
     def _on_block_ip_click(self):
         """Prompt for IP and block it via AutoResponse."""
         dialog = ctk.CTkInputDialog(
-            text="Enter IP address to block:", title="Block IP",
+            text=self.t("dialog_enter_ip"), title=self.t("dialog_block_ip_title"),
         )
         ip = dialog.get_input()
         if ip and ip.strip():
@@ -1424,15 +1425,15 @@ class ModernGUI:
             if auto_response:
                 ok = auto_response.block_ip(ip, reason="Manual block from dashboard")
                 self.show_toast(
-                    "IP Blocked" if ok else "Block Failed",
-                    f"{ip} {'engellendi ✅' if ok else 'engellenemedi ❌'}",
+                    self.t("toast_ip_blocked") if ok else self.t("toast_block_failed"),
+                    self.t("toast_ip_blocked_msg").format(ip=ip) if ok else self.t("toast_ip_block_failed_msg").format(ip=ip),
                     "high" if ok else "warning",
                 )
 
     def _on_logoff_click(self):
         """Prompt for username and logoff."""
         dialog = ctk.CTkInputDialog(
-            text="Enter username to logoff:", title="Logoff User",
+            text=self.t("dialog_enter_user_logoff"), title=self.t("dialog_logoff_title"),
         )
         username = dialog.get_input()
         if username and username.strip():
@@ -1441,15 +1442,15 @@ class ModernGUI:
             if auto_response:
                 ok = auto_response.logoff_user(username)
                 self.show_toast(
-                    "Session Closed" if ok else "Logoff Failed",
-                    f"{username} {'oturumu kapatıldı ✅' if ok else 'başarısız ❌'}",
+                    self.t("toast_session_closed") if ok else self.t("toast_logoff_failed"),
+                    self.t("toast_logoff_ok_msg").format(user=username) if ok else self.t("toast_logoff_fail_msg").format(user=username),
                     "high" if ok else "warning",
                 )
 
     def _on_disable_click(self):
         """Prompt for username and disable account."""
         dialog = ctk.CTkInputDialog(
-            text="Enter username to disable:", title="Disable Account",
+            text=self.t("dialog_enter_user_disable"), title=self.t("dialog_disable_title"),
         )
         username = dialog.get_input()
         if username and username.strip():
@@ -1458,8 +1459,8 @@ class ModernGUI:
             if auto_response:
                 ok = auto_response.disable_account(username)
                 self.show_toast(
-                    "Account Disabled" if ok else "Disable Failed",
-                    f"{username} {'hesabı devre dışı ✅' if ok else 'başarısız ❌'}",
+                    self.t("toast_account_disabled") if ok else self.t("toast_disable_failed"),
+                    self.t("toast_disable_ok_msg").format(user=username) if ok else self.t("toast_disable_fail_msg").format(user=username),
                     "high" if ok else "warning",
                 )
 
@@ -1474,12 +1475,12 @@ class ModernGUI:
                 mem_pct = mem.get("percent", 0)
                 conns = result.get("connections", 0)
                 self.show_toast(
-                    "📸 System Snapshot",
+                    self.t("toast_snapshot_title"),
                     f"CPU: {cpu}%  |  RAM: {mem_pct}%  |  Connections: {conns}",
                     "info", duration_ms=8000,
                 )
             else:
-                self.show_toast("Snapshot Failed", result.get("error", "Unknown error"), "warning")
+                self.show_toast(self.t("toast_snapshot_failed"), result.get("error", "Unknown error"), "warning")
 
     def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
         """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""
@@ -1519,7 +1520,7 @@ class ModernGUI:
         sec.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            sec, text="📋  Command History",
+            sec, text=self.t("section_command_history"),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=16, pady=(12, 4))
@@ -1535,7 +1536,7 @@ class ModernGUI:
 
         # Placeholder
         self._cmd_history_box.configure(state="normal")
-        self._cmd_history_box.insert("1.0", "  ⏳  Henüz komut çalıştırılmadı.\n  Sunucudan gelen uzak komutlar burada listelenecektir.")
+        self._cmd_history_box.insert("1.0", self.t("placeholder_command_history"))
         self._cmd_history_box.configure(state="disabled")
         self._cmd_history_has_data = False
 
@@ -1572,7 +1573,7 @@ class ModernGUI:
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
         ctk.CTkLabel(
-            hdr, text="👥  Active Sessions",
+            hdr, text=self.t("section_active_sessions"),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -1597,7 +1598,7 @@ class ModernGUI:
 
         # Placeholder + otomatik yükle
         self._sessions_box.configure(state="normal")
-        self._sessions_box.insert("1.0", "  ⏳  Oturumlar yükleniyor...")
+        self._sessions_box.insert("1.0", self.t("loading_sessions"))
         self._sessions_box.configure(state="disabled")
         # Başlangıçta otomatik yükle
         self._refresh_active_sessions()
@@ -1625,7 +1626,7 @@ class ModernGUI:
                             continue
                         # Header line
                         if parts[0].upper() in ("USERNAME", "KULLANICI"):
-                            lines.append("  Kullanıcı          Oturum        Durum     Giriş Zamanı")
+                            lines.append("  " + self.t("sessions_header"))
                             lines.append("  " + "─" * 60)
                             continue
                         # Data line — may start with > for current user
@@ -1639,8 +1640,8 @@ class ModernGUI:
                         state = parts[3] if len(parts) > 3 else ""
                         # Logon time is typically the last 2 parts
                         logon = " ".join(parts[-2:]) if len(parts) >= 6 else ""
-                        state_tr = "Aktif" if state.lower() == "active" else (
-                            "Bağlantı kesik" if state.lower() == "disc" else state)
+                        state_tr = self.t("session_active") if state.lower() == "active" else (
+                            self.t("session_disconnected") if state.lower() == "disc" else state)
                         icon = "🟢" if state.lower() == "active" else "🔴"
                         lines.append(
                             f"  {marker}{icon} {username:<18} {session:<13} {state_tr:<12} {logon}"
@@ -1661,7 +1662,7 @@ class ModernGUI:
                 except Exception:
                     pass
 
-            output = "\n".join(lines) if lines else "  ✅  Aktif uzak oturum bulunmuyor."
+            output = "\n".join(lines) if lines else self.t("sessions_none")
 
             def _update():
                 try:
@@ -1685,7 +1686,7 @@ class ModernGUI:
         sec.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            sec, text="📈  Trends (last 30 min)",
+            sec, text=self.t("section_trends"),
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(anchor="w", padx=16, pady=(12, 4))
@@ -1826,7 +1827,7 @@ class ModernGUI:
                 color = COLORS["red"] if ago_sec < 300 else (
                     COLORS["orange"] if ago_sec < 3600 else COLORS["text_dim"])
                 self._update_card("last_attack", display, color,
-                                  label=f"Son Saldırı — {ago}")
+                                  label=f"{self.t('dash_last_attack')} — {ago}")
             else:
                 self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
 
@@ -1865,12 +1866,12 @@ class ModernGUI:
                 try:
                     if sh_guard.is_silent_now():
                         self._silent_hours_label.configure(
-                            text="🔇 Silent Hours ACTIVE",
+                            text=self.t("status_silent_hours_active"),
                             text_color=COLORS["orange"],
                         )
                     else:
                         self._silent_hours_label.configure(
-                            text="🔊 Normal Hours",
+                            text=self.t("status_normal_hours"),
                             text_color=COLORS["text_dim"],
                         )
                 except Exception:
@@ -1934,81 +1935,12 @@ class ModernGUI:
             # Header badge senkronizasyonu
             self.update_header_status(active_count > 0)
 
-            # Tab badge güncelleme
-            self._update_tab_badges(active_count)
-
         except Exception:
             pass
 
-    def _update_tab_badges(self, active_service_count: int):
-        """Tab isimlerindeki parantez içi sayıları güncelle.
-
-        NOT: CTkTabview.rename() kullanılmaz — internal segmented button
-        state'ini bozar ve tab tıklamalarının çalışmamasına yol açar.
-        Bunun yerine segmented button'un text'ini doğrudan güncelliyoruz.
-        """
-        try:
-            if not hasattr(self, '_tabview'):
-                return
-
-            # Tehdit sayısı — kritik seviye threat'ler
-            threat_count = 0
-            threat_engine = getattr(self.app, 'threat_engine', None)
-            if threat_engine:
-                try:
-                    stats = threat_engine.get_stats()
-                    threat_count = stats.get("alerts_generated", 0)
-                except Exception:
-                    pass
-
-            # Yeni tab isimleri
-            new_threat = f"Tehdit Merkezi ({threat_count})"
-            new_services = f"Honeypot Servisleri ({active_service_count})"
-
-            # Segmented button text'lerini doğrudan güncelle (rename yerine)
-            seg_btn = self._tabview._segmented_button
-            if new_threat != self._tab_threat_name:
-                try:
-                    idx = list(seg_btn._buttons_dict.keys()).index(self._tab_threat_name)
-                    btn = list(seg_btn._buttons_dict.values())[idx]
-                    btn.configure(text=new_threat)
-                    # Internal dict key'ini güncelle
-                    keys = list(seg_btn._buttons_dict.keys())
-                    vals = list(seg_btn._buttons_dict.values())
-                    keys[idx] = new_threat
-                    seg_btn._buttons_dict = dict(zip(keys, vals))
-                    # TabView internal mapping güncelle
-                    if hasattr(self._tabview, '_tab_dict'):
-                        tab_frame = self._tabview._tab_dict.pop(self._tab_threat_name, None)
-                        if tab_frame:
-                            self._tabview._tab_dict[new_threat] = tab_frame
-                    # Seçili tab değeri güncelle
-                    if seg_btn._current_value == self._tab_threat_name:
-                        seg_btn._current_value = new_threat
-                    self._tab_threat_name = new_threat
-                except Exception:
-                    pass
-
-            if new_services != self._tab_services_name:
-                try:
-                    idx = list(seg_btn._buttons_dict.keys()).index(self._tab_services_name)
-                    btn = list(seg_btn._buttons_dict.values())[idx]
-                    btn.configure(text=new_services)
-                    keys = list(seg_btn._buttons_dict.keys())
-                    vals = list(seg_btn._buttons_dict.values())
-                    keys[idx] = new_services
-                    seg_btn._buttons_dict = dict(zip(keys, vals))
-                    if hasattr(self._tabview, '_tab_dict'):
-                        tab_frame = self._tabview._tab_dict.pop(self._tab_services_name, None)
-                        if tab_frame:
-                            self._tabview._tab_dict[new_services] = tab_frame
-                    if seg_btn._current_value == self._tab_services_name:
-                        seg_btn._current_value = new_services
-                    self._tab_services_name = new_services
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    # _update_tab_badges kaldırıldı — CTkTabview tab isimlerini runtime'da
+    # değiştirmek (rename, dict key update vb.) segmented button click
+    # callback'lerini bozuyor. Tab isimleri artık sabit.
 
     def _start_pulse_blink(self):
         """Header pulse dot'u 800ms aralıkla yanıp söndürür."""

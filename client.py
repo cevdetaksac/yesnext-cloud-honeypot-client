@@ -200,7 +200,11 @@ class CloudHoneypotClient:
         self.rdp_popup_manager = RDPPopupManager(main_app=self, translation_func=self.t)
         
         # Initialize Service Manager — central lifecycle manager for all honeypots
-        self.service_manager = ServiceManager(api_client=self.api_client, rdp_manager=self.rdp_manager)
+        self.service_manager = ServiceManager(
+            api_client=self.api_client,
+            rdp_manager=self.rdp_manager,
+            token_getter=lambda: self.state.get("token", ""),
+        )
         
         # Initialize Threat Detection Pipeline (v4.0)
         self.alert_pipeline = None

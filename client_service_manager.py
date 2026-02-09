@@ -80,15 +80,17 @@ class ServiceManager:
         4. Watchdog: çökmüş servisleri auto-restart (exponential backoff)
     """
 
-    def __init__(self, api_client, rdp_manager=None):
+    def __init__(self, api_client, rdp_manager=None, token_getter=None):
         """
         Args:
             api_client: ClientAPI instance — report_attack_batch, get_service_statuses,
                         update_service_statuses, report_service_action metodlarını sağlar
             rdp_manager: RDPManager instance (opsiyonel) — RDP port migration koordinasyonu
+            token_getter: callable — güncel token döndüren fonksiyon
         """
         self._api = api_client
         self._rdp_manager = rdp_manager
+        self._token_getter = token_getter or (lambda: "")
 
         # Honeypot instances: {"SSH": SSHHoneypot(...), "FTP": FTPHoneypot(...), ...}
         self._honeypots: Dict[str, BaseHoneypot] = {}
@@ -336,7 +338,11 @@ class ServiceManager:
                     "service": entry["service"],
                     "port": entry["port"],
                 })
-            success = self._api.report_attack_batch(attacks)
+            token = self._token_getter()
+            if not token:
+                log(f"[BatchReporter] Token yok, {len(attacks)} credential gönderilemedi")
+                return
+            success = self._api.report_attack_batch(token, attacks)
             if success:
                 log(f"[BatchReporter] {len(attacks)} credential gönderildi")
             else:
@@ -372,7 +378,10 @@ class ServiceManager:
     def _do_reconcile(self):
         """Dashboard desired state vs local actual state → start/stop."""
         try:
-            desired = self._api.get_service_statuses()
+            token = self._token_getter()
+            if not token:
+                return
+            desired = self._api.get_service_statuses(token)
             if not desired:
                 return  # API hatası veya boş yanıt
 
@@ -406,7 +415,10 @@ class ServiceManager:
                     "port": info["port"],
                     "status": info["status"],
                 })
-            self._api.update_service_statuses(status_list)
+            token = self._token_getter()
+            if not token:
+                return
+            self._api.update_service_statuses(token, status_list)
         except Exception as exc:
             log(f"[StatusReport] Hata: {exc}")
 
@@ -472,6 +484,9 @@ class ServiceManager:
     def _report_action(self, service_name: str, port: int, action: str):
         """Servis durum değişikliğini API'ye bildir."""
         try:
-            self._api.report_service_action(service_name, port, action)
+            token = self._token_getter()
+            if not token:
+                return
+            self._api.report_service_action(token, service_name, action, port)
         except Exception as exc:
             log(f"[ServiceManager] Action report hatası ({service_name}): {exc}")

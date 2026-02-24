@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.2.1"  # Fix command system: collect_diagnostics, execution_time_ms, field compat, block-applied, v4 endpoints
+VERSION = "4.3.0"  # Interactive dashboard: clickable stat cards with detail popups, process kill/block actions, API health monitor
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

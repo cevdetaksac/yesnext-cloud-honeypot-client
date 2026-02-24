@@ -301,9 +301,93 @@ class SystemHealthMonitor:
 
     # ── Anomaly Alerting ──────────────────────────────────────────
 
+    def _get_top_disk_io_processes(self, top_n: int = 5) -> List[dict]:
+        """Disk I/O anomalisi sırasında en çok disk yazan/okuyan süreçleri tespit et."""
+        try:
+            import psutil
+            procs = []
+            for p in psutil.process_iter(['pid', 'name', 'io_counters', 'exe', 'create_time']):
+                try:
+                    info = p.info
+                    io = info.get('io_counters')
+                    if io is None:
+                        continue
+                    procs.append({
+                        "pid": info['pid'],
+                        "name": info.get('name', 'unknown'),
+                        "exe": (info.get('exe') or 'N/A')[:120],
+                        "read_bytes": io.read_bytes,
+                        "write_bytes": io.write_bytes,
+                        "read_mb": round(io.read_bytes / 1024 / 1024, 1),
+                        "write_mb": round(io.write_bytes / 1024 / 1024, 1),
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            procs.sort(key=lambda x: x["write_bytes"], reverse=True)
+            return procs[:top_n]
+        except Exception:
+            return []
+
+    def _get_top_network_processes(self, top_n: int = 5) -> List[dict]:
+        """Network anomalisi sırasında en çok ağ trafiği oluşturan süreçleri tespit et."""
+        try:
+            import psutil
+            procs = []
+            for p in psutil.process_iter(['pid', 'name', 'io_counters', 'exe']):
+                try:
+                    info = p.info
+                    io = info.get('io_counters')
+                    if io is None:
+                        continue
+                    # psutil io_counters doesn't distinguish network from disk
+                    # but we can use net connections per process instead
+                    try:
+                        conns = p.net_connections()
+                        conn_count = len(conns)
+                    except (psutil.AccessDenied, psutil.NoSuchProcess):
+                        conn_count = 0
+                    if conn_count > 0:
+                        procs.append({
+                            "pid": info['pid'],
+                            "name": info.get('name', 'unknown'),
+                            "exe": (info.get('exe') or 'N/A')[:120],
+                            "connections": conn_count,
+                        })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            procs.sort(key=lambda x: x["connections"], reverse=True)
+            return procs[:top_n]
+        except Exception:
+            return []
+
     def _emit_anomaly(self, metric: str, value: float, description: str, score: int):
-        """Feed anomaly to ThreatEngine."""
-        log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+        """Feed anomaly to ThreatEngine with detailed process information."""
+        # Metriğe göre detaylı bilgi topla
+        process_details = []
+        if "disk_io" in metric:
+            process_details = self._get_top_disk_io_processes()
+            if process_details:
+                proc_lines = "; ".join(
+                    f"{p['name']}(PID:{p['pid']}) W:{p['write_mb']}MB R:{p['read_mb']}MB [{p['exe']}]"
+                    for p in process_details[:3]
+                )
+                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+                log(f"[HEALTH] 📋 Top disk I/O processes: {proc_lines}")
+            else:
+                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+        elif "net_bytes" in metric:
+            process_details = self._get_top_network_processes()
+            if process_details:
+                proc_lines = "; ".join(
+                    f"{p['name']}(PID:{p['pid']}) conns:{p['connections']} [{p['exe']}]"
+                    for p in process_details[:3]
+                )
+                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+                log(f"[HEALTH] 📋 Top network processes: {proc_lines}")
+            else:
+                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+        else:
+            log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
 
         if self.on_alert:
             self.on_alert({
@@ -315,10 +399,13 @@ class SystemHealthMonitor:
                     "metric": metric,
                     "value": round(value, 2),
                     "description": description,
+                    "suspect_processes": process_details[:5],
                 },
                 "description": (
                     f"Sistem anomalisi: {description}\n"
-                    f"Metrik: {metric} = {value:.1f}"
+                    f"Metrik: {metric} = {value:.1f}\n"
+                    + (f"Şüpheli süreçler: {', '.join(p['name'] + '(PID:' + str(p['pid']) + ')' for p in process_details[:3])}"
+                       if process_details else "")
                 ),
             })
 
@@ -346,11 +433,16 @@ class SystemHealthMonitor:
         mem_used_gb = 0.0
         disk_total_gb = 0
         disk_free_gb = 0
+        self_memory_mb = 0.0
         try:
             import psutil
             mem = psutil.virtual_memory()
             mem_total_gb = round(mem.total / (1024 ** 3), 1)
             mem_used_gb = round(mem.used / (1024 ** 3), 1)
+            # Self-process memory usage
+            self_memory_mb = round(
+                psutil.Process().memory_info().rss / 1024 / 1024, 1
+            )
             try:
                 disk = psutil.disk_usage("C:\\")
                 disk_total_gb = round(disk.total / (1024 ** 3))
@@ -395,6 +487,7 @@ class SystemHealthMonitor:
                 "vss_shadow_count": vss_shadow_count,
                 "ransomware_shield_status": ransomware_shield_status,
                 "canary_files_intact": canary_files_intact,
+                "client_memory_mb": self_memory_mb,
             },
         }
 

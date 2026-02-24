@@ -87,7 +87,7 @@ from client_system_health import SystemHealthMonitor
 from client_self_protection import ProcessProtection
 
 # Import Faz 4 modules (v4.0)
-from client_performance import PerformanceOptimizer, FalsePositiveTuner
+from client_performance import PerformanceOptimizer, FalsePositiveTuner, MemoryGuard
 
 try:
     from client_memory_restart import enable_simple_memory_restart, get_current_memory_mb, check_previous_restart_state
@@ -320,6 +320,9 @@ class CloudHoneypotClient:
                 self.perf_optimizer = None
                 self.fp_tuner = None
 
+        # Initialize MemoryGuard — long-running instance memory protection
+        self.memory_guard = MemoryGuard()
+
         # Load token early - before any API operations
         try:
             token = self.token_manager.load_token(self.root if hasattr(self, 'root') else None, self.t)
@@ -550,6 +553,29 @@ class CloudHoneypotClient:
                     log("⚙️ Faz 4 started (PerfOptimizer + FPTuner)")
                 except Exception as e:
                     log(f"⚠️ Faz 4 start failed: {e}")
+
+            # Start MemoryGuard — long-running instance memory protection
+            try:
+                if getattr(self, 'memory_guard', None):
+                    # Register cleanup callbacks for memory-heavy modules
+                    if getattr(self, 'threat_engine', None):
+                        self.memory_guard.register_cleanup(
+                            "threat_engine",
+                            lambda: self.threat_engine._cleanup_stale_contexts()
+                        )
+                    if getattr(self, 'alert_pipeline', None):
+                        self.memory_guard.register_cleanup(
+                            "alert_pipeline",
+                            lambda: self.alert_pipeline._cleanup_dedup()
+                        )
+                    if getattr(self, 'fp_tuner', None):
+                        self.memory_guard.register_cleanup(
+                            "fp_tuner",
+                            lambda: self.fp_tuner.cleanup_stale(1800)
+                        )
+                    self.memory_guard.start()
+            except Exception as e:
+                log(f"⚠️ MemoryGuard start failed: {e}")
 
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
@@ -814,11 +840,12 @@ class CloudHoneypotClient:
             ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
             
             if status_override is None: status_override = self.get_intelligent_status()
-            self.api_client.send_heartbeat(
+            ok = self.api_client.send_heartbeat(
                 token, ip, SERVER_NAME,
                 self.state.get("running", False), status_override,
                 system_context=self._build_system_context()
             )
+            self._last_heartbeat_ok = ok
 
     def heartbeat_loop(self):
         """Optimized heartbeat loop with IP caching"""
@@ -1714,6 +1741,9 @@ class CloudHoneypotClient:
             # Stop Faz 4 modules (v4.0)
             if getattr(self, 'perf_optimizer', None):
                 try: self.perf_optimizer.stop()
+                except Exception: pass
+            if getattr(self, 'memory_guard', None):
+                try: self.memory_guard.stop()
                 except Exception: pass
             # Stop Faz 3 modules (v4.0)
             if getattr(self, 'ransomware_shield', None):

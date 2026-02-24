@@ -5,6 +5,7 @@ Cloud Honeypot Client — Performance Optimizer & False Positive Tuning (v4.0 Fa
 
 1. PerformanceOptimizer   — adaptive throttling, resource-aware scheduling, metric collection
 2. FalsePositiveTuner     — whitelist learning, cooldown management, score decay tuning
+3. MemoryGuard            — periodic GC, self-memory monitoring, leak prevention
 
 Together they ensure the v4.0 threat detection pipeline runs efficiently on
 production servers without impacting legitimate workloads.
@@ -12,8 +13,10 @@ production servers without impacting legitimate workloads.
 Exports:
   PerformanceOptimizer  — singleton, adjusts module intervals based on system load
   FalsePositiveTuner    — learns from user feedback, applies whitelist/cooldown rules
+  MemoryGuard           — prevents memory bloat for long-running instances
 """
 
+import gc
 import threading
 import time
 from collections import defaultdict, deque
@@ -417,3 +420,162 @@ class FalsePositiveTuner:
             stale = [k for k, v in self._cooldowns.items() if v.last_alert_ts < cutoff]
             for k in stale:
                 del self._cooldowns[k]
+            # Also cleanup IP tracking for IPs not seen recently
+            stale_ips = [
+                ip for ip, count in self._ip_event_counts.items()
+                if self._ip_max_scores.get(ip, 0) > FP_SCORE_ADJUSTMENTS.get("rdp_session_reconnect", 0.5)
+                and count < AUTO_WHITELIST_MIN_EVENTS
+            ]
+            # Limit tracked IPs to 5000
+            if len(self._ip_event_counts) > 5000:
+                # Keep only the most active IPs
+                sorted_ips = sorted(
+                    self._ip_event_counts.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                keep = {ip for ip, _ in sorted_ips[:3000]}
+                remove = set(self._ip_event_counts.keys()) - keep - self._auto_whitelist
+                for ip in remove:
+                    del self._ip_event_counts[ip]
+                    self._ip_max_scores.pop(ip, None)
+                log(f"🔰 FP tuner: pruned {len(remove)} tracked IPs (was >5000)")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MEMORY GUARD — Long-running instance memory management
+# ═══════════════════════════════════════════════════════════════════
+
+# Memory thresholds
+MEMORY_WARNING_MB = 500         # Log warning above 500 MB
+MEMORY_HIGH_MB = 1024           # Aggressive GC above 1 GB
+MEMORY_CRITICAL_MB = 2048       # Force cleanup above 2 GB
+MEMORY_CHECK_INTERVAL = 300     # Check every 5 minutes
+
+
+class MemoryGuard:
+    """
+    Prevents memory bloat for long-running honeypot client instances.
+
+    Features:
+      - Periodic garbage collection
+      - Self-memory monitoring with logging
+      - Triggers cleanup callbacks when memory exceeds thresholds
+      - Reports memory stats for dashboard
+
+    Usage:
+        guard = MemoryGuard()
+        guard.register_cleanup("threat_engine", threat_engine_cleanup_func)
+        guard.start()
+    """
+
+    def __init__(self):
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._cleanup_callbacks: Dict[str, Callable] = {}
+        self._stats = {
+            "gc_runs": 0,
+            "forced_cleanups": 0,
+            "peak_memory_mb": 0,
+            "current_memory_mb": 0,
+            "last_gc_collected": 0,
+        }
+
+    def start(self):
+        """Start memory monitoring loop."""
+        if self._running:
+            return
+        self._running = True
+        # Enable automatic GC but with reduced frequency
+        gc.enable()
+        gc.set_threshold(700, 10, 5)  # Less aggressive for performance
+        self._thread = threading.Thread(
+            target=self._monitor_loop,
+            name="MemoryGuard",
+            daemon=True,
+        )
+        self._thread.start()
+        log("🧠 MemoryGuard started (long-running instance protection)")
+
+    def stop(self):
+        self._running = False
+
+    def register_cleanup(self, name: str, callback: Callable):
+        """Register a cleanup callback that will be called when memory is high.
+
+        callback() should release caches, trim data structures, etc.
+        """
+        self._cleanup_callbacks[name] = callback
+
+    def get_stats(self) -> dict:
+        return dict(self._stats)
+
+    def get_memory_mb(self) -> float:
+        """Get current process memory usage in MB."""
+        try:
+            if PSUTIL_AVAILABLE:
+                import psutil
+                return psutil.Process().memory_info().rss / 1024 / 1024
+        except Exception:
+            pass
+        return 0.0
+
+    def _monitor_loop(self):
+        """Periodic memory check and GC."""
+        while self._running:
+            try:
+                mem_mb = self.get_memory_mb()
+                self._stats["current_memory_mb"] = round(mem_mb, 1)
+                self._stats["peak_memory_mb"] = max(
+                    self._stats["peak_memory_mb"], round(mem_mb, 1)
+                )
+
+                if mem_mb >= MEMORY_CRITICAL_MB:
+                    log(f"🧠 [MEMORY] ⚠️ CRITICAL: {mem_mb:.0f} MB — "
+                        f"forcing aggressive cleanup + GC")
+                    self._force_cleanup()
+                    collected = gc.collect(2)  # Full collection
+                    self._stats["gc_runs"] += 1
+                    self._stats["last_gc_collected"] = collected
+                    self._stats["forced_cleanups"] += 1
+
+                    new_mem = self.get_memory_mb()
+                    log(f"🧠 [MEMORY] After cleanup: {new_mem:.0f} MB "
+                        f"(freed ~{mem_mb - new_mem:.0f} MB, "
+                        f"GC collected {collected} objects)")
+
+                elif mem_mb >= MEMORY_HIGH_MB:
+                    log(f"🧠 [MEMORY] HIGH: {mem_mb:.0f} MB — running GC")
+                    collected = gc.collect(1)
+                    self._stats["gc_runs"] += 1
+                    self._stats["last_gc_collected"] = collected
+                    self._force_cleanup()
+
+                elif mem_mb >= MEMORY_WARNING_MB:
+                    log(f"🧠 [MEMORY] Warning: {mem_mb:.0f} MB — "
+                        f"monitoring (threshold: {MEMORY_HIGH_MB} MB)")
+                    # Gentle GC
+                    collected = gc.collect(0)
+                    self._stats["gc_runs"] += 1
+                    self._stats["last_gc_collected"] = collected
+
+                else:
+                    # Normal operation — periodic gentle GC
+                    collected = gc.collect(0)
+                    if collected > 0:
+                        self._stats["gc_runs"] += 1
+                        self._stats["last_gc_collected"] = collected
+
+            except Exception as e:
+                log(f"🧠 [MEMORY] Monitor error: {e}")
+
+            time.sleep(MEMORY_CHECK_INTERVAL)
+
+    def _force_cleanup(self):
+        """Call all registered cleanup callbacks."""
+        for name, cb in self._cleanup_callbacks.items():
+            try:
+                cb()
+                log(f"🧠 [MEMORY] Cleanup '{name}' completed")
+            except Exception as e:
+                log(f"🧠 [MEMORY] Cleanup '{name}' error: {e}")

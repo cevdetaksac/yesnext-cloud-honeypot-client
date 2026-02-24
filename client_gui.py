@@ -374,29 +374,33 @@ class ModernGUI:
 
         # ── Kartları oluştur (Tab 1 — Anlık Durum) ── #
         cards_data = [
-            # (key, emoji, label_key, value, color, row, col)
-            ("total_attacks",   "🎯", "dash_total_attacks",   str(total_attacks),   COLORS["red"],    0, 0),
-            ("session_attacks", "⚡", "dash_session_attacks",  str(session_attacks), COLORS["orange"], 0, 1),
-            ("active_services", "🟢", "dash_active_services",  f"{active_count}/5",  COLORS["green"],  0, 2),
-            ("uptime",          "⏱️", "dash_uptime",           "0dk",                COLORS["blue"],   1, 0),
-            ("last_attack",     "🕵️", "dash_last_attack",      self.t("dash_no_attack"), COLORS["text_dim"], 1, 1),
-            ("connection",      "🌐", "dash_connection",       self.t("dash_connected"), COLORS["green"], 1, 2),
+            # (key, emoji, label_key, value, color, row, col, click_handler)
+            ("total_attacks",   "🎯", "dash_total_attacks",   str(total_attacks),   COLORS["red"],    0, 0, "_detail_total_attacks"),
+            ("session_attacks", "⚡", "dash_session_attacks",  str(session_attacks), COLORS["orange"], 0, 1, "_detail_session_attacks"),
+            ("active_services", "🟢", "dash_active_services",  f"{active_count}/5",  COLORS["green"],  0, 2, "_detail_active_services"),
+            ("uptime",          "⏱️", "dash_uptime",           "0dk",                COLORS["blue"],   1, 0, None),
+            ("last_attack",     "🕵️", "dash_last_attack",      self.t("dash_no_attack"), COLORS["text_dim"], 1, 1, "_detail_last_attack"),
+            ("connection",      "🌐", "dash_connection",       self.t("dash_connected"), COLORS["green"], 1, 2, "_detail_api_health"),
         ]
 
-        for key, emoji, label_key, value, color, row, col in cards_data:
-            card = self._create_stat_card(grid, emoji, self.t(label_key), value, color)
+        for key, emoji, label_key, value, color, row, col, handler_name in cards_data:
+            handler = getattr(self, handler_name, None) if handler_name else None
+            card = self._create_stat_card(grid, emoji, self.t(label_key), value, color,
+                                          on_click=handler)
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
         # ── Faz 3 Durum Kartları — Satır 3 ── #
         faz3_cards_data = [
-            ("ransomware",      "🧬", self.t("card_ransomware"),    "SAFE",  COLORS["green"],    2, 0),
-            ("cpu_usage",       "💻", self.t("card_cpu_ram"),     "—",     COLORS["text_dim"], 2, 1),
-            ("self_protect",    "🔒", self.t("card_protection"),    "ACTIVE", COLORS["green"],   2, 2),
+            ("ransomware",      "🧬", self.t("card_ransomware"),    "SAFE",  COLORS["green"],    2, 0, "_detail_ransomware"),
+            ("cpu_usage",       "💻", self.t("card_cpu_ram"),     "—",     COLORS["text_dim"], 2, 1, "_detail_cpu_ram"),
+            ("self_protect",    "🔒", self.t("card_protection"),    "ACTIVE", COLORS["green"],   2, 2, "_detail_self_protect"),
         ]
 
-        for key, emoji, label, value, color, row, col in faz3_cards_data:
-            card = self._create_stat_card(grid, emoji, label, value, color)
+        for key, emoji, label, value, color, row, col, handler_name in faz3_cards_data:
+            handler = getattr(self, handler_name, None) if handler_name else None
+            card = self._create_stat_card(grid, emoji, label, value, color,
+                                          on_click=handler)
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
@@ -424,13 +428,15 @@ class ModernGUI:
             threat_grid.columnconfigure(c, weight=1)
 
         threat_cards_data = [
-            ("threat_level",    "🛡️", self.t("card_threat_level"),  "SAFE", COLORS["green"],    0, 0),
-            ("events_per_hour", "📊", self.t("card_events_per_hour"),   "0",    COLORS["text_dim"], 0, 1),
-            ("blocked_ips",     "🚫", self.t("card_tracked_ips"),   "0",    COLORS["text_dim"], 0, 2),
+            ("threat_level",    "🛡️", self.t("card_threat_level"),  "SAFE", COLORS["green"],    0, 0, "_detail_threat_level"),
+            ("events_per_hour", "📊", self.t("card_events_per_hour"),   "0",    COLORS["text_dim"], 0, 1, "_detail_events_per_hour"),
+            ("blocked_ips",     "🚫", self.t("card_tracked_ips"),   "0",    COLORS["text_dim"], 0, 2, "_detail_blocked_ips"),
         ]
 
-        for key, emoji, label, value, color, row, col in threat_cards_data:
-            card = self._create_stat_card(threat_grid, emoji, label, value, color)
+        for key, emoji, label, value, color, row, col, handler_name in threat_cards_data:
+            handler = getattr(self, handler_name, None) if handler_name else None
+            card = self._create_stat_card(threat_grid, emoji, label, value, color,
+                                          on_click=handler)
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
@@ -1961,15 +1967,28 @@ class ModernGUI:
                         self.t("toast_ip_removed_whitelist").format(ip=ip), "info")
         self._refresh_ip_table()
 
-    def _create_stat_card(self, parent, emoji: str, label: str, value: str, color: str) -> ctk.CTkFrame:
-        """Tek bir istatistik kartı oluşturur. {'frame', 'value_lbl'} referansları döner."""
+    def _create_stat_card(self, parent, emoji: str, label: str, value: str,
+                         color: str, on_click=None) -> ctk.CTkFrame:
+        """Tek bir istatistik kartı oluşturur. Opsiyonel on_click ile tıklanabilir."""
         card = ctk.CTkFrame(parent, fg_color=COLORS["bg"], corner_radius=10,
                             border_width=1, border_color=COLORS["border"])
 
+        # Tıklanabilirlik — cursor + hover efekti
+        if on_click:
+            card.configure(cursor="hand2")
+
+            def _on_enter(e):
+                card.configure(border_color=COLORS["blue"])
+            def _on_leave(e):
+                card.configure(border_color=COLORS["border"])
+            card.bind("<Enter>", _on_enter)
+            card.bind("<Leave>", _on_leave)
+
         # Emoji
-        ctk.CTkLabel(
+        emoji_lbl = ctk.CTkLabel(
             card, text=emoji, font=ctk.CTkFont(size=20),
-        ).pack(anchor="w", padx=12, pady=(10, 0))
+        )
+        emoji_lbl.pack(anchor="w", padx=12, pady=(10, 0))
 
         # Değer (büyük rakam)
         value_lbl = ctk.CTkLabel(
@@ -1985,12 +2004,794 @@ class ModernGUI:
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_dim"],
         )
-        label_lbl.pack(anchor="w", padx=12, pady=(0, 10))
+        label_lbl.pack(anchor="w", padx=12, pady=(0, 2))
+
+        # Tıkla göstergesi
+        if on_click:
+            hint_lbl = ctk.CTkLabel(
+                card, text="🔍 " + self.t("card_click_detail"),
+                font=ctk.CTkFont(size=9),
+                text_color=COLORS["text_dim"],
+            )
+            hint_lbl.pack(anchor="w", padx=12, pady=(0, 6))
+            # Click bind — card ve tüm child widget'lara
+            for widget in [card, emoji_lbl, value_lbl, label_lbl, hint_lbl]:
+                widget.bind("<Button-1>", lambda e, cb=on_click: cb())
+        else:
+            # Alt padding
+            ctk.CTkFrame(card, height=8, fg_color="transparent").pack()
 
         # value_lbl ve label_lbl referansları card objesine ekleniyor
         card._value_lbl = value_lbl  # type: ignore[attr-defined]
         card._label_lbl = label_lbl  # type: ignore[attr-defined]
         return card
+
+    # ═══════════════════════════════════════════════════════════════
+    #  DETAIL POPUP SİSTEMİ — Tıklanabilir Kart Detayları
+    # ═══════════════════════════════════════════════════════════════
+
+    def _show_detail_window(self, title: str, width: int = 620, height: int = 480) -> ctk.CTkToplevel:
+        """Reusable detail popup penceresi oluşturur. İçerik eklenmek üzere döner."""
+        popup = ctk.CTkToplevel(self.root)
+        popup.title(title)
+        popup.geometry(f"{width}x{height}")
+        popup.configure(fg_color=COLORS["bg"])
+        popup.transient(self.root)
+        popup.attributes("-topmost", True)
+        popup.grab_set()
+
+        # Başlık bandı
+        hdr = ctk.CTkFrame(popup, fg_color=COLORS["accent"], corner_radius=0, height=40)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(
+            hdr, text=f"  {title}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left", padx=8)
+        ctk.CTkButton(
+            hdr, text="✕", width=32, height=28,
+            font=ctk.CTkFont(size=13), fg_color="transparent",
+            hover_color=COLORS["red"], text_color=COLORS["text_bright"],
+            command=popup.destroy,
+        ).pack(side="right", padx=4)
+
+        # Scrollable içerik alanı
+        content = ctk.CTkScrollableFrame(popup, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=8, pady=8)
+        popup._content = content  # type: ignore[attr-defined]
+        return popup
+
+    def _add_detail_table(self, parent, headers: list, rows: list,
+                          col_widths: list = None, row_actions: list = None):
+        """Detail popup'a tablo ekler. row_actions = [(text, color, callback), ...] per row."""
+        if not col_widths:
+            col_widths = [max(60, 500 // len(headers))] * len(headers)
+
+        # Başlık satırı
+        hdr_frame = ctk.CTkFrame(parent, fg_color=COLORS["accent"], corner_radius=6)
+        hdr_frame.pack(fill="x", pady=(0, 4))
+        for i, text in enumerate(headers):
+            w = col_widths[i] if i < len(col_widths) else 100
+            ctk.CTkLabel(
+                hdr_frame, text=text, width=w, anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(side="left", padx=4, pady=4)
+
+        # Veri satırları
+        for idx, row_data in enumerate(rows):
+            bg = COLORS["card"] if idx % 2 == 0 else COLORS["bg"]
+            row_frame = ctk.CTkFrame(parent, fg_color=bg, corner_radius=4)
+            row_frame.pack(fill="x", pady=1)
+            for i, cell in enumerate(row_data):
+                w = col_widths[i] if i < len(col_widths) else 100
+                color = COLORS["text"]
+                # Renkli hücreler — özel prefix ile
+                if isinstance(cell, tuple):
+                    cell, color = cell
+                ctk.CTkLabel(
+                    row_frame, text=str(cell), width=w, anchor="w",
+                    font=ctk.CTkFont(size=11),
+                    text_color=color,
+                ).pack(side="left", padx=4, pady=3)
+
+            # Aksiyon butonları
+            if row_actions and idx < len(row_actions):
+                for btn_text, btn_color, btn_cmd in (row_actions[idx] or []):
+                    ctk.CTkButton(
+                        row_frame, text=btn_text, width=70, height=22,
+                        font=ctk.CTkFont(size=9),
+                        fg_color=btn_color, hover_color=btn_color,
+                        text_color=COLORS["text_bright"], corner_radius=3,
+                        command=btn_cmd,
+                    ).pack(side="right", padx=2, pady=2)
+
+    # ── Detail: Toplam Saldırılar ── #
+    def _detail_total_attacks(self):
+        """Toplam saldırı detay popup — threat engine'den en aktif IP'ler."""
+        popup = self._show_detail_window(f"🎯 {self.t('dash_total_attacks')}")
+        content = popup._content
+
+        total = getattr(self.app, '_last_attack_count', 0) or 0
+        ctk.CTkLabel(
+            content, text=f"{self.t('dash_total_attacks')}: {total}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["red"],
+        ).pack(anchor="w", padx=4, pady=(0, 8))
+
+        # Top saldırgan IP'leri 
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not threat_engine:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        contexts = threat_engine.get_all_contexts()
+        top_ips = sorted(
+            [(ip, ctx) for ip, ctx in contexts.items()
+             if ip not in ("local", "", "127.0.0.1", "::1") and ctx.failed_attempts > 0],
+            key=lambda x: x[1].failed_attempts, reverse=True,
+        )[:25]
+
+        if not top_ips:
+            ctk.CTkLabel(content, text=self.t("detail_no_attacks"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        from datetime import datetime
+        headers = ["IP", self.t("ip_col_service"), self.t("ip_col_attempts"),
+                    self.t("detail_score"), self.t("ip_col_last_time")]
+        rows = []
+        actions = []
+        for ip, ctx in top_ips:
+            services = "/".join(list(ctx.services_targeted)[:2]) if ctx.services_targeted else "—"
+            try:
+                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M:%S")
+            except Exception:
+                ts = "—"
+            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
+                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
+            rows.append([ip, services, str(ctx.failed_attempts),
+                         (str(ctx.threat_score), score_color), ts])
+            # Engelle butonu
+            _ip = ip
+            actions.append([
+                (self.t("ip_btn_block"), COLORS["red"],
+                 lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
+            ])
+
+        self._add_detail_table(content, headers, rows,
+                               col_widths=[130, 70, 65, 55, 110], row_actions=actions)
+
+    # ── Detail: Oturum Saldırıları ── #
+    def _detail_session_attacks(self):
+        """Oturumdaki saldırı detayları — servis bazlı credential yakalama istatistikleri."""
+        popup = self._show_detail_window(f"⚡ {self.t('dash_session_attacks')}")
+        content = popup._content
+
+        sm = self.app.service_manager
+        sess = sm.session_stats
+
+        total = sess.get("total_credentials", 0)
+        ctk.CTkLabel(
+            content, text=f"{self.t('dash_session_attacks')}: {total}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["orange"],
+        ).pack(anchor="w", padx=4, pady=(0, 8))
+
+        # Servis bazlı istatistikler
+        svc_stats = sess.get("per_service", {})
+        if svc_stats:
+            headers = [self.t("ip_col_service"), self.t("ip_col_attempts"),
+                       self.t("detail_last_user"), self.t("ip_col_last_time")]
+            rows = []
+            for svc, data in svc_stats.items():
+                count = data if isinstance(data, int) else data.get("count", 0)
+                last_user = data.get("last_user", "—") if isinstance(data, dict) else "—"
+                last_time = data.get("last_time", "—") if isinstance(data, dict) else "—"
+                rows.append([svc.upper(), str(count), last_user, str(last_time)])
+            self._add_detail_table(content, headers, rows,
+                                   col_widths=[100, 80, 140, 130])
+
+        # Son saldırılar listesi — threat feed'den son 20
+        last_ip = sess.get("last_attacker_ip", "")
+        last_svc = sess.get("last_service", "")
+        if last_ip:
+            ctk.CTkLabel(
+                content,
+                text=f"\n{self.t('detail_last_attacker')}: {last_ip} ({last_svc})",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=COLORS["red"],
+            ).pack(anchor="w", padx=4, pady=(8, 4))
+
+    # ── Detail: Aktif Servisler ── #
+    def _detail_active_services(self):
+        """Aktif honeypot servislerinin detayı."""
+        popup = self._show_detail_window(f"🟢 {self.t('dash_active_services')}", height=350)
+        content = popup._content
+
+        sm = self.app.service_manager
+        running = sm.running_services
+        total = len(self.app.PORT_TABLOSU)
+
+        ctk.CTkLabel(
+            content,
+            text=f"{self.t('dash_active_services')}: {len(running)}/{total}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["green"],
+        ).pack(anchor="w", padx=4, pady=(0, 8))
+
+        headers = [self.t("ip_col_service"), "Port", self.t("detail_status")]
+        rows = []
+        for port, svc in self.app.PORT_TABLOSU:
+            is_active = svc.upper() in [s.upper() for s in running]
+            status_text = self.t("status_running") if is_active else self.t("status_stopped")
+            status_color = COLORS["green"] if is_active else COLORS["red"]
+            rows.append([svc.upper(), str(port), (status_text, status_color)])
+        self._add_detail_table(content, headers, rows, col_widths=[150, 80, 120])
+
+    # ── Detail: Son Saldırı ── #
+    def _detail_last_attack(self):
+        """Son saldırı detayı — en son saldıranın tam profili."""
+        popup = self._show_detail_window(f"🕵️ {self.t('dash_last_attack')}", height=400)
+        content = popup._content
+
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not threat_engine:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        latest = threat_engine.get_last_attacker()
+        if not latest:
+            ctk.CTkLabel(content, text=self.t("dash_no_attack"),
+                         font=ctk.CTkFont(size=14),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        from datetime import datetime
+        ip = latest.get("ip", "—")
+        score = latest.get("threat_score", 0)
+        fails = latest.get("failed_attempts", 0)
+        logins = latest.get("successful_logins", 0)
+        services = ", ".join(latest.get("services", []))
+        try:
+            ts = datetime.fromtimestamp(latest["last_seen"]).strftime("%d.%m.%Y %H:%M:%S")
+        except Exception:
+            ts = "—"
+
+        info_lines = [
+            (f"IP: {ip}", COLORS["red"]),
+            (f"Threat Score: {score}", COLORS["orange"] if score >= 40 else COLORS["text"]),
+            (f"{self.t('ip_col_attempts')}: {fails}", COLORS["text"]),
+            (f"Successful Logins: {logins}", COLORS["red"] if logins > 0 else COLORS["text"]),
+            (f"{self.t('ip_col_service')}: {services}", COLORS["text"]),
+            (f"{self.t('ip_col_last_time')}: {ts}", COLORS["text_dim"]),
+        ]
+        for text, color in info_lines:
+            ctk.CTkLabel(
+                content, text=text, font=ctk.CTkFont(size=13),
+                text_color=color,
+            ).pack(anchor="w", padx=8, pady=2)
+
+        # Aksiyon butonları
+        btn_frame = ctk.CTkFrame(content, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=8, pady=(12, 4))
+        ctk.CTkButton(
+            btn_frame, text=f"🚫 {self.t('ip_btn_block')} {ip}",
+            width=160, height=32, font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+            command=lambda: (self._ip_table_block(ip), popup.destroy()),
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btn_frame, text=f"✅ {self.t('ip_btn_whitelist')} {ip}",
+            width=160, height=32, font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+            command=lambda: (self._ip_table_whitelist(ip), popup.destroy()),
+        ).pack(side="left", padx=4)
+
+    # ── Detail: API Sağlık Durumu ── #
+    def _detail_api_health(self):
+        """API bağlantı sağlık detayları."""
+        popup = self._show_detail_window(f"🌐 {self.t('detail_api_health')}", height=400)
+        content = popup._content
+
+        api_ok = getattr(self.app, '_last_api_ok', False)
+        status_text = self.t("dash_connected") if api_ok else self.t("dash_disconnected")
+        status_color = COLORS["green"] if api_ok else COLORS["red"]
+
+        ctk.CTkLabel(
+            content,
+            text=f"API: {status_text}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=status_color,
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        # API istatistikleri — client_api istatistikleri
+        api_client = getattr(self.app, 'api_client', None)
+        base_url = api_client.base_url if api_client else "—"
+
+        info_items = [
+            (f"Base URL: {base_url}", COLORS["text"]),
+            (f"Token: {self.app.state.get('token', '—')[:20]}...", COLORS["text_dim"]),
+        ]
+
+        # Heartbeat durumu
+        hb_ok = getattr(self.app, '_last_heartbeat_ok', None)
+        if hb_ok is not None:
+            hb_text = "✅ OK" if hb_ok else "❌ FAIL"
+            hb_color = COLORS["green"] if hb_ok else COLORS["red"]
+            info_items.append((f"Heartbeat: {hb_text}", hb_color))
+
+        # Alert pipeline istatistikleri
+        alert_pipeline = getattr(self.app, 'alert_pipeline', None)
+        if alert_pipeline:
+            try:
+                al_stats = alert_pipeline.get_stats()
+                sent = al_stats.get("total_sent", 0)
+                failed = al_stats.get("total_failed", 0)
+                dedup = al_stats.get("dedup_table_size", 0)
+                info_items.append((f"Alerts Sent: {sent}", COLORS["green"] if sent > 0 else COLORS["text_dim"]))
+                info_items.append((f"Alerts Failed: {failed}", COLORS["red"] if failed > 0 else COLORS["text_dim"]))
+                info_items.append((f"Dedup Table: {dedup}", COLORS["text_dim"]))
+            except Exception:
+                pass
+
+        # MemoryGuard
+        mem_guard = getattr(self.app, 'memory_guard', None)
+        if mem_guard:
+            try:
+                import psutil
+                proc = psutil.Process()
+                mem_mb = proc.memory_info().rss / (1024 * 1024)
+                info_items.append((f"Client RAM: {mem_mb:.0f} MB", 
+                                   COLORS["red"] if mem_mb > 500 else COLORS["text"]))
+            except Exception:
+                pass
+
+        for text, color in info_items:
+            ctk.CTkLabel(
+                content, text=text, font=ctk.CTkFont(size=12),
+                text_color=color,
+            ).pack(anchor="w", padx=8, pady=2)
+
+        # Bağlantı testi butonu
+        def _test_api():
+            def _do():
+                try:
+                    ok = api_client.check_connection(max_attempts=1, delay=0) if api_client else False
+                    def _show():
+                        if ok:
+                            self.show_toast("API", self.t("detail_api_ok"), "info")
+                        else:
+                            self.show_toast("API", self.t("detail_api_fail"), "warning")
+                    self._gui_safe(_show)
+                except Exception:
+                    pass
+            threading.Thread(target=_do, daemon=True).start()
+
+        ctk.CTkButton(
+            content, text=f"🔄 {self.t('detail_test_connection')}",
+            width=200, height=32, font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLORS["blue"], hover_color=COLORS["blue_hover"],
+            command=_test_api,
+        ).pack(anchor="w", padx=8, pady=(12, 4))
+
+    # ── Detail: Ransomware Shield ── #
+    def _detail_ransomware(self):
+        """Ransomware shield detayları — tespit edilen olaylar + aksiyon butonları."""
+        popup = self._show_detail_window(f"🧬 {self.t('card_ransomware')}", height=520)
+        content = popup._content
+
+        rs = getattr(self.app, 'ransomware_shield', None)
+        if not rs:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        stats = rs.get_stats()
+        running = stats.get("running", False)
+        canary_alerts = stats.get("canary_alerts", 0)
+        fs_alerts = stats.get("fs_alerts", 0)
+        process_alerts = stats.get("process_alerts", 0)
+        vss_alerts = stats.get("vss_alerts", 0)
+        total_alerts = stats.get("alerts_total", 0)
+        canary_files = stats.get("canary_files", 0)
+
+        status_text = "🟢 ACTIVE" if running else "🔴 OFF"
+        status_color = COLORS["green"] if running else COLORS["red"]
+
+        ctk.CTkLabel(
+            content, text=f"Ransomware Shield: {status_text}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=status_color,
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+
+        # Özet istatistikler
+        summary_items = [
+            (f"📁 Canary Files: {canary_files}", COLORS["text"]),
+            (f"🚨 {self.t('detail_rs_canary')}: {canary_alerts}",
+             COLORS["red"] if canary_alerts > 0 else COLORS["text_dim"]),
+            (f"📂 {self.t('detail_rs_filesystem')}: {fs_alerts}",
+             COLORS["red"] if fs_alerts > 0 else COLORS["text_dim"]),
+            (f"⚙️ {self.t('detail_rs_process')}: {process_alerts}",
+             COLORS["red"] if process_alerts > 0 else COLORS["text_dim"]),
+            (f"💾 {self.t('detail_rs_vss')}: {vss_alerts}",
+             COLORS["red"] if vss_alerts > 0 else COLORS["text_dim"]),
+            (f"📊 {self.t('detail_rs_total')}: {total_alerts}",
+             COLORS["orange"] if total_alerts > 0 else COLORS["text_dim"]),
+        ]
+        for text, color in summary_items:
+            ctk.CTkLabel(content, text=text, font=ctk.CTkFont(size=12),
+                         text_color=color).pack(anchor="w", padx=8, pady=1)
+
+        # Tespit edilen olaylar — detay tablosu
+        detections = rs.get_detections()
+        if detections:
+            ctk.CTkLabel(
+                content,
+                text=f"\n🔍 {self.t('detail_rs_detections')} ({len(detections)}):",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=COLORS["orange"],
+            ).pack(anchor="w", padx=8, pady=(8, 4))
+
+            for det in detections[-20:]:  # Son 20 tespit
+                det_type = det.get("type", "unknown")
+                ts = det.get("timestamp", "—")
+                score = det.get("threat_score", 0)
+                score_color = COLORS["red"] if score >= 80 else (
+                    COLORS["orange"] if score >= 50 else COLORS["text_dim"])
+
+                det_frame = ctk.CTkFrame(content, fg_color=COLORS["card"], corner_radius=6)
+                det_frame.pack(fill="x", padx=8, pady=2)
+
+                if det_type == "canary_triggered":
+                    file_path = det.get("file", "—")
+                    change = det.get("change", "—")
+                    text = f"🚨 CANARY: {os.path.basename(file_path)} — {change}"
+                elif det_type == "suspicious_process":
+                    pname = det.get("process", "—")
+                    pid = det.get("pid", 0)
+                    reason = det.get("reason", "—")
+                    text = f"⚙️ PROCESS: {pname} (PID {pid}) — {reason}"
+                elif det_type == "vss_deletion":
+                    text = f"💾 VSS: {det.get('details', 'Shadow copy deletion detected')}"
+                else:
+                    text = f"📂 {det_type}: {det.get('details', str(det))}"
+
+                ctk.CTkLabel(
+                    det_frame, text=text, font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text"], wraplength=550,
+                ).pack(side="left", anchor="w", padx=8, pady=4, fill="x", expand=True)
+
+                ctk.CTkLabel(
+                    det_frame, text=f"Score: {score}",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=score_color, width=65,
+                ).pack(side="right", padx=4)
+
+                # Süreç durdurma butonu (process tespitleri için)
+                if det_type == "suspicious_process" and det.get("pid"):
+                    pid = det["pid"]
+                    pname = det.get("process", "")
+                    ctk.CTkButton(
+                        det_frame, text=self.t("detail_kill_process"),
+                        width=70, height=20, font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+                        command=lambda p=pid, n=pname: self._kill_process(p, n),
+                    ).pack(side="right", padx=2)
+        else:
+            ctk.CTkLabel(
+                content,
+                text=f"\n✅ {self.t('detail_rs_no_detections')}",
+                font=ctk.CTkFont(size=13),
+                text_color=COLORS["green"],
+            ).pack(anchor="w", padx=8, pady=(8, 4))
+
+    # ── Detail: CPU / RAM ── #
+    def _detail_cpu_ram(self):
+        """CPU ve RAM kullanım detayları + en çok kaynak kullanan süreçler."""
+        popup = self._show_detail_window(f"💻 {self.t('card_cpu_ram')}", height=480)
+        content = popup._content
+
+        import psutil
+
+        cpu = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("C:\\")
+
+        ctk.CTkLabel(
+            content,
+            text=f"CPU: {cpu:.1f}%  |  RAM: {mem.percent:.1f}%  |  Disk: {disk.percent:.1f}%",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["orange"] if cpu > 70 or mem.percent > 80 else COLORS["green"],
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+
+        info = [
+            (f"RAM: {mem.used / (1024**3):.1f} GB / {mem.total / (1024**3):.1f} GB", COLORS["text"]),
+            (f"Disk: {disk.used / (1024**3):.0f} GB / {disk.total / (1024**3):.0f} GB", COLORS["text"]),
+            (f"CPU Cores: {psutil.cpu_count(logical=True)}", COLORS["text_dim"]),
+        ]
+        for text, color in info:
+            ctk.CTkLabel(content, text=text, font=ctk.CTkFont(size=12),
+                         text_color=color).pack(anchor="w", padx=8, pady=1)
+
+        # Client process memory
+        proc = psutil.Process()
+        client_mem = proc.memory_info().rss / (1024 * 1024)
+        client_color = COLORS["red"] if client_mem > 500 else (
+            COLORS["orange"] if client_mem > 200 else COLORS["green"])
+        ctk.CTkLabel(
+            content,
+            text=f"Honeypot Client RAM: {client_mem:.0f} MB",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=client_color,
+        ).pack(anchor="w", padx=8, pady=(4, 8))
+
+        # Top süreçler
+        ctk.CTkLabel(
+            content,
+            text=f"🔝 {self.t('detail_top_processes')}:",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=8, pady=(4, 4))
+
+        processes = []
+        for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+            try:
+                pinfo = p.info
+                mem_mb = pinfo['memory_info'].rss / (1024 * 1024) if pinfo.get('memory_info') else 0
+                processes.append({
+                    'pid': pinfo['pid'],
+                    'name': pinfo['name'] or '—',
+                    'cpu': pinfo.get('cpu_percent', 0) or 0,
+                    'mem_mb': mem_mb,
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        # RAM'e göre sırala
+        top_procs = sorted(processes, key=lambda p: p['mem_mb'], reverse=True)[:15]
+
+        headers = ["PID", self.t("detail_process_name"), "CPU %", "RAM (MB)"]
+        rows = []
+        actions = []
+        for p in top_procs:
+            cpu_color = COLORS["red"] if p['cpu'] > 50 else COLORS["text"]
+            mem_color = COLORS["orange"] if p['mem_mb'] > 200 else COLORS["text"]
+            rows.append([
+                str(p['pid']), p['name'],
+                (f"{p['cpu']:.1f}", cpu_color),
+                (f"{p['mem_mb']:.0f}", mem_color),
+            ])
+            actions.append([
+                (self.t("detail_kill_process"), COLORS["red"],
+                 lambda pid=p['pid'], name=p['name']: self._kill_process(pid, name)),
+            ])
+
+        self._add_detail_table(content, headers, rows,
+                               col_widths=[60, 200, 65, 80], row_actions=actions)
+
+    # ── Detail: Self-Protection ── #
+    def _detail_self_protect(self):
+        """Self-protection durumu detayları."""
+        popup = self._show_detail_window(f"🔒 {self.t('card_protection')}", height=300)
+        content = popup._content
+
+        pp = getattr(self.app, 'process_protection', None)
+        if pp:
+            ctk.CTkLabel(content, text=f"🔒 {self.t('card_protection')}: ACTIVE",
+                         font=ctk.CTkFont(size=16, weight="bold"),
+                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=(0, 4))
+            ctk.CTkLabel(content, text=self.t("detail_sp_desc"),
+                         font=ctk.CTkFont(size=12),
+                         text_color=COLORS["text"]).pack(anchor="w", padx=8, pady=2)
+        else:
+            ctk.CTkLabel(content, text=f"🔒 {self.t('card_protection')}: OFF",
+                         font=ctk.CTkFont(size=16, weight="bold"),
+                         text_color=COLORS["red"]).pack(anchor="w", padx=8, pady=(0, 4))
+
+        # MemoryGuard durumu
+        mg = getattr(self.app, 'memory_guard', None)
+        if mg:
+            ctk.CTkLabel(content, text=f"\n🧠 MemoryGuard: ACTIVE",
+                         font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=(4, 2))
+            try:
+                import psutil
+                client_mem = psutil.Process().memory_info().rss / (1024 * 1024)
+                ctk.CTkLabel(content, text=f"Current: {client_mem:.0f} MB",
+                             font=ctk.CTkFont(size=12),
+                             text_color=COLORS["text"]).pack(anchor="w", padx=8, pady=1)
+            except Exception:
+                pass
+
+    # ── Detail: Threat Level ── #
+    def _detail_threat_level(self):
+        """Tehdit seviyesi detayı — en yüksek skorlu IP'ler."""
+        popup = self._show_detail_window(f"🛡️ {self.t('card_threat_level')}")
+        content = popup._content
+
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not threat_engine:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        level, level_color = threat_engine.get_threat_level()
+        ctk.CTkLabel(
+            content,
+            text=f"{self.t('card_threat_level')}: {level}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=level_color,
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        # Son tehditler (yüksek skor)
+        recent = threat_engine.get_recent_threats(max_age_seconds=3600, min_score=20)
+        if recent:
+            from datetime import datetime
+            headers = ["IP", self.t("detail_score"), self.t("ip_col_attempts"),
+                       self.t("ip_col_service"), self.t("ip_col_last_time")]
+            rows = []
+            actions = []
+            for t in recent[:20]:
+                score_color = COLORS["red"] if t["threat_score"] >= 80 else (
+                    COLORS["orange"] if t["threat_score"] >= 40 else COLORS["text_dim"])
+                services = "/".join(t.get("services", [])[:2])
+                try:
+                    ts = datetime.fromtimestamp(t["last_seen"]).strftime("%d.%m %H:%M")
+                except Exception:
+                    ts = "—"
+                rows.append([t["ip"], (str(t["threat_score"]), score_color),
+                             str(t["failed_attempts"]), services, ts])
+                _ip = t["ip"]
+                actions.append([
+                    (self.t("ip_btn_block"), COLORS["red"],
+                     lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
+                ])
+            self._add_detail_table(content, headers, rows,
+                                   col_widths=[130, 55, 65, 80, 100], row_actions=actions)
+        else:
+            ctk.CTkLabel(content, text=f"✅ {self.t('detail_no_threats')}",
+                         font=ctk.CTkFont(size=13),
+                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=8)
+
+    # ── Detail: Olaylar/Saat ── #
+    def _detail_events_per_hour(self):
+        """Olay/saat detayı — ThreatEngine istatistikleri."""
+        popup = self._show_detail_window(f"📊 {self.t('card_events_per_hour')}", height=350)
+        content = popup._content
+
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not threat_engine:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        stats = threat_engine.get_stats()
+        events_scored = stats.get("events_scored", 0)
+        uptime_sec = int(time.time() - self._start_time) or 1
+        eph = int(events_scored / (uptime_sec / 3600)) if uptime_sec > 60 else 0
+
+        ctk.CTkLabel(
+            content,
+            text=f"{self.t('card_events_per_hour')}: {eph}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=COLORS["orange"] if eph > 100 else COLORS["text"],
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        info = [
+            (f"{self.t('detail_events_total')}: {events_scored}", COLORS["text"]),
+            (f"{self.t('detail_events_blocked')}: {stats.get('ips_blocked', 0)}", COLORS["red"]),
+            (f"Uptime: {self._format_uptime(uptime_sec)}", COLORS["text_dim"]),
+            (f"Active IPs: {stats.get('active_ips', 0)}", COLORS["text"]),
+        ]
+        for text, color in info:
+            ctk.CTkLabel(content, text=text, font=ctk.CTkFont(size=12),
+                         text_color=color).pack(anchor="w", padx=8, pady=2)
+
+    # ── Detail: Engellenen IP'ler ── #
+    def _detail_blocked_ips(self):
+        """Engellenen/takip edilen IP detayları — tam liste."""
+        popup = self._show_detail_window(f"🚫 {self.t('card_tracked_ips')}", height=520)
+        content = popup._content
+
+        threat_engine = getattr(self.app, 'threat_engine', None)
+        if not threat_engine:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+
+        contexts = threat_engine.get_all_contexts()
+        blocked = getattr(threat_engine, '_rule_blocked_ips', set())
+
+        active_ips = [(ip, ctx) for ip, ctx in contexts.items()
+                      if ip not in ("local", "", "127.0.0.1", "::1")
+                      and (ctx.threat_score > 0 or ctx.failed_attempts > 0)]
+
+        blocked_count = sum(1 for ip, ctx in active_ips if ip in blocked or ctx.is_blocked)
+        watching_count = len(active_ips) - blocked_count
+
+        ctk.CTkLabel(
+            content,
+            text=f"{self.t('detail_blocked_count')}: {blocked_count}  |  "
+                 f"{self.t('detail_watching_count')}: {watching_count}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["orange"],
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        if not active_ips:
+            ctk.CTkLabel(content, text=self.t("ip_no_activity"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=8)
+            return
+
+        from datetime import datetime
+        sorted_ips = sorted(active_ips, key=lambda x: x[1].last_seen, reverse=True)[:30]
+
+        headers = ["IP", self.t("ip_col_status"), self.t("detail_score"),
+                    self.t("ip_col_attempts"), self.t("ip_col_last_time")]
+        rows = []
+        actions = []
+        for ip, ctx in sorted_ips:
+            is_blocked = ip in blocked or ctx.is_blocked
+            status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
+                     (self.t("ip_status_watching"), COLORS["orange"])
+            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
+                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
+            try:
+                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
+            except Exception:
+                ts = "—"
+            rows.append([ip, status, (str(ctx.threat_score), score_color),
+                         str(ctx.failed_attempts), ts])
+            _ip = ip
+            if is_blocked:
+                actions.append([
+                    (self.t("ip_btn_unblock"), COLORS["orange"],
+                     lambda i=_ip: (self._ip_table_unblock(i), popup.destroy())),
+                ])
+            else:
+                actions.append([
+                    (self.t("ip_btn_block"), COLORS["red"],
+                     lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
+                ])
+
+        self._add_detail_table(content, headers, rows,
+                               col_widths=[130, 80, 55, 65, 90], row_actions=actions)
+
+    # ── Süreç Durdurma (Process Kill) ── #
+    def _kill_process(self, pid: int, name: str = ""):
+        """Belirtilen PID'li süreci durdur."""
+        import tkinter.messagebox as mbox
+        ok = mbox.askyesno(
+            self.t("detail_kill_confirm_title"),
+            self.t("detail_kill_confirm_msg").format(name=name, pid=pid),
+        )
+        if not ok:
+            return
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            proc.terminate()
+            # 3 saniye bekle, hala yaşıyorsa kill
+            try:
+                proc.wait(timeout=3)
+            except psutil.TimeoutExpired:
+                proc.kill()
+            self.show_toast(
+                self.t("detail_process_killed"),
+                self.t("detail_process_killed_msg").format(name=name, pid=pid),
+                "high",
+            )
+        except psutil.NoSuchProcess:
+            self.show_toast(self.t("detail_process_not_found"),
+                            f"PID {pid}", "warning")
+        except psutil.AccessDenied:
+            self.show_toast(self.t("detail_process_access_denied"),
+                            f"{name} (PID {pid})", "warning")
+        except Exception as e:
+            self.show_toast(self.t("error"), str(e), "warning")
 
     # ─── Command History Panel (v4.0 Faz 4) ─── #
     def _build_command_history(self, parent):

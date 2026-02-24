@@ -196,7 +196,17 @@ class AlertPipeline:
 
     def get_stats(self) -> dict:
         """Return pipeline statistics."""
-        return dict(self._stats)
+        stats = dict(self._stats)
+        stats["dedup_table_size"] = len(self._dedup)
+        return stats
+
+    def get_dedup_size(self) -> int:
+        """Return current dedup table size for memory monitoring."""
+        return len(self._dedup)
+
+    def send_urgent(self, alert_data: dict):
+        """Public method to send an urgent alert directly (used by RansomwareShield etc)."""
+        self._send_urgent(alert_data)
 
     def get_recent_alerts(self, count: int = 20) -> List[dict]:
         """Get recent alerts from the batch buffer for dashboard display."""
@@ -298,13 +308,32 @@ class AlertPipeline:
                 self._flush_batch_locked()
 
     def _batch_flush_loop(self):
-        """Periodically flush the batch buffer."""
+        """Periodically flush the batch buffer and cleanup stale dedup entries."""
+        flush_count = 0
         while self._running:
             try:
                 time.sleep(60)  # Check every minute
                 self._flush_batch()
+                flush_count += 1
+                # Cleanup stale dedup entries every 30 minutes
+                if flush_count % 30 == 0:
+                    self._cleanup_dedup()
             except Exception as e:
                 log(f"[ALERTS] Batch flush error: {e}")
+
+    def _cleanup_dedup(self):
+        """Remove stale dedup entries to prevent unbounded memory growth."""
+        now = time.time()
+        max_cooldown = max(ALERT_COOLDOWN.values())  # 3600s
+        stale_keys = [
+            k for k, ts in self._dedup.items()
+            if now - ts > max_cooldown * 2
+        ]
+        if stale_keys:
+            for k in stale_keys:
+                del self._dedup[k]
+            log(f"[ALERTS] 🧹 Cleaned {len(stale_keys)} stale dedup entries "
+                f"(remaining: {len(self._dedup)})")
 
     def _flush_batch(self):
         """Flush batch buffer to API."""

@@ -208,13 +208,24 @@ DEFAULT_BLOCK_RULES = [
         "actions": "email,block",
         "enabled": True,
     },
-    # Network (LogonType 3) varsayılan kurallardan çıkarıldı — SMB/dosya paylaşımı
-    # gibi meşru erişimlerden çok fazla false positive üretiyordu.
-    # Kullanıcı dashboard'dan isterse ekleyebilir.
+    # Network (LogonType 3) — yüksek eşik değeri ile otomatik blok.
+    # SMB/dosya paylaşımı gibi meşru erişimlerden false positive önlenir.
+    {
+        "name": "default_network",
+        "services": "Network",
+        "threshold_count": 10,
+        "window_minutes": 30,
+        "actions": "email,block",
+        "enabled": True,
+    },
 ]
 
 
 # ── IP Context ────────────────────────────────────────────────────
+
+# Maximum number of usernames to track per IP (memory cap)
+_MAX_USERNAMES_PER_IP = 100
+
 
 @dataclass
 class IPContext:
@@ -260,7 +271,8 @@ class IPContext:
 
         uname = event.get("username", "")
         if uname:
-            self.usernames_tried.add(uname)
+            if len(self.usernames_tried) < _MAX_USERNAMES_PER_IP:
+                self.usernames_tried.add(uname)
 
     def get_recent_events(self, window_seconds: int) -> List[dict]:
         """Get events within the last N seconds."""
@@ -898,17 +910,49 @@ class ThreatEngine:
             time.sleep(CONTEXT_CLEANUP_INTERVAL)
 
     def _cleanup_stale_contexts(self):
-        """Remove IP contexts that haven't had activity in 24h."""
-        cutoff = time.time() - CONTEXT_MAX_AGE
+        """Remove IP contexts that haven't had activity in 24h.
+        Blocked IPs are cleaned after 72h to prevent unbounded memory growth."""
+        now = time.time()
+        cutoff_normal = now - CONTEXT_MAX_AGE
+        cutoff_blocked = now - (CONTEXT_MAX_AGE * 3)  # 72h for blocked IPs
         with self._lock:
             stale_ips = [
                 ip for ip, ctx in self._ip_pool.items()
-                if ctx.last_seen < cutoff and not ctx.is_blocked
+                if (ctx.last_seen < cutoff_normal and not ctx.is_blocked)
+                   or (ctx.last_seen < cutoff_blocked and ctx.is_blocked)
             ]
             for ip in stale_ips:
                 del self._ip_pool[ip]
+
+            # Cap pool size — evict LRU if over 10k entries
+            if len(self._ip_pool) > 10000:
+                sorted_ips = sorted(
+                    self._ip_pool.items(),
+                    key=lambda x: x[1].last_seen
+                )
+                evict_count = len(self._ip_pool) - 8000  # shrink to 8k
+                for ip, ctx in sorted_ips[:evict_count]:
+                    if ip != "local" and not ctx.is_blocked:
+                        del self._ip_pool[ip]
+                evicted = min(evict_count, len(sorted_ips))
+                log(f"[THREAT] 🧹 LRU evicted {evicted} IP contexts (pool was >10k)")
+
+            # Cleanup _rule_blocked_ips — remove entries no longer in pool
+            stale_blocked = self._rule_blocked_ips - set(self._ip_pool.keys())
+            if stale_blocked:
+                self._rule_blocked_ips -= stale_blocked
+
+            # Cleanup _rdp_grace — remove expired entries
+            expired_grace = [
+                ip for ip, ts in self._rdp_grace.items()
+                if (now - ts) > self._RDP_GRACE_WINDOW
+            ]
+            for ip in expired_grace:
+                del self._rdp_grace[ip]
+
             if stale_ips:
-                log(f"[THREAT] Cleaned up {len(stale_ips)} stale IP contexts")
+                log(f"[THREAT] Cleaned up {len(stale_ips)} stale IP contexts "
+                    f"(pool size: {len(self._ip_pool)})")
 
     def _decay_scores(self):
         """Gradually reduce threat scores over time."""

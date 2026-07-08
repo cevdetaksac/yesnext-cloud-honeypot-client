@@ -51,3 +51,12 @@ SERVICE_ICONS = {
 
 SIDEBAR_WIDTH = 220
 CORNER_RADIUS = 14
+
+# Sidebar navigation layout (fixed icon gutter — emoji widths vary)
+NAV_ITEM_HEIGHT = 40
+NAV_ICON_WIDTH = 32
+NAV_PAD_X = 10
+NAV_ICON_TEXT_GAP = 10
+NAV_FONT_ICON = 16
+NAV_FONT_LABEL = 13
+

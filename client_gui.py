@@ -26,7 +26,11 @@ from client_constants import (
 from client_utils import get_from_config
 
 
-from client_gui_theme import COLORS, SERVICE_ICONS, SIDEBAR_WIDTH, CORNER_RADIUS
+from client_gui_theme import (
+    COLORS, SERVICE_ICONS, SIDEBAR_WIDTH, CORNER_RADIUS,
+    NAV_ITEM_HEIGHT, NAV_ICON_WIDTH, NAV_PAD_X, NAV_ICON_TEXT_GAP,
+    NAV_FONT_ICON, NAV_FONT_LABEL,
+)
 
 
 class ModernGUI:
@@ -117,31 +121,18 @@ class ModernGUI:
         self._content_area.pack(side="left", fill="both", expand=True, padx=(0, 0), pady=0)
 
         self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
-        self._nav_buttons: Dict[str, ctk.CTkButton] = {}
+        self._nav_buttons: Dict[str, dict] = {}
 
         nav_items = [
             ("status", "📊", self.t("tab_status")),
-            ("threat", "🛡️", self.t("tab_threat_center")),
+            ("threat", "🛡", self.t("tab_threat_center")),
             ("services", "🐝", self.t("tab_services")),
         ]
 
         for page_id, icon, label in nav_items:
-            row = ctk.CTkFrame(nav_frame, fg_color="transparent", height=44)
-            row.pack(fill="x", pady=2)
-            row.pack_propagate(False)
-
-            btn = ctk.CTkButton(
-                row, text=f"  {icon}   {label}", anchor="w",
-                font=ctk.CTkFont(size=13),
-                height=40, corner_radius=10,
-                fg_color="transparent",
-                hover_color=COLORS["nav_hover"],
-                text_color=COLORS["text"],
-                command=lambda p=page_id: self._show_page(p),
+            self._nav_buttons[page_id] = self._create_sidebar_nav_item(
+                nav_frame, page_id, icon, label,
             )
-            btn.pack(fill="both", expand=True)
-            self._nav_buttons[page_id] = btn
-
             page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
             self._pages[page_id] = page
 
@@ -164,6 +155,73 @@ class ModernGUI:
             if not self.app._tray_mode.is_set():
                 root.deiconify()
 
+    def _create_sidebar_nav_item(
+        self, parent, page_id: str, icon: str, label: str,
+    ) -> dict:
+        """Sidebar satırı — sabit ikon sütunu + metin (emoji genişlik farkını önler)."""
+        row = ctk.CTkFrame(
+            parent, fg_color="transparent",
+            height=NAV_ITEM_HEIGHT, corner_radius=10,
+        )
+        row.pack(fill="x", pady=2)
+        row.pack_propagate(False)
+
+        inner = ctk.CTkFrame(row, fg_color="transparent", corner_radius=10)
+        inner.pack(fill="both", expand=True, padx=(NAV_PAD_X, NAV_PAD_X))
+
+        icon_col = ctk.CTkFrame(inner, fg_color="transparent", width=NAV_ICON_WIDTH)
+        icon_col.pack(side="left", fill="y")
+        icon_col.pack_propagate(False)
+
+        icon_lbl = ctk.CTkLabel(
+            icon_col, text=icon, anchor="center",
+            font=ctk.CTkFont(size=NAV_FONT_ICON),
+            text_color=COLORS["text"],
+        )
+        icon_lbl.pack(expand=True, fill="both")
+
+        text_lbl = ctk.CTkLabel(
+            inner, text=label, anchor="w",
+            font=ctk.CTkFont(size=NAV_FONT_LABEL),
+            text_color=COLORS["text"],
+        )
+        text_lbl.pack(side="left", fill="x", expand=True, padx=(NAV_ICON_TEXT_GAP, 0))
+
+        def _activate(_event=None):
+            self._show_page(page_id)
+
+        def _on_enter(_event=None):
+            if self._active_page != page_id:
+                row.configure(fg_color=COLORS["nav_hover"])
+
+        def _on_leave(_event=None):
+            if self._active_page != page_id:
+                row.configure(fg_color="transparent")
+
+        for widget in (row, inner, icon_col, icon_lbl, text_lbl):
+            widget.bind("<Button-1>", _activate)
+            widget.bind("<Enter>", _on_enter)
+            widget.bind("<Leave>", _on_leave)
+            try:
+                widget.configure(cursor="hand2")
+            except Exception:
+                pass
+
+        return {"frame": row, "icon": icon_lbl, "text": text_lbl, "page_id": page_id}
+
+    def _set_nav_item_style(self, nav: dict, active: bool):
+        row = nav["frame"]
+        icon_lbl = nav["icon"]
+        text_lbl = nav["text"]
+        if active:
+            row.configure(fg_color=COLORS["nav_active"])
+            icon_lbl.configure(text_color=COLORS["text_bright"])
+            text_lbl.configure(text_color=COLORS["text_bright"])
+        else:
+            row.configure(fg_color="transparent")
+            icon_lbl.configure(text_color=COLORS["text"])
+            text_lbl.configure(text_color=COLORS["text"])
+
     def _show_page(self, page_id: str):
         """Sidebar navigasyon — aktif sayfayı göster."""
         self._active_page = page_id
@@ -172,11 +230,8 @@ class ModernGUI:
                 frame.pack(fill="both", expand=True, padx=16, pady=16)
             else:
                 frame.pack_forget()
-        for pid, btn in self._nav_buttons.items():
-            if pid == page_id:
-                btn.configure(fg_color=COLORS["nav_active"], text_color=COLORS["text_bright"])
-            else:
-                btn.configure(fg_color="transparent", text_color=COLORS["text"])
+        for pid, nav in self._nav_buttons.items():
+            self._set_nav_item_style(nav, pid == page_id)
         # İlk açılışta threat sekmesi verilerini yükle
         if page_id == "threat":
             self._refresh_security_intel()

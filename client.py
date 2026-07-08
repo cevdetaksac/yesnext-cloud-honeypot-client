@@ -361,6 +361,7 @@ class CloudHoneypotClient:
             'update_count': 0,
             'health_check_interval': 60  # seconds
         }
+        self._last_api_ok = False
         
         # Check initial RDP state and report to API
         # RDP modülünü kullanarak başlangıç durumunu kontrol et
@@ -751,6 +752,7 @@ class CloudHoneypotClient:
         
         while True:
             if not self.try_api_connection(show_error=(retry_count == 0)):
+                self._last_api_ok = False
                 retry_count += 1
                 
                 # For the first few failures, retry quickly
@@ -766,7 +768,15 @@ class CloudHoneypotClient:
             # Reset retry count on successful connection
             if retry_count > 0:
                 logging.info(f"API connection restored after {retry_count} retries")
-                retry_count = 0
+            retry_count = 0
+            self._last_api_ok = True
+            # Authenticated check (attack-count / tunnel-status)
+            try:
+                tok = self.state.get("token", "")
+                if tok:
+                    self._last_api_ok = self.api_client.check_authenticated(tok)
+            except Exception:
+                pass
                 
             time.sleep(API_RETRY_INTERVAL)  # Check connection every minute when healthy
 
@@ -967,13 +977,15 @@ class CloudHoneypotClient:
 
         def worker():
             try:
-                cnt = self.fetch_attack_count_sync(token)
-                if cnt is None:
-                    self._last_api_ok = False
+                ok = self.api_client.check_authenticated(token)
+                self._last_api_ok = ok
+                if not ok:
                     return
-                self._last_api_ok = True
-                if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt: return
-                self._last_attack_count = cnt
+                cnt = self.fetch_attack_count_sync(token)
+                if cnt is not None:
+                    if hasattr(self, '_last_attack_count') and self._last_attack_count == cnt:
+                        return
+                    self._last_attack_count = cnt
             except Exception:
                 self._last_api_ok = False
                 

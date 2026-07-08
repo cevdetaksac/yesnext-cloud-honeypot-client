@@ -1070,13 +1070,29 @@ class InstallerUpdateManager:
             self.log(f"[UPDATE] İndirme hatası: {e}")
             return None
     
-    def install_update(self, installer_path: str, silent: bool = False, progress_callback=None) -> bool:
-        """Güncellemeyi yükle"""
+    def install_update(
+        self,
+        installer_path: str,
+        silent: bool = False,
+        progress_callback=None,
+        launch_installer: bool = True,
+    ) -> bool:
+        """Güncellemeyi yükle. launch_installer=False ise yalnızca dosyayı doğrular."""
         try:
             import os
             if not os.path.exists(installer_path):
                 self.log("[UPDATE] Installer dosyası bulunamadı")
                 return False
+
+            if not launch_installer:
+                file_size = os.path.getsize(installer_path)
+                if file_size < 1_000_000:
+                    self.log(f"[UPDATE] Installer dosyası çok küçük: {file_size} bytes")
+                    return False
+                self.log(f"[UPDATE] İndirme tamamlandı ({file_size} bytes) — kurulum kullanıcı onayı bekliyor")
+                if progress_callback:
+                    progress_callback(100, "İndirme tamamlandı")
+                return True
             
             self.log("[UPDATE] Installer başlatma hazırlanıyor...")
             if progress_callback:
@@ -1309,10 +1325,15 @@ class InstallerUpdateManager:
                 return False
             
             if progress_callback:
-                progress_callback(70, "Güncelleme yükleniyor...")
+                progress_callback(70, "Güncelleme yükleniyor..." if silent else "İndirme tamamlanıyor...")
             
-            # Güncellemeyi yükle
-            success = self.install_update(installer_path, silent, progress_callback)
+            # İnteraktif modda yalnızca indir; kurulum kullanıcı dialog'undan başlar
+            success = self.install_update(
+                installer_path,
+                silent,
+                progress_callback,
+                launch_installer=silent,
+            )
             
             if success:
                 self.log("[UPDATE] ✅ Installer işlemi tamamlandı!")
@@ -1341,6 +1362,43 @@ class InstallerUpdateManager:
 
 
 # ===================== UPDATE UI HELPERS ===================== #
+
+def prepare_client_for_installer() -> None:
+    """Installer öncesi watchdog yeniden başlatmayı engelle."""
+    import subprocess
+
+    flag_paths = [
+        os.path.join(os.environ.get("TEMP", ""), "honeypot_watchdog_token.txt"),
+        os.path.join(os.environ.get("APPDATA", ""), "YesNext", "CloudHoneypot", "watchdog_token.txt"),
+        os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "YesNext", "CloudHoneypot", "watchdog_stop.flag"),
+    ]
+    for path in flag_paths:
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("stop")
+        except OSError:
+            pass
+
+    for task in (
+        "CloudHoneypot-Background",
+        "CloudHoneypot-Tray",
+        "CloudHoneypot-Watchdog",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-SilentUpdater",
+    ):
+        try:
+            subprocess.run(
+                ["schtasks", "/end", "/tn", task],
+                capture_output=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
 
 class UpdateProgressDialog:
     """Güncelleme progress dialog'u"""
@@ -1407,6 +1465,11 @@ class UpdateProgressDialog:
                 font=("Arial", 9)
             )
             percent_label.pack()
+
+            self.dialog.update_idletasks()
+            self.dialog.lift()
+            self.dialog.attributes("-topmost", True)
+            self.dialog.after(250, lambda: self.dialog.attributes("-topmost", False))
             
             return True
             
@@ -1424,10 +1487,6 @@ class UpdateProgressDialog:
                 if self.percent_var:
                     self.percent_var.set(f"{percent}%")
                 self.dialog.update()
-                
-                # %100'de dialog otomatik kapatma
-                if percent >= 100:
-                    self.dialog.after(2000, self.close_dialog)  # 2 saniye sonra kapat
                     
         except Exception as e:
             print(f"Progress güncelleme hatası: {e}")

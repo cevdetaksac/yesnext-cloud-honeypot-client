@@ -70,17 +70,17 @@ def show_completion_dialog(installer_path: str, version: str):
         def run_installer():
             """Installer'ı çalıştır"""
             try:
-                # PowerShell admin escalation ile başlat
-                # Installer kendi task management'ini yapacak
+                from client_utils import prepare_client_for_installer
+                prepare_client_for_installer()
+
                 cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
                 subprocess.run(cmd, shell=True, check=False,
                               creationflags=subprocess.CREATE_NO_WINDOW)
                 
                 messagebox.showinfo(
                     "Installer Başlatıldı",
-                    "✅ Installer başlatıldı!\n\n"
-                    "UAC onayını verin ve kurulum sürecini takip edin.\n"
-                    "Kurulum tamamlandıktan sonra bu uygulama otomatik kapatılacak."
+                    "Installer başlatıldı.\n\n"
+                    "UAC onayını verin; mevcut uygulama otomatik kapanacak ve kurulum tamamlanacak."
                 )
                 dialog.destroy()
             except Exception as e:
@@ -188,167 +188,91 @@ def show_completion_dialog(installer_path: str, version: str):
                 messagebox.showerror("Hata", f"Installer başlatılamadı: {e2}")
 
 def check_updates_and_prompt(app_instance) -> bool:
-    """Check for updates and prompt user with installer-based system"""
-    try:
-        from client_utils import create_update_manager, UpdateProgressDialog
-        import tkinter.messagebox as messagebox
-        
-        # Update manager oluştur
-        update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
-        
-        # Güncelleme kontrolü
-        update_info = update_mgr.check_for_updates()
-        
-        if update_info.get("error"):
-            messagebox.showerror("Update", f"Update error: {update_info['error']}")
-            return False
-            
-        if not update_info.get("has_update"):
-            messagebox.showinfo("Update", "No updates available")
-            return False
+    """Check for updates with immediate progress UI; installer starts only on user action."""
+    import threading
+    import tkinter.messagebox as messagebox
+    from client_utils import create_update_manager, UpdateProgressDialog, prepare_client_for_installer
 
-        # Kullanıcıdan onay al
-        latest_ver = update_info["latest_version"]
-        if not messagebox.askyesno("Update", f"New version {latest_ver} available. Update now?"):
-            return False
+    root = getattr(app_instance, "root", None)
+    gui_safe = getattr(app_instance, "_gui_safe", lambda fn: fn())
 
-                # Progress dialog oluştur
-        root = getattr(app_instance, 'root', None)
-        progress_dialog = UpdateProgressDialog(root, "Güncelleme")
-        if not progress_dialog.create_dialog():
-            messagebox.showerror("Update", "Progress dialog oluşturulamadı")
-            return False
-
-        def progress_callback(percent, message):
-            progress_dialog.update_progress(percent, message)
-            if percent >= 100:
-                progress_dialog.close_dialog()
-
-        # Güncellemeyi başlat
-        try:
-            log("[UPDATER] Güncelleme işlemi başlatılıyor...")
-            success = update_mgr.update_with_progress(progress_callback, silent=False)
-            
-            if success:
-                log("[UPDATER] ✅ Update başarılı - installer Downloads klasöründe")
-                # Progress dialog'u kapat
-                progress_dialog.close_dialog()
-                
-                # Downloads klasörü yolunu al
-                import os
-                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-                version = getattr(update_mgr, '_latest_version', latest_ver)
-                installer_name = f"cloud-client-installer-v{version}.exe"
-                installer_path = os.path.join(downloads_dir, installer_name)
-                
-                # Özel tamamlanma dialog'u göster
-                show_completion_dialog(installer_path, version)
-                
-                # Installer başlatıldı - uygulama açık kalacak
-                log("[UPDATER] ✅ Interactive update tamamlandı - kullanıcı installer'ı çalıştırabilir")
-                return True
-            else:
-                progress_dialog.close_dialog()
-                
-                # Update başarısız - kullanıcıya alternatif sunalım
-                log("[UPDATER] ⚠️ Installer otomatik başlatılamadı - manuel seçenekler sunuluyor")
-                
-                # Downloads klasöründeki dosya var mı kontrol et
-                import os
-                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-                version = getattr(update_mgr, '_latest_version', latest_ver)
-                installer_name = f"cloud-client-installer-v{version}.exe"
-                installer_path = os.path.join(downloads_dir, installer_name)
-                
-                if os.path.exists(installer_path):
-                    # Dosya var - manuel çalıştırma seçenekleri sun
-                    result = messagebox.askyesnocancel(
-                        "Manuel Kurulum Gerekli",
-                        f"⚠️ Installer otomatik başlatılamadı\n\n"
-                        f"📁 Ancak dosya başarıyla indirildi:\n"
-                        f"{installer_path}\n\n"
-                        f"📋 Seçenekleriniz:\n"
-                        f"• EVET: Downloads klasörünü aç (manuel çalıştırma)\n"
-                        f"• HAYIR: GitHub'dan direkt indir\n"
-                        f"• İPTAL: Güncellemeyi ertele\n\n"
-                        f"Downloads klasörünü açmak istiyor musunuz?"
-                    )
-                    
-                    if result is True:  # YES - Downloads klasörünü aç
-                        try:
-                            os.startfile(downloads_dir)
-                            messagebox.showinfo(
-                                "Manuel Kurulum",
-                                f"📁 Downloads klasörü açıldı!\n\n"
-                                f"🔧 Kurulum adımları:\n"
-                                f"1. {installer_name} dosyasına çift tıklayın\n"
-                                f"2. 'Yönetici olarak çalıştır' seçin\n"
-                                f"3. UAC onayını verin\n"
-                                f"4. Kurulum otomatik tamamlanacak"
-                            )
-                            return True
-                        except Exception as e:
-                            log(f"[UPDATER] Downloads klasörü açma hatası: {e}")
-                            
-                    elif result is False:  # NO - GitHub'a yönlendir
-                        github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
-                        
-                        try:
-                            import webbrowser
-                            webbrowser.open(github_url)
-                            messagebox.showinfo(
-                                "GitHub İndirme",
-                                f"🌐 GitHub releases sayfası açıldı!\n\n"
-                                f"📋 Adımlar:\n"
-                                f"1. 'cloud-client-installer.exe' linkine tıklayın\n"
-                                f"2. İndirme tamamlandıktan sonra dosyayı çalıştırın\n"
-                                f"3. 'Yönetici olarak çalıştır' seçin\n\n"
-                                f"🔗 Link: {github_url}"
-                            )
-                            return True
-                        except Exception as e:
-                            log(f"[UPDATER] GitHub açma hatası: {e}")
-                            messagebox.showerror("Hata", f"GitHub sayfası açılamadı.\n\nManuel link:\n{github_url}")
-                    
-                    # İptal durumunda hiçbir şey yapma
-                    return False
-                    
-                else:
-                    # Dosya da yok - sadece GitHub'a yönlendir
-                    github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
-                    
-                    result = messagebox.askyesno(
-                        "İndirme Başarısız",
-                        f"❌ Güncelleme indirilemedi\n\n"
-                        f"🌐 GitHub'dan manuel indirebilirsiniz:\n"
-                        f"{github_url}\n\n"
-                        f"GitHub sayfasını açmak istiyor musunuz?"
-                    )
-                    
-                    if result:
-                        try:
-                            import webbrowser
-                            webbrowser.open(github_url)
-                            return True
-                        except Exception as e:
-                            log(f"[UPDATER] GitHub açma hatası: {e}")
-                            messagebox.showerror("Hata", f"GitHub sayfası açılamadı.\n\nManuel link:\n{github_url}")
-                    
-                    return False
-        except Exception as e:
-            progress_dialog.close_dialog()
-            messagebox.showerror("Update", f"Update error: {str(e)}")
-            return False
-                
-    except Exception as e:
-        log(f"update prompt error: {e}")
-        try:
-            import tkinter.messagebox as messagebox
-            messagebox.showerror("Update", f"Update error: {str(e)}")
-        except Exception:
-            pass
+    progress_dialog = UpdateProgressDialog(root, "Güncelleme")
+    if not progress_dialog.create_dialog():
+        messagebox.showerror("Güncelleme", "İlerleme penceresi açılamadı")
         return False
-    
+
+    progress_dialog.update_progress(5, "Güncelleme kontrol ediliyor...")
+    update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+
+    def _close_progress():
+        progress_dialog.close_dialog()
+
+    def _start_download(latest_ver: str, update_info: dict):
+        progress_dialog.update_progress(10, f"v{latest_ver} indiriliyor...")
+
+        def _download_worker():
+            try:
+                def _progress(percent, message):
+                    gui_safe(lambda p=percent, m=message: progress_dialog.update_progress(p, m))
+
+                def _download_progress(percent):
+                    _progress(15 + int(percent * 0.8), f"İndiriliyor... %{percent}")
+
+                installer_path = update_mgr.download_installer(
+                    update_info["installer_url"],
+                    _download_progress,
+                )
+
+                def _on_download_done():
+                    _close_progress()
+                    if installer_path:
+                        log("[UPDATER] İndirme tamamlandı — kullanıcı onayı bekleniyor")
+                        show_completion_dialog(installer_path, latest_ver)
+                    else:
+                        messagebox.showerror(
+                            "Güncelleme",
+                            "Installer indirilemedi. Lütfen daha sonra tekrar deneyin.",
+                        )
+
+                gui_safe(_on_download_done)
+            except Exception as exc:
+                log(f"[UPDATER] İndirme hatası: {exc}")
+                gui_safe(lambda: (_close_progress(), messagebox.showerror("Güncelleme", str(exc))))
+
+        threading.Thread(target=_download_worker, daemon=True, name="UpdateDownload").start()
+
+    def _check_worker():
+        try:
+            update_info = update_mgr.check_for_updates()
+
+            def _on_check_done():
+                if update_info.get("error"):
+                    _close_progress()
+                    messagebox.showerror("Güncelleme", f"Hata: {update_info['error']}")
+                    return
+
+                if not update_info.get("has_update"):
+                    _close_progress()
+                    messagebox.showinfo("Güncelleme", "Yüklü sürüm güncel.")
+                    return
+
+                latest_ver = update_info["latest_version"]
+                _close_progress()
+                if messagebox.askyesno(
+                    "Güncelleme",
+                    f"Yeni sürüm v{latest_ver} mevcut.\n\nŞimdi indirmek ister misiniz?",
+                ):
+                    if not progress_dialog.create_dialog():
+                        messagebox.showerror("Güncelleme", "İlerleme penceresi açılamadı")
+                        return
+                    _start_download(latest_ver, update_info)
+
+            gui_safe(_on_check_done)
+        except Exception as exc:
+            log(f"update prompt error: {exc}")
+            gui_safe(lambda: (_close_progress(), messagebox.showerror("Güncelleme", str(exc))))
+
+    threading.Thread(target=_check_worker, daemon=True, name="UpdateCheck").start()
     return True
 
 def check_updates_and_apply_silent() -> bool:
@@ -395,6 +319,9 @@ def check_updates_and_apply_silent() -> bool:
                 return False
                 
             log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
+            
+            from client_utils import prepare_client_for_installer
+            prepare_client_for_installer()
             
             # Execute the update process
             # Installer kendi task management'ini yapacak

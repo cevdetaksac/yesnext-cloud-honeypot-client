@@ -89,7 +89,9 @@ class HoneypotAPIClient:
         headers: Dict[str, str] = {}
         if tok:
             headers.update(auth_headers(tok))
-            if use_legacy_token_query() and req_params is not None:
+            if use_legacy_token_query():
+                if req_params is None:
+                    req_params = {}
                 req_params.setdefault("token", tok)
         return req_params, req_data, headers
 
@@ -386,14 +388,27 @@ class HoneypotAPIClient:
         try:
             result = self.api_request('GET', 'attack-count', token=token, verbose_logging=False)
             
-            if result and 'count' in result:
-                count = int(result['count'])
-                return count
+            if result:
+                for key in ('count', 'attack_count', 'total', 'attacks'):
+                    if key in result:
+                        return int(result[key])
             
             return None
         except Exception as e:
             self.log(f"[API] Saldırı sayısı alma hatası: {e}")
             return None
+
+    def check_authenticated(self, token: str) -> bool:
+        """Token ile kimlik doğrulamalı API erişimini test et."""
+        if not token:
+            return False
+        try:
+            if self.get_attack_count(token) is not None:
+                return True
+            status = self.get_service_statuses(token)
+            return isinstance(status, dict)
+        except Exception:
+            return False
 
     # ===================== THREAT DETECTION v4.0 — Faz 2 ===================== #
 

@@ -107,7 +107,11 @@ class ModernGUI:
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["red"],
         )
-        self._header_status.pack(anchor="w", padx=16, pady=(0, 16))
+        self._header_status.pack(anchor="w", padx=16, pady=(0, 12))
+
+        # Navigasyon bölümü — hizalı butonlar
+        nav_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
+        nav_frame.pack(fill="x", padx=10, pady=(4, 12))
 
         self._content_area = ctk.CTkFrame(body, fg_color=COLORS["bg"], corner_radius=0)
         self._content_area.pack(side="left", fill="both", expand=True, padx=(0, 0), pady=0)
@@ -116,22 +120,26 @@ class ModernGUI:
         self._nav_buttons: Dict[str, ctk.CTkButton] = {}
 
         nav_items = [
-            ("status", f"📊  {self.t('tab_status')}"),
-            ("threat", f"🛡️  {self.t('tab_threat_center')}"),
-            ("services", f"🐝  {self.t('tab_services')}"),
+            ("status", "📊", self.t("tab_status")),
+            ("threat", "🛡️", self.t("tab_threat_center")),
+            ("services", "🐝", self.t("tab_services")),
         ]
 
-        for page_id, label in nav_items:
+        for page_id, icon, label in nav_items:
+            row = ctk.CTkFrame(nav_frame, fg_color="transparent", height=44)
+            row.pack(fill="x", pady=2)
+            row.pack_propagate(False)
+
             btn = ctk.CTkButton(
-                sidebar, text=label, anchor="w",
+                row, text=f"  {icon}   {label}", anchor="w",
                 font=ctk.CTkFont(size=13),
-                height=42, corner_radius=10,
+                height=40, corner_radius=10,
                 fg_color="transparent",
                 hover_color=COLORS["nav_hover"],
                 text_color=COLORS["text"],
                 command=lambda p=page_id: self._show_page(p),
             )
-            btn.pack(fill="x", padx=12, pady=4)
+            btn.pack(fill="both", expand=True)
             self._nav_buttons[page_id] = btn
 
             page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
@@ -187,10 +195,13 @@ class ModernGUI:
         token = self.app.state.get("token", "")
         public_ip = self.app.state.get("public_ip", "")
         from client_constants import SERVER_NAME, API_URL
-        base = API_URL.rsplit("/api", 1)[0]
-        dashboard_url = f"{base}/dashboard"
-        if token:
-            dashboard_url = f"{base}/dashboard?session={token[:8]}"
+
+        def _dashboard_url() -> str:
+            base = API_URL.rsplit("/api", 1)[0]
+            tok = self.app.state.get("token", "") or token
+            if tok:
+                return f"{base}/dashboard?token={tok}"
+            return f"{base}/dashboard"
 
         # ════════ SOL TARAF ════════ #
         # PC Adı
@@ -258,7 +269,7 @@ class ModernGUI:
             font=ctk.CTkFont(size=11), width=90, height=26,
             fg_color=COLORS["accent"], hover_color=COLORS["blue"],
             text_color=COLORS["text_bright"], corner_radius=5,
-            command=lambda: webbrowser.open(dashboard_url),
+            command=lambda: webbrowser.open(_dashboard_url()),
         ).pack(side="right", padx=2, pady=5)
 
         # Separator
@@ -2370,7 +2381,7 @@ class ModernGUI:
         def _test_api():
             def _do():
                 try:
-                    ok = api_client.check_connection(max_attempts=1, delay=0) if api_client else False
+                    ok = api_client.check_authenticated(max_attempts=1, delay=0) if api_client else False
                     def _show():
                         if ok:
                             self.show_toast("API", self.t("detail_api_ok"), "info")

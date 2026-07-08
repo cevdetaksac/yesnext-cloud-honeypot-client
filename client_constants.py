@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.2"  # Fix silent auto-update (installer_url), weekly task args
+VERSION = "4.4.3"  # Fix API token query on GET, dashboard URL, sidebar layout
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

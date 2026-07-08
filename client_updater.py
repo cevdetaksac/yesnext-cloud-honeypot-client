@@ -452,25 +452,41 @@ def check_updates_and_apply_silent() -> bool:
     
     return True
 
-def download_installer_file(url: str, local_path: str) -> bool:
-    """Download installer file from URL"""
+def download_installer_file(url: str, local_path: str, expected_sha256: str = "") -> bool:
+    """Download installer file from URL with optional SHA-256 verification."""
     try:
+        import hashlib
         import requests
-        
+        from client_security_utils import resolve_tls_verify
+        from client_utils import get_from_config
+
+        verify_checksum = bool(get_from_config("updates.verify_checksum", True))
         log(f"[SILENT UPDATE] Downloading installer from: {url}")
-        
-        response = requests.get(url, stream=True, timeout=60)
+
+        response = requests.get(url, stream=True, timeout=60, verify=resolve_tls_verify())
         response.raise_for_status()
-        
+
+        sha = hashlib.sha256()
         with open(local_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-                
+                sha.update(chunk)
+
         file_size = os.path.getsize(local_path)
-        log(f"[SILENT UPDATE] Downloaded {file_size} bytes to {local_path}")
-        
+        digest = sha.hexdigest()
+        log(f"[SILENT UPDATE] Downloaded {file_size} bytes, sha256={digest[:16]}…")
+
+        if verify_checksum and expected_sha256:
+            if digest.lower() != expected_sha256.lower():
+                log("[SILENT UPDATE] Checksum mismatch — aborting install")
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    pass
+                return False
+
         return True
-        
+
     except Exception as e:
         log(f"[SILENT UPDATE] Download error: {e}")
         return False

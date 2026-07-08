@@ -292,6 +292,7 @@ class AlertPipeline:
                 args=("alerts/urgent", payload, "urgent"),
                 daemon=True,
             ).start()
+            self._send_webhook(alert)
 
         except Exception as e:
             self._stats["errors"] += 1
@@ -379,6 +380,41 @@ class AlertPipeline:
             args=("events/batch", payload, "batch"),
             daemon=True,
         ).start()
+
+    # ── Webhook (Slack / Teams / custom) ───────────────────────────
+
+    def _send_webhook(self, alert: dict):
+        """POST alert JSON to configured webhook URL."""
+        try:
+            from client_utils import get_from_config
+            if not get_from_config("notifications.webhook_enabled", False):
+                return
+            url = str(get_from_config("notifications.webhook_url", "") or "").strip()
+            if not url:
+                return
+            import requests
+            from client_security_utils import resolve_tls_verify, redact_sensitive
+
+            body = {
+                "event": "honeypot_alert",
+                "machine": self.machine_name,
+                "severity": alert.get("severity"),
+                "title": alert.get("title"),
+                "source_ip": alert.get("source_ip"),
+                "threat_score": alert.get("threat_score"),
+                "threat_type": alert.get("threat_type"),
+            }
+
+            def _post():
+                try:
+                    requests.post(url, json=body, timeout=8, verify=resolve_tls_verify())
+                    log(f"[ALERTS] Webhook sent: {redact_sensitive(body)}")
+                except Exception as ex:
+                    log(f"[ALERTS] Webhook error: {ex}")
+
+            threading.Thread(target=_post, daemon=True).start()
+        except Exception as e:
+            log(f"[ALERTS] Webhook setup error: {e}")
 
     # ── API Call Helper ───────────────────────────────────────────
 

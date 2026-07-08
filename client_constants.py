@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.3.0"  # Interactive dashboard: clickable stat cards with detail popups, process kill/block actions, API health monitor
+VERSION = "4.4.1"  # Tray fix, lazy GUI refresh, debug mode, perf tuning
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -61,8 +61,8 @@ CONNECT_TIMEOUT = 8
 # ===================== SECURITY CONFIGURATION ===================== #
 
 # Admin elevation control - TEST MODE
-SKIP_ADMIN_ELEVATION = False  # Set to True to disable admin elevation for testing
-TEST_MODE = False  # Set to True for enhanced debugging and no admin requirements
+SKIP_ADMIN_ELEVATION = get_from_config("debug.skip_admin_elevation", False)
+TEST_MODE = get_from_config("debug.test_mode", False)
 FORCE_NO_EXIT = True  # Prevent any early exits during testing
 
 # RDP secure port configuration
@@ -123,6 +123,9 @@ TRY_TRAY = get_from_config("advanced.minimize_to_tray", True)
 
 # ===================== HONEYPOT SERVICE CONFIGURATION ===================== #
 
+# Honeypot bind address (0.0.0.0 = all interfaces)
+HONEYPOT_BIND_ADDRESS = get_from_config("services.bind_address", "0.0.0.0")
+
 # Service definitions — each honeypot service the client can run locally
 HONEYPOT_SERVICES = {
     "RDP":   {"port": 3389, "protocol": "tcp", "description": "Remote Desktop Protocol"},
@@ -130,6 +133,8 @@ HONEYPOT_SERVICES = {
     "FTP":   {"port": 21,   "protocol": "tcp", "description": "File Transfer Protocol"},
     "MYSQL": {"port": 3306, "protocol": "tcp", "description": "MySQL Database"},
     "MSSQL": {"port": 1433, "protocol": "tcp", "description": "Microsoft SQL Server"},
+    "HTTP":  {"port": 80,   "protocol": "tcp", "description": "HTTP Web Login Decoy"},
+    "SMB":   {"port": 445,  "protocol": "tcp", "description": "SMB File Share Probe"},
 }
 
 # Honeypot service banners (realistic decoys)
@@ -138,6 +143,8 @@ FTP_BANNER = "220 (vsFTPd 3.0.5)"
 MYSQL_VERSION = "5.7.38-0ubuntu0.22.04.2"
 MSSQL_VERSION = "Microsoft SQL Server 2019 (RTM-CU18)"
 RDP_CERT_CN = "WIN-HONEYPOT"
+HTTP_SERVER_BANNER = "Microsoft-IIS/10.0"
+SMB_SERVER_NAME = "WIN-HONEYPOT"
 
 # Credential capture limits (anti-abuse / rate limiting)
 MAX_CREDENTIAL_LENGTH = 256           # Max length for captured username/password
@@ -263,9 +270,12 @@ ENABLE_AUTO_UPDATE = get_from_config("advanced.auto_update", True)
 ENABLE_TRAY_ICON = get_from_config("advanced.minimize_to_tray", True)
 ENABLE_ADMIN_ELEVATION = get_from_config("advanced.request_admin_privileges", True)
 
+# GUI refresh — dashboard tick interval (milliseconds)
+GUI_DASHBOARD_REFRESH_MS = int(get_from_config("ui.dashboard_refresh_seconds", 10)) * 1000
+
 # Debug and development flags
-DEBUG_MODE = get_from_config("debug.enabled", False)
-VERBOSE_LOGGING = get_from_config("debug.verbose_logging", False)
+DEBUG_MODE = get_from_config("debug.enabled", get_from_config("logging.debug_mode", False))
+VERBOSE_LOGGING = get_from_config("debug.verbose_logging", DEBUG_MODE)
 
 # Production deployment flags
 SILENT_ADMIN_ELEVATION = get_from_config("deployment.silent_admin", True)  # Auto-elevate without asking
@@ -374,7 +384,7 @@ __all__ = [
     'APP_DIR', 'LOG_FILE', 'CONSENT_FILE', 'STATUS_FILE', 'WATCHDOG_TOKEN_FILE', 'TASK_STATE_FILE',
     
     # GUI configuration
-    'WINDOW_WIDTH', 'WINDOW_HEIGHT', 'WINDOW_TITLE', 'TRY_TRAY',
+    'WINDOW_WIDTH', 'WINDOW_HEIGHT', 'WINDOW_TITLE', 'TRY_TRAY', 'GUI_DASHBOARD_REFRESH_MS',
     
     # Windows integration
     'APP_STARTUP_KEY', 'REGISTRY_KEY_PATH',

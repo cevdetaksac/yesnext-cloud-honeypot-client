@@ -25,12 +25,15 @@ import json
 import requests
 import time
 from typing import Dict, Optional, Any, Union
-import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# SSL uyarılarını gizle
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from client_security_utils import (
+    auth_headers,
+    redact_sensitive,
+    resolve_tls_verify,
+    use_legacy_token_query,
+)
 
 class HoneypotAPIClient:
     """Honeypot API bağlantı yönetimi sınıfı"""
@@ -39,6 +42,7 @@ class HoneypotAPIClient:
         self.base_url = base_url.rstrip('/')
         self.session = self._create_session()
         self.log = log_func if log_func else print
+        self._auth_token: Optional[str] = None
         
     def _create_session(self) -> requests.Session:
         """HTTP session oluştur"""
@@ -63,12 +67,43 @@ class HoneypotAPIClient:
         })
         
         return session
-    
+
+    def set_auth_token(self, token: Optional[str]) -> None:
+        """Set default Bearer token for subsequent requests."""
+        self._auth_token = token
+        if token:
+            self.session.headers.update(auth_headers(token))
+        elif "Authorization" in self.session.headers:
+            del self.session.headers["Authorization"]
+
+    def _prepare_request(
+        self,
+        params: Optional[Dict],
+        data: Optional[Dict],
+        token: Optional[str] = None,
+    ) -> tuple[Optional[Dict], Optional[Dict], Dict[str, str]]:
+        """Merge auth header + optional legacy query token."""
+        tok = token or self._auth_token
+        req_params = dict(params) if params else None
+        req_data = dict(data) if data else None
+        headers: Dict[str, str] = {}
+        if tok:
+            headers.update(auth_headers(tok))
+            if use_legacy_token_query() and req_params is not None:
+                req_params.setdefault("token", tok)
+        return req_params, req_data, headers
+
     def api_request(self, method: str, endpoint: str, data: Optional[Dict] = None,
-                   params: Optional[Dict] = None, timeout: int = API_REQUEST_TIMEOUT, verbose_logging: bool = True) -> Optional[Dict]:
+                   params: Optional[Dict] = None, timeout: int = API_REQUEST_TIMEOUT,
+                   verbose_logging: bool = True, token: Optional[str] = None) -> Optional[Dict]:
         """API isteği gönder"""
         try:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
+            req_params, req_data, extra_headers = self._prepare_request(params, data, token)
+            # Body token for POST payloads (backend compatibility)
+            tok = token or self._auth_token
+            if tok and req_data is not None and "token" not in req_data:
+                req_data["token"] = tok
             
             # Sık çağrılan endpointler için sessiz mod
             from client_constants import VERBOSE_LOGGING
@@ -78,19 +113,20 @@ class HoneypotAPIClient:
             if show_logs:
                 self.log(f"[API] {method.upper()} isteği: {url}")
             
-            if params and show_logs:
-                self.log(f"[API] Params: {params}")
+            if req_params and show_logs:
+                self.log(f"[API] Params: {redact_sensitive(req_params)}")
             
-            if data and show_logs:
-                self.log(f"[API] JSON: {data}")
+            if req_data and show_logs:
+                self.log(f"[API] JSON: {redact_sensitive(req_data)}")
             
             response = self.session.request(
                 method=method,
                 url=url,
-                json=data,
-                params=params,
+                json=req_data,
+                params=req_params,
                 timeout=timeout,
-                verify=False
+                verify=resolve_tls_verify(),
+                headers=extra_headers or None,
             )
             
             if show_logs or response.status_code != 200:
@@ -217,8 +253,8 @@ class HoneypotAPIClient:
                 
                 response = self.session.get(
                     health_url,
-                    timeout=15,  # Orijinal kodda 15 saniye
-                    verify=False
+                    timeout=15,
+                    verify=resolve_tls_verify(),
                 )
                 
                 if response.status_code == 200:
@@ -250,8 +286,7 @@ class HoneypotAPIClient:
     def get_service_statuses(self, token: str) -> Optional[Dict]:
         """Servis durumlarını al"""
         try:
-            params = {'token': token}
-            return self.api_request('GET', 'premium/tunnel-status', params=params)
+            return self.api_request('GET', 'premium/tunnel-status', token=token)
         except Exception as e:
             self.log(f"[API] Servis durumu alma hatası: {e}")
             return None
@@ -349,8 +384,7 @@ class HoneypotAPIClient:
     def get_attack_count(self, token: str) -> Optional[int]:
         """Saldırı sayısını al"""
         try:
-            params = {'token': token}
-            result = self.api_request('GET', 'attack-count', params=params, verbose_logging=False)
+            result = self.api_request('GET', 'attack-count', token=token, verbose_logging=False)
             
             if result and 'count' in result:
                 count = int(result['count'])
@@ -378,7 +412,7 @@ class HoneypotAPIClient:
         try:
             resp = self.api_request(
                 "GET", "commands/pending",
-                params={"token": token},
+                token=token,
                 timeout=8, verbose_logging=False,
             )
             if isinstance(resp, dict):
@@ -411,7 +445,7 @@ class HoneypotAPIClient:
         try:
             resp = self.api_request(
                 "GET", "threats/config",
-                params={"token": token},
+                token=token,
                 timeout=8, verbose_logging=False,
             )
             if isinstance(resp, dict):
@@ -440,7 +474,7 @@ class HoneypotAPIClient:
         try:
             resp = self.api_request(
                 "GET", "premium/rules",
-                params={"token": token},
+                token=token,
                 timeout=8, verbose_logging=False,
             )
             if isinstance(resp, list):
@@ -502,7 +536,8 @@ class HoneypotAPIClient:
         try:
             resp = self.api_request(
                 "GET", "threats/summary",
-                params={"token": token, "period": period},
+                params={"period": period},
+                token=token,
             )
             return resp if isinstance(resp, dict) else None
         except Exception as e:
@@ -537,13 +572,10 @@ def api_request_with_token(api_client, token: str, method: str, endpoint: str,
                           json: Optional[Dict] = None) -> Optional[Dict]:
     """API request wrapper with token authentication"""
     try:
-        if token:
-            params = params or {}
-            params['token'] = token
-        
         return api_client.api_request(
             method=method, endpoint=endpoint,
-            data=json if json else data, params=params, timeout=timeout
+            data=json if json else data, params=params, timeout=timeout,
+            token=token,
         )
     except Exception as e:
         if hasattr(api_client, 'log') and api_client.log:
@@ -588,7 +620,10 @@ def register_client_api(api_url: str, server_name: str, ip: str, token_save_func
     
     try:
         payload = {"server_name": f"{server_name} ({ip})", "ip": ip}
-        response = requests.post(f"{api_url}/register", json=payload, timeout=15)
+        response = requests.post(
+            f"{api_url}/register", json=payload, timeout=15,
+            verify=resolve_tls_verify(),
+        )
         
         if response.status_code == 200:
             data = response.json()

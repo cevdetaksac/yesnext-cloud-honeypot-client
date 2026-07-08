@@ -198,7 +198,7 @@ class PerformanceOptimizer:
         cpu = 0.0
         mem = 0.0
         if PSUTIL_AVAILABLE:
-            cpu = psutil.cpu_percent(interval=1)
+            cpu = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory().percent
 
         # Calculate events/sec
@@ -322,6 +322,8 @@ class FalsePositiveTuner:
             "auto_whitelist_count": 0,
             "user_whitelist_count": len(self._user_whitelist),
         }
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
 
     def should_alert(self, ip: str, event_type: str) -> bool:
         """Check if an alert should be emitted or suppressed (cooldown check)."""
@@ -440,6 +442,31 @@ class FalsePositiveTuner:
                     del self._ip_event_counts[ip]
                     self._ip_max_scores.pop(ip, None)
                 log(f"🔰 FP tuner: pruned {len(remove)} tracked IPs (was >5000)")
+
+    def start(self, interval: int = 3600):
+        """Periodic stale-entry cleanup loop."""
+        if getattr(self, "_running", False):
+            return
+        self._running = True
+        self._cleanup_interval = max(300, int(interval))
+
+        def _loop():
+            while getattr(self, "_running", False):
+                try:
+                    self.cleanup_stale(self._cleanup_interval)
+                except Exception as e:
+                    log(f"[FP-TUNER] cleanup error: {e}")
+                for _ in range(self._cleanup_interval):
+                    if not getattr(self, "_running", False):
+                        break
+                    time.sleep(1)
+
+        self._thread = threading.Thread(target=_loop, name="FPTunerCleanup", daemon=True)
+        self._thread.start()
+        log(f"🔰 FalsePositiveTuner cleanup started (every {self._cleanup_interval}s)")
+
+    def stop(self):
+        self._running = False
 
 
 # ═══════════════════════════════════════════════════════════════════

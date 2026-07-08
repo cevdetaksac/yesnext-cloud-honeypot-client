@@ -20,41 +20,13 @@ from client_utils import (
     get_config_value, update_language_config, get_resource_path
 )
 from client_constants import (
-    LOG_FILE, RDP_SECURE_PORT, GITHUB_OWNER, GITHUB_REPO, __version__
+    LOG_FILE, RDP_SECURE_PORT, GITHUB_OWNER, GITHUB_REPO, __version__,
+    GUI_DASHBOARD_REFRESH_MS,
 )
+from client_utils import get_from_config
 
 
-# ─── Renk Paleti ─── #
-COLORS = {
-    "bg":           "#1a1a2e",
-    "card":         "#16213e",
-    "card_active":  "#1b3a4b",
-    "accent":       "#0f3460",
-    "green":        "#00c853",
-    "green_hover":  "#00e676",
-    "red":          "#ff1744",
-    "red_hover":    "#ff5252",
-    "orange":       "#ff9100",
-    "orange_hover": "#ffab40",
-    "blue":         "#2979ff",
-    "blue_hover":   "#448aff",
-    "text":         "#e0e0e0",
-    "text_dim":     "#9e9e9e",
-    "text_bright":  "#ffffff",
-    "border":       "#2a2a4a",
-    "entry_bg":     "#0d1b2a",
-    "status_dot_on":"#00e676",
-    "status_dot_off":"#ff1744",
-}
-
-# ─── Servis Emoji Haritası ─── #
-SERVICE_ICONS = {
-    "RDP":   "🖥",
-    "MSSQL": "🗃",
-    "MYSQL": "🐬",
-    "FTP":   "📁",
-    "SSH":   "🔐",
-}
+from client_gui_theme import COLORS, SERVICE_ICONS, SIDEBAR_WIDTH, CORNER_RADIUS
 
 
 class ModernGUI:
@@ -67,6 +39,9 @@ class ModernGUI:
         """
         self.app = app
         self.row_controls: Dict[str, dict] = {}
+        self._active_page: str = "status"
+        self._lazy_intel = bool(get_from_config("advanced.lazy_security_intel", True))
+        self._refresh_ms = GUI_DASHBOARD_REFRESH_MS
 
     # ─── Yardımcılar ─── #
     def t(self, key: str) -> str:
@@ -84,88 +59,96 @@ class ModernGUI:
     #  ANA BUILD
     # ═══════════════════════════════════════════════════════════════
     def build(self, root: ctk.CTk, startup_mode: str = "gui"):
-        """Ana GUI'yi oluşturur — client.py build_gui() tarafından çağrılır."""
+        """Ana GUI — modern sidebar navigasyon."""
         self.root = root
-        self._start_time = time.time()  # uptime izleme
+        self._start_time = time.time()
 
-        # ── Tema ── #
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
         root.title(f"{self.t('app_title')} v{__version__}")
-        root.geometry("900x760")
+        root.geometry("1100x720")
         root.configure(fg_color=COLORS["bg"])
-        root.minsize(820, 660)
+        root.minsize(960, 640)
 
-        # ── İkon ── #
         self._set_window_icon(root)
-
-        # ── Birleşik Üst Bar (Kimlik + Menü) ── #
         self._build_top_bar(root)
-
-        # ── Kapatma → tray ── #
         root.protocol("WM_DELETE_WINDOW", self.app.on_close)
 
-        # ── Başlık Bandı ── #
-        self._build_header(root)
+        # Ana gövde: sidebar + içerik
+        body = ctk.CTkFrame(root, fg_color=COLORS["bg"], corner_radius=0)
+        body.pack(fill="both", expand=True)
 
-        # ── Tab View (3 sekme) ── #
-        self._tabview = ctk.CTkTabview(
-            root, fg_color="transparent",
-            segmented_button_fg_color=COLORS["card"],
-            segmented_button_selected_color=COLORS["accent"],
-            segmented_button_selected_hover_color=COLORS["blue"],
-            segmented_button_unselected_color=COLORS["card"],
-            segmented_button_unselected_hover_color=COLORS["border"],
+        sidebar = ctk.CTkFrame(body, width=SIDEBAR_WIDTH, fg_color=COLORS["sidebar"], corner_radius=0)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+
+        # Marka alanı
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.pack(fill="x", padx=16, pady=(20, 8))
+        ctk.CTkLabel(
+            brand, text="🛡️",
+            font=ctk.CTkFont(size=28),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            brand, text=self.t("app_title"),
+            font=ctk.CTkFont(size=15, weight="bold"),
             text_color=COLORS["text_bright"],
-            text_color_disabled=COLORS["text_dim"],
-            corner_radius=10,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            brand, text=f"v{__version__}",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"],
+        ).pack(anchor="w", pady=(0, 8))
+
+        self._header_status = ctk.CTkLabel(
+            sidebar,
+            text="● " + self.t("protection_inactive"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["red"],
         )
-        self._tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._header_status.pack(anchor="w", padx=16, pady=(0, 16))
 
-        # Tab isimleri — build() anında self.t() ile çözümlenir.
-        # CTkTabview rename/dict manipulation tab click'i bozar,
-        # bu yüzden runtime'da DEĞİŞTİRİLMEZ. Dil değişince _rebuild_gui() çağrılır.
-        self._tab_status_name = self.t("tab_status")
-        self._tab_threat_name = self.t("tab_threat_center")
-        self._tab_services_name = self.t("tab_services")
+        self._content_area = ctk.CTkFrame(body, fg_color=COLORS["bg"], corner_radius=0)
+        self._content_area.pack(side="left", fill="both", expand=True, padx=(0, 0), pady=0)
 
-        self._tabview.add(self._tab_status_name)
-        self._tabview.add(self._tab_threat_name)
-        self._tabview.add(self._tab_services_name)
-        self._tabview.set(self._tab_status_name)
+        self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
+        self._nav_buttons: Dict[str, ctk.CTkButton] = {}
 
-        # Scrollable content for each tab
-        tab1_scroll = ctk.CTkScrollableFrame(
-            self._tabview.tab(self._tab_status_name), fg_color="transparent")
-        tab1_scroll.pack(fill="both", expand=True)
+        nav_items = [
+            ("status", f"📊  {self.t('tab_status')}"),
+            ("threat", f"🛡️  {self.t('tab_threat_center')}"),
+            ("services", f"🐝  {self.t('tab_services')}"),
+        ]
 
-        tab2_scroll = ctk.CTkScrollableFrame(
-            self._tabview.tab(self._tab_threat_name), fg_color="transparent")
-        tab2_scroll.pack(fill="both", expand=True)
+        for page_id, label in nav_items:
+            btn = ctk.CTkButton(
+                sidebar, text=label, anchor="w",
+                font=ctk.CTkFont(size=13),
+                height=42, corner_radius=10,
+                fg_color="transparent",
+                hover_color=COLORS["nav_hover"],
+                text_color=COLORS["text"],
+                command=lambda p=page_id: self._show_page(p),
+            )
+            btn.pack(fill="x", padx=12, pady=4)
+            self._nav_buttons[page_id] = btn
 
-        tab3_scroll = ctk.CTkScrollableFrame(
-            self._tabview.tab(self._tab_services_name), fg_color="transparent")
-        tab3_scroll.pack(fill="both", expand=True)
+            page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
+            self._pages[page_id] = page
 
-        # ── Tab 1: Anlık Durum — Dashboard kartları + IP Tablosu ── #
-        self._build_dashboard(tab1_scroll)
-        self._build_ip_activity_table(tab1_scroll)
+        # Sayfa içerikleri
+        self._build_dashboard(self._pages["status"])
+        self._build_ip_activity_table(self._pages["status"])
+        self._build_threat_center(self._pages["threat"])
+        self._build_services_section(self._pages["services"])
 
-        # ── Tab 2: Tehdit Merkezi — Threat detection + response ── #
-        self._build_threat_center(tab2_scroll)
+        self._show_page("status")
 
-        # ── Tab 3: Honeypot Servisleri ── #
-        self._build_services_section(tab3_scroll)
-
-        # ── app referansları (eski alanlar artık yok) ── #
         self.app.ip_entry = None
         self.app.attack_entry = None
-
-        # ── Periyodik Dashboard Güncelleme (her 5 sn) ── #
         self._schedule_dashboard_refresh()
 
-        # ── Başlangıç modu ── #
         if startup_mode == "minimized":
             self.app._tray_mode.set()
             root.withdraw()
@@ -173,20 +156,41 @@ class ModernGUI:
             if not self.app._tray_mode.is_set():
                 root.deiconify()
 
+    def _show_page(self, page_id: str):
+        """Sidebar navigasyon — aktif sayfayı göster."""
+        self._active_page = page_id
+        for pid, frame in self._pages.items():
+            if pid == page_id:
+                frame.pack(fill="both", expand=True, padx=16, pady=16)
+            else:
+                frame.pack_forget()
+        for pid, btn in self._nav_buttons.items():
+            if pid == page_id:
+                btn.configure(fg_color=COLORS["nav_active"], text_color=COLORS["text_bright"])
+            else:
+                btn.configure(fg_color="transparent", text_color=COLORS["text"])
+        # İlk açılışta threat sekmesi verilerini yükle
+        if page_id == "threat":
+            self._refresh_security_intel()
+            self._refresh_active_sessions()
+
     # ═══════════════════════════════════════════════════════════════
     #  BİRLEŞİK ÜST BAR  (Kimlik + Dashboard + Menü — tek satır)
     # ═══════════════════════════════════════════════════════════════
     def _build_top_bar(self, root):
         """Sol: PC/IP | Token  —  Sağ: v3.0 | Dashboard | Ayarlar | Yardım"""
-        bar = ctk.CTkFrame(root, fg_color=COLORS["card"], corner_radius=0, height=36)
+        bar = ctk.CTkFrame(root, fg_color=COLORS["sidebar"], corner_radius=0, height=48)
         bar.pack(fill="x", side="top")
         bar.pack_propagate(False)
 
         # Token & IP yükle
         token = self.app.state.get("token", "")
         public_ip = self.app.state.get("public_ip", "")
-        from client_constants import SERVER_NAME
-        dashboard_url = f"https://honeypot.yesnext.com.tr/dashboard?token={token or ''}"
+        from client_constants import SERVER_NAME, API_URL
+        base = API_URL.rsplit("/api", 1)[0]
+        dashboard_url = f"{base}/dashboard"
+        if token:
+            dashboard_url = f"{base}/dashboard?session={token[:8]}"
 
         # ════════ SOL TARAF ════════ #
         # PC Adı
@@ -263,9 +267,13 @@ class ModernGUI:
         )
 
         # Versiyon (text)
+        from client_constants import DEBUG_MODE
+        ver_text = f"v{__version__}"
+        if DEBUG_MODE:
+            ver_text += "  DEBUG"
         ctk.CTkLabel(
-            bar, text=f"v{__version__}",
-            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            bar, text=ver_text,
+            font=ctk.CTkFont(size=11), text_color=COLORS["orange"] if DEBUG_MODE else COLORS["text_dim"],
         ).pack(side="right", padx=(4, 4))
 
     def _copy_to_clipboard(self, text: str):
@@ -609,7 +617,9 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _refresh_security_intel(self):
-        """Tüm güvenlik panellerini arka planda yenile."""
+        """Güvenlik panellerini arka planda yenile (lazy: threat sekmesi)."""
+        if self._lazy_intel and self._active_page != "threat":
+            return
         import threading as _th
         _th.Thread(target=self._collect_security_overview, daemon=True).start()
         _th.Thread(target=self._collect_user_accounts, daemon=True).start()
@@ -3030,28 +3040,29 @@ class ModernGUI:
 
     # ─── Dashboard Refresh ─── #
     def _schedule_dashboard_refresh(self):
-        """Her 5 saniyede bir dashboard kartlarını günceller."""
+        """Dashboard kartlarını config aralığında günceller (varsayılan 10 sn)."""
         self._refresh_dashboard()
 
-        # IP tablosunu her 10 saniyede bir güncelle (2 × 5s)
+        ticks_per_ip = max(1, int(20000 / self._refresh_ms))  # ~20 sn
         if not hasattr(self, '_ip_table_tick'):
             self._ip_table_tick = 0
         self._ip_table_tick += 1
-        if self._ip_table_tick >= 2:
+        if self._active_page == "status" and self._ip_table_tick >= ticks_per_ip:
             self._ip_table_tick = 0
             self._refresh_ip_table()
 
-        # Security intel panellerini her 60 saniyede bir güncelle (12 × 5s)
+        ticks_per_intel = max(1, int(60000 / self._refresh_ms))  # ~60 sn
         if not hasattr(self, '_security_tick'):
             self._security_tick = 0
         self._security_tick += 1
-        if self._security_tick >= 12:
+        if self._active_page == "threat" and self._security_tick >= ticks_per_intel:
             self._security_tick = 0
             self._refresh_security_intel()
+            self._refresh_active_sessions()
 
         try:
             if self.root and self.root.winfo_exists():
-                self.root.after(5000, self._schedule_dashboard_refresh)
+                self.root.after(self._refresh_ms, self._schedule_dashboard_refresh)
         except Exception:
             pass
 
@@ -3204,8 +3215,9 @@ class ModernGUI:
             else:
                 self._update_card("self_protect", "OFF", COLORS["text_dim"])
 
-            # 12) Trend mini-charts (v4.0 Faz 4)
-            self._refresh_trend_panel()
+            # 12) Trend mini-charts — sadece threat sekmesi açıkken
+            if self._active_page == "threat":
+                self._refresh_trend_panel()
 
             # 13) Performance throttle info (v4.0 Faz 4)
             perf = getattr(self.app, 'perf_optimizer', None)
@@ -3717,7 +3729,9 @@ class ModernGUI:
             self.row_controls = {}
             self.app.row_controls = {}
             self._active_popup = None
-            self._tabview = None
+            self._pages = {}
+            self._nav_buttons = {}
+            self._content_area = None
             # Yeniden oluştur (mevcut modda — görünürse gui, gizliyse minimized)
             mode = "minimized" if self.app._tray_mode.is_set() else "gui"
             self.build(self.root, mode)

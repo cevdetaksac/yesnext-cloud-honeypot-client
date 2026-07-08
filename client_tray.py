@@ -15,6 +15,7 @@ Depends on: client_constants, client_helpers, pystray, PIL
 """
 
 import os
+import ctypes
 import threading
 from typing import Optional, Callable, Any
 
@@ -146,38 +147,67 @@ class TrayManager:
             update_window_icon(self.app_instance.root, is_active)
     
     def show_window(self):
-        """Show main window from tray"""
-        try:
-            if hasattr(self.app_instance, 'root') and self.app_instance.root:
-                # Clear tray mode flag
+        """Show main window from tray (must run on Tk main thread)."""
+        def _do_show():
+            try:
+                root = getattr(self.app_instance, 'root', None)
+                if not root or not root.winfo_exists():
+                    return
+
                 self.app_instance._tray_mode.clear()
-                
-                # Pencereyi göster ve öne getir
-                self.app_instance.root.deiconify()
-                self.app_instance.root.lift()
-                self.app_instance.root.focus_force()
-                
-                # Pencere konumunu merkeze al
+                root.deiconify()
+                root.update_idletasks()
+                root.lift()
+                root.attributes("-topmost", True)
+                root.after(150, lambda: root.attributes("-topmost", False))
+                root.focus_force()
+
+                # Windows: bring window to foreground (focus_force alone is often ignored)
+                if os.name == "nt":
+                    try:
+                        hwnd = root.winfo_id()
+                        # CTk may need parent HWND on some setups
+                        parent = ctypes.windll.user32.GetParent(hwnd)
+                        target = parent if parent else hwnd
+                        ctypes.windll.user32.SetForegroundWindow(target)
+                    except Exception:
+                        pass
+
                 from client_constants import WINDOW_WIDTH, WINDOW_HEIGHT
-                screen_width = self.app_instance.root.winfo_screenwidth()
-                screen_height = self.app_instance.root.winfo_screenheight()
-                window_width = WINDOW_WIDTH
-                window_height = WINDOW_HEIGHT
-                center_x = int(screen_width/2 - window_width/2)
-                center_y = int(screen_height/2 - window_height/2)
-                self.app_instance.root.geometry(f'{window_width}x{window_height}+{center_x}+{center_y}')
+                sw = root.winfo_screenwidth()
+                sh = root.winfo_screenheight()
+                cx = int(sw / 2 - WINDOW_WIDTH / 2)
+                cy = int(sh / 2 - WINDOW_HEIGHT / 2)
+                root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{cx}+{cy}")
+            except Exception as e:
+                log(f"Show window error: {e}")
+
+        try:
+            if hasattr(self.app_instance, '_gui_safe'):
+                self.app_instance._gui_safe(_do_show)
+            elif getattr(self.app_instance, 'root', None):
+                self.app_instance.root.after(0, _do_show)
         except Exception as e:
-            log(f"Show window error: {e}")
+            log(f"Show window schedule error: {e}")
                 
     def minimize_to_tray(self):
-        """Minimize window to tray"""
+        """Minimize window to tray (Tk main thread)."""
+        def _do_minimize():
+            try:
+                root = getattr(self.app_instance, 'root', None)
+                if root and root.winfo_exists():
+                    self.app_instance._tray_mode.set()
+                    root.withdraw()
+            except Exception as e:
+                log(f"Minimize error: {e}")
+
         try:
-            if hasattr(self.app_instance, 'root') and self.app_instance.root:
-                # Mark as intentionally in tray to prevent auto-show
-                self.app_instance._tray_mode.set()
-                self.app_instance.root.withdraw()
+            if hasattr(self.app_instance, '_gui_safe'):
+                self.app_instance._gui_safe(_do_minimize)
+            elif getattr(self.app_instance, 'root', None):
+                self.app_instance.root.after(0, _do_minimize)
         except Exception as e:
-            log(f"Minimize error: {e}")
+            log(f"Minimize schedule error: {e}")
                 
     def exit_app(self):
         """Exit application from tray"""
@@ -290,6 +320,52 @@ class TrayManager:
             log("Tray system stopped")
         except Exception as e:
             log(f"Tray system stop error: {e}")
+
+    def notify(self, title: str, message: str):
+        """Tray balloon / notification (thread-safe)."""
+        if not TRY_TRAY or not self.tray_icon:
+            return
+        try:
+            # pystray 0.19+ notify
+            if hasattr(self.tray_icon, "notify"):
+                self.tray_icon.notify(message, title)
+                return
+        except Exception as e:
+            log(f"Tray notify error: {e}")
+        # Fallback: Windows balloon via ctypes
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                NIIF_INFO = 0x01
+                NIM_MODIFY = 0x01
+                class NOTIFYICONDATAW(ctypes.Structure):
+                    _fields_ = [
+                        ("cbSize", wintypes.DWORD),
+                        ("hWnd", wintypes.HWND),
+                        ("uID", wintypes.UINT),
+                        ("uFlags", wintypes.UINT),
+                        ("uCallbackMessage", wintypes.UINT),
+                        ("hIcon", wintypes.HICON),
+                        ("szTip", wintypes.WCHAR * 128),
+                        ("dwState", wintypes.DWORD),
+                        ("dwStateMask", wintypes.DWORD),
+                        ("szInfo", wintypes.WCHAR * 256),
+                        ("uVersion", wintypes.UINT),
+                        ("szInfoTitle", wintypes.WCHAR * 64),
+                        ("dwInfoFlags", wintypes.DWORD),
+                    ]
+                flags = 0x10  # NIF_INFO
+                nid = NOTIFYICONDATAW()
+                nid.cbSize = ctypes.sizeof(nid)
+                nid.uID = 1
+                nid.uFlags = flags
+                nid.szInfoTitle = title[:63]
+                nid.szInfo = message[:255]
+                nid.dwInfoFlags = NIIF_INFO
+                ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+            except Exception as ex:
+                log(f"Tray balloon fallback error: {ex}")
     
     def on_window_close(self):
         """Handle main window close event"""

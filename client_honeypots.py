@@ -40,9 +40,11 @@ import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable, Optional
+from urllib.parse import unquote_plus
 
 from client_constants import (
     FTP_BANNER, SSH_BANNER, MYSQL_VERSION, MSSQL_VERSION, RDP_CERT_CN,
+    HTTP_SERVER_BANNER, SMB_SERVER_NAME, HONEYPOT_BIND_ADDRESS,
     MAX_CREDENTIAL_LENGTH, MAX_ATTEMPTS_PER_IP_PER_MIN,
     HONEYPOT_AUTO_RESTART_MAX, HONEYPOT_RESTART_BACKOFF,
 )
@@ -87,7 +89,7 @@ class BaseHoneypot(ABC, threading.Thread):
         port: int,
         service_name: str,
         on_credential: Callable[..., None],
-        bind_addr: str = "0.0.0.0",
+        bind_addr: str = HONEYPOT_BIND_ADDRESS,
         backlog: int = 64,
     ):
         super().__init__(daemon=True, name=f"Honeypot-{service_name}-{port}")
@@ -1091,3 +1093,132 @@ class RDPHoneypot(BaseHoneypot):
         struct.pack_into(">H", tpkt, 2, total_len)
 
         return bytes(tpkt + disconnect)
+
+
+# ===================== HTTP HONEYPOT ===================== #
+
+_LOGIN_PAGE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Sign in</title>
+<style>
+body{font-family:Segoe UI,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#1e293b;padding:2rem;border-radius:12px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+h1{font-size:1.25rem;margin:0 0 1rem}
+input{width:100%;padding:.65rem;margin:.4rem 0;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#fff;box-sizing:border-box}
+button{width:100%;padding:.7rem;margin-top:.6rem;background:#3b82f6;color:#fff;border:none;border-radius:8px;cursor:pointer}
+</style></head><body><div class="card"><h1>Windows Security Portal</h1>
+<form method="POST" action="/login"><input name="username" placeholder="Username" required>
+<input name="password" type="password" placeholder="Password" required>
+<button type="submit">Sign in</button></form></div></body></html>"""
+
+
+class HTTPHoneypot(BaseHoneypot):
+    """Sahte HTTP login sayfası — POST credential yakalar."""
+
+    def __init__(self, port: int = 80, *, on_credential: Callable):
+        super().__init__(port, "HTTP", on_credential)
+
+    def handle_client(self, conn: socket.socket, addr: tuple):
+        attacker_ip = addr[0]
+        try:
+            conn.settimeout(10)
+            data = conn.recv(4096)
+            if not data:
+                return
+            req = data.decode("utf-8", errors="replace")
+            lines = req.split("\r\n")
+            if not lines:
+                return
+            method, path, *_ = (lines[0] + "   ").split()[:3]
+
+            if method == "POST" and "/login" in path:
+                body = req.split("\r\n\r\n", 1)[-1]
+                username, password = self._parse_form(body)
+                if username or password:
+                    self.report_credential(attacker_ip, username, password)
+                self._send(conn, 401, "Invalid credentials", _LOGIN_PAGE)
+                return
+
+            if path in ("/", "/login", "/index.html"):
+                self._send(conn, 200, "OK", _LOGIN_PAGE)
+            else:
+                self._send(conn, 404, "Not Found", "<h1>404</h1>")
+        except Exception as e:
+            log(f"[HTTP] Client error {attacker_ip}: {e}")
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _parse_form(self, body: str) -> tuple[str, str]:
+        username, password = "", ""
+        for part in body.split("&"):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k, v = unquote_plus(k), unquote_plus(v)
+            if k == "username":
+                username = v[:MAX_CREDENTIAL_LENGTH]
+            elif k == "password":
+                password = v[:MAX_CREDENTIAL_LENGTH]
+        return username, password
+
+    def _send(self, conn: socket.socket, code: int, status: str, body: str):
+        payload = body.encode("utf-8")
+        hdr = (
+            f"HTTP/1.1 {code} {status}\r\n"
+            f"Server: {HTTP_SERVER_BANNER}\r\n"
+            f"Content-Type: text/html; charset=utf-8\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            f"Connection: close\r\n\r\n"
+        )
+        conn.sendall(hdr.encode("utf-8") + payload)
+
+
+# ===================== SMB HONEYPOT ===================== #
+
+class SMBHoneypot(BaseHoneypot):
+    """Minimal SMB negotiate responder — bağlantı ve probe IP yakalar."""
+
+    _NEGOTIATE_RESP = bytes([
+        0x00, 0x00, 0x00, 0x51,
+        0xff, 0x53, 0x4d, 0x42, 0x72,  # SMB header
+        0x00, 0x00, 0x00, 0x00, 0x18, 0x01, 0x28, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x06, 0x00,
+        0x02, 0x02, 0x10, 0x02, 0x00, 0x03, 0x02, 0x02,
+        0x06, 0x00, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ])
+
+    def __init__(self, port: int = 445, *, on_credential: Callable):
+        super().__init__(port, "SMB", on_credential)
+
+    def handle_client(self, conn: socket.socket, addr: tuple):
+        attacker_ip = addr[0]
+        try:
+            conn.settimeout(8)
+            data = conn.recv(2048)
+            if data and data[4:8] == b"\xffSMB":
+                self.report_credential(
+                    attacker_ip,
+                    f"\\\\{SMB_SERVER_NAME}\\share",
+                    "<smb_probe>",
+                )
+                try:
+                    conn.sendall(self._NEGOTIATE_RESP[:min(len(self._NEGOTIATE_RESP), 128)])
+                except OSError:
+                    pass
+            elif data:
+                self.report_credential(attacker_ip, "<smb_connect>", "<probe>")
+        except Exception as e:
+            log(f"[SMB] Client error {attacker_ip}: {e}")
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+

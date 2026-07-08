@@ -550,6 +550,11 @@ class CloudHoneypotClient:
                 try:
                     if self.perf_optimizer:
                         self.perf_optimizer.start()
+                    if self.fp_tuner:
+                        from client_utils import get_from_config
+                        interval = int(get_from_config(
+                            "false_positive_tuner.cleanup_interval_seconds", 3600))
+                        self.fp_tuner.start(interval=interval)
                     log("⚙️ Faz 4 started (PerfOptimizer + FPTuner)")
                 except Exception as e:
                     log(f"⚠️ Faz 4 start failed: {e}")
@@ -631,6 +636,12 @@ class CloudHoneypotClient:
     # ---------- Helper Methods ---------- #
     def require_admin_for_operation(self, operation_name: str) -> bool:
         """Check and request admin privileges for critical operations"""
+        try:
+            from client_constants import SKIP_ADMIN_ELEVATION, TEST_MODE
+            if SKIP_ADMIN_ELEVATION or TEST_MODE:
+                return True
+        except ImportError:
+            pass
         if ctypes.windll.shell32.IsUserAnAdmin(): return True
         log(f"'{operation_name}' işlemi admin yetkisi gerektiriyor ama mevcut değil")
         
@@ -648,6 +659,9 @@ class CloudHoneypotClient:
     def ensure_admin(self, force_request: bool = False) -> Union[bool, str]:
         """Ensure admin privileges with optional elevation request"""
         try:
+            from client_constants import SKIP_ADMIN_ELEVATION, TEST_MODE
+            if SKIP_ADMIN_ELEVATION or TEST_MODE:
+                return True
             if os.name != "nt" or ctypes.windll.shell32.IsUserAnAdmin(): return True
             if force_request:
                 log("🔧 Security monitoring requires elevated privileges...")
@@ -931,11 +945,8 @@ class CloudHoneypotClient:
                 has_active_session = 'Active' in result.stdout
                 
                 if not has_active_session:
-                    log("[GUI_HEALTH] Aktif kullanıcı session'ı yok - GUI minimal modda çalışacak")
-                    # Minimize to tray if no active session
-                    if hasattr(self, 'tray_manager') and self.tray_manager:
-                        self._tray_mode.set()
-                        self.root.withdraw()
+                    log("[GUI_HEALTH] Aktif kullanıcı session'ı yok (headless/RDP disconnect olabilir)")
+                    # Otomatik withdraw kaldırıldı — tray'den Göster sonrası pencere tekrar gizlenmesin
                         
         except Exception as e:
             log(f"[GUI_HEALTH] Session kontrolü hatası: {e}")
@@ -1742,6 +1753,9 @@ class CloudHoneypotClient:
             if getattr(self, 'perf_optimizer', None):
                 try: self.perf_optimizer.stop()
                 except Exception: pass
+            if getattr(self, 'fp_tuner', None):
+                try: self.fp_tuner.stop()
+                except Exception: pass
             if getattr(self, 'memory_guard', None):
                 try: self.memory_guard.stop()
                 except Exception: pass
@@ -1973,9 +1987,15 @@ class CloudHoneypotClient:
         # ── Modern GUI ── #
         self.gui = ModernGUI(self)
 
-        # Consent dialog (modern)
+        # Consent dialog (modern) — skip in debug/test mode
         try:
-            self.gui.show_consent_dialog()
+            from client_constants import DEBUG_MODE, TEST_MODE
+            from client_utils import get_from_config
+            skip_consent = DEBUG_MODE or TEST_MODE or get_from_config("debug.skip_consent_dialog", False)
+            if not skip_consent:
+                self.gui.show_consent_dialog()
+            else:
+                log("[DEBUG] Consent dialog skipped")
         except Exception as e:
             log(f"consent ui error: {e}")
 
@@ -2004,9 +2024,7 @@ class CloudHoneypotClient:
             self.initialize_tray_manager()
             # Wire tray notifications to alert pipeline (v4.0)
             if self.alert_pipeline and hasattr(self, 'tray_manager') and self.tray_manager:
-                self.alert_pipeline.tray_notify_func = getattr(
-                    self.tray_manager, 'notify', None
-                )
+                self.alert_pipeline.tray_notify_func = self.tray_manager.notify
 
         # Önceki oturumdan kalan servisleri geri yükle
         self._restore_saved_services()
@@ -2047,7 +2065,17 @@ if __name__ == "__main__":
     parser.add_argument("--silent-update-check", action="store_true", help="Silent update check mode - check for updates and install automatically")
     parser.add_argument("--create-tasks", action="store_true", help="Create Task Scheduler tasks and exit (for installer)")
     parser.add_argument("--show-gui", action="store_true", help="Force show GUI window (used by installer launch)")
+    parser.add_argument("--debug", action="store_true", help="Debug mode: verbose logs, skip consent, optional no admin")
     args = parser.parse_args()
+    
+    # Debug mode overrides
+    if args.debug:
+        import client_constants
+        client_constants.DEBUG_MODE = True
+        client_constants.VERBOSE_LOGGING = True
+        client_constants.TEST_MODE = True
+        client_constants.SKIP_ADMIN_ELEVATION = True
+        log("[DEBUG] Debug mode enabled via --debug")
     
     # Set global silent mode if requested
     if args.silent:
@@ -2078,11 +2106,11 @@ if __name__ == "__main__":
                 
                 # Start main app
                 if getattr(sys, 'frozen', False):
-                    subprocess.Popen([exe_path], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                    subprocess.Popen([exe_path, "--show-gui"],
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
                 else:
-                    subprocess.Popen([sys.executable, "client.py"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                    subprocess.Popen([sys.executable, "client.py", "--show-gui"],
+                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
                 
                 log("New app instance started successfully")
             else:

@@ -19,7 +19,7 @@ from logging.handlers import RotatingFileHandler
 
 from client_constants import (
     LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_ENCODING,
-    LOG_TIME_FORMAT
+    LOG_TIME_FORMAT,
 )
 
 # ===================== LOGGING SETUP ===================== #
@@ -33,12 +33,15 @@ class CustomFormatter(logging.Formatter):
 def setup_logging() -> bool:
     """Initialize modern rotating file logger with console output"""
     try:
+        from client_constants import DEBUG_MODE
+        log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
         # Configure root logger to be quiet, use only our logger
         logging.getLogger().setLevel(logging.WARNING)
         
         # Setup application logger
         logger = logging.getLogger('cloud-client')
-        logger.setLevel(logging.INFO)
+        log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
+        logger.setLevel(log_level)
         logger.propagate = False
         
         # Clear existing handlers
@@ -53,7 +56,7 @@ def setup_logging() -> bool:
         # Apply formatting to all handlers
         formatter = CustomFormatter('%(asctime)s [%(levelname)s] %(message)s')
         for handler in handlers:
-            handler.setLevel(logging.INFO)
+            handler.setLevel(log_level)
             handler.setFormatter(formatter)
             logger.addHandler(handler)
         

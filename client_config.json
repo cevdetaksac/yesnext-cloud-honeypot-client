@@ -1,24 +1,22 @@
 {
     "application": {
         "name": "Cloud Honeypot Client",
-        "version": "4.3.0",
+        "version": "4.4.1",
         "author": "YesNext Technology"
     },
     "language": {
         "selected": "tr",
         "selected_by_user": true,
-        "available_languages": [
-            "tr",
-            "en"
-        ],
+        "available_languages": ["tr", "en"],
         "default": "tr"
     },
     "ui": {
-        "window_width": 900,
-        "window_height": 700,
+        "window_width": 1100,
+        "window_height": 720,
         "theme": "dark",
         "show_loading_screen": true,
-        "loading_timeout": 30
+        "loading_timeout": 30,
+        "dashboard_refresh_seconds": 10
     },
     "admin": {
         "require_admin_privileges": true,
@@ -31,46 +29,54 @@
         "backup_count": 5,
         "debug_mode": false
     },
+    "debug": {
+        "enabled": false,
+        "verbose_logging": false,
+        "skip_admin_elevation": false,
+        "test_mode": false,
+        "skip_consent_dialog": false
+    },
     "api": {
         "base_url": "https://honeypot.yesnext.com.tr/api",
         "timeout": 30,
-        "retry_count": 3
+        "retry_count": 3,
+        "tls_verify": true,
+        "ca_bundle": "",
+        "legacy_token_query": true
+    },
+    "security": {
+        "command_signing": true
+    },
+    "notifications": {
+        "webhook_url": "",
+        "webhook_enabled": false
+    },
+    "performance_optimizer": {
+        "enabled": true
+    },
+    "false_positive_tuner": {
+        "enabled": true,
+        "cleanup_interval_seconds": 3600
     },
     "services": {
         "auto_start": false,
         "rdp_port": 53389,
+        "bind_address": "0.0.0.0",
         "honeypots": [
-            {
-                "port": 3389,
-                "service": "RDP",
-                "enabled": true
-            },
-            {
-                "port": 1433,
-                "service": "MSSQL",
-                "enabled": false
-            },
-            {
-                "port": 3306,
-                "service": "MySQL",
-                "enabled": false
-            },
-            {
-                "port": 21,
-                "service": "FTP",
-                "enabled": false
-            },
-            {
-                "port": 22,
-                "service": "SSH",
-                "enabled": true
-            }
+            {"port": 3389, "service": "RDP", "enabled": true},
+            {"port": 22, "service": "SSH", "enabled": true},
+            {"port": 21, "service": "FTP", "enabled": false},
+            {"port": 3306, "service": "MySQL", "enabled": false},
+            {"port": 1433, "service": "MSSQL", "enabled": false},
+            {"port": 80, "service": "HTTP", "enabled": false},
+            {"port": 445, "service": "SMB", "enabled": false}
         ]
     },
     "updates": {
         "auto_check": true,
         "check_interval_hours": 24,
-        "show_notifications": true
+        "show_notifications": true,
+        "verify_checksum": true
     },
     "advanced": {
         "startup_delay": 0,
@@ -78,8 +84,9 @@
         "auto_start_with_windows": false,
         "single_instance": true,
         "gui_health_monitoring": true,
-        "gui_refresh_interval": 300,
+        "gui_refresh_interval": 10,
         "prevent_gui_freeze": true,
-        "windows_server_mode": true
+        "windows_server_mode": true,
+        "lazy_security_intel": true
     }
 }

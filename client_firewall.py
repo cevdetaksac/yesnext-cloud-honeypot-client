@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
-from requests.adapters import HTTPAdapter
+from client_security_utils import auth_headers, resolve_tls_verify, use_legacy_token_query
 from urllib3.util.retry import Retry
 
 
@@ -557,8 +557,12 @@ class FirewallAgent:
 
     def _get_json(self, path: str) -> Tuple[Optional[object], Optional[int]]:
         url = f"{self.api_base}{path}"
+        params = {"token": self.token} if use_legacy_token_query() else None
         try:
-            r = self.session.get(url, timeout=5)
+            r = self.session.get(
+                url, timeout=5, verify=resolve_tls_verify(),
+                headers=auth_headers(self.token), params=params,
+            )
             if r.status_code == 200:
                 return r.json(), 200
             return None, r.status_code
@@ -568,8 +572,13 @@ class FirewallAgent:
 
     def _post_json(self, path: str, data: dict) -> Tuple[Optional[object], Optional[int]]:
         url = f"{self.api_base}{path}"
+        payload = dict(data)
+        payload.setdefault("token", self.token)
         try:
-            r = self.session.post(url, json=data, timeout=5)
+            r = self.session.post(
+                url, json=payload, timeout=5, verify=resolve_tls_verify(),
+                headers=auth_headers(self.token),
+            )
             if r.status_code == 200:
                 return r.json() if r.content else {}, 200
             return None, r.status_code
@@ -597,7 +606,7 @@ class FirewallAgent:
 
     def _poll_pending_blocks(self) -> List[str]:
         payload_ids: List[str] = []
-        data, code = self._get_json(f"/api/agent/pending-blocks?token={self.token}")
+        data, code = self._get_json("/api/agent/pending-blocks")
         if code != 200 or not isinstance(data, list):
             if code not in (200, None):
                 self.logger.error(f"pending-blocks HTTP {code}")
@@ -628,7 +637,7 @@ class FirewallAgent:
 
     def _poll_pending_unblocks(self) -> List[str]:
         removed_ids: List[str] = []
-        data, code = self._get_json(f"/api/agent/pending-unblocks?token={self.token}")
+        data, code = self._get_json("/api/agent/pending-unblocks")
         if code != 200 or not isinstance(data, list):
             if code not in (200, None):
                 self.logger.error(f"pending-unblocks HTTP {code}")

@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set
 
 from client_helpers import log
+from client_security_utils import verify_command_signature, sign_command
 
 # ── Constants ─────────────────────────────────────────────────────
 
@@ -218,7 +219,7 @@ class RemoteCommandExecutor:
         try:
             resp = self.api_client.api_request(
                 "GET", "commands/pending",
-                params={"token": token},
+                token=token,
                 timeout=8,
             )
             if isinstance(resp, dict):
@@ -237,14 +238,19 @@ class RemoteCommandExecutor:
 
         def _send():
             try:
-                self.api_client.api_request("POST", "commands/result", data={
+                cmd_id = cmd.get("command_id", "")
+                cmd_type = cmd.get("command_type", "")
+                executed_at = datetime.now(timezone.utc).isoformat()
+                payload = {
                     "token": token,
-                    "command_id": cmd.get("command_id", ""),
+                    "command_id": cmd_id,
                     "status": "completed" if result.get("success") else "failed",
                     "result": result,
-                    "executed_at": datetime.now(timezone.utc).isoformat(),
+                    "executed_at": executed_at,
                     "execution_time_ms": result.get("execution_time_ms", 0),
-                })
+                    "signature": sign_command(token, cmd_id, cmd_type, executed_at),
+                }
+                self.api_client.api_request("POST", "commands/result", data=payload)
             except Exception as e:
                 log(f"[REMOTE-CMD] Result report error: {e}")
 
@@ -256,6 +262,11 @@ class RemoteCommandExecutor:
         """
         Validate command. Returns rejection reason or None if valid.
         """
+        # 0. HMAC signature (when server provides one)
+        token = self.token_getter()
+        if token and cmd.get("signature") and not verify_command_signature(token, cmd):
+            return "Invalid command signature"
+
         cmd_type = cmd.get("command_type", "")
 
         # 1. Known command?

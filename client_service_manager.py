@@ -45,6 +45,8 @@ from client_honeypots import (
     MySQLHoneypot,
     MSSQLHoneypot,
     RDPHoneypot,
+    HTTPHoneypot,
+    SMBHoneypot,
 )
 
 
@@ -56,6 +58,8 @@ _HONEYPOT_CLASSES: Dict[str, type] = {
     "MYSQL": MySQLHoneypot,
     "MSSQL": MSSQLHoneypot,
     "RDP":   RDPHoneypot,
+    "HTTP":  HTTPHoneypot,
+    "SMB":   SMBHoneypot,
 }
 
 

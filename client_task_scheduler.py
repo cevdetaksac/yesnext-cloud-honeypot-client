@@ -187,7 +187,7 @@ TASK_CONFIGS = {
             '<WeeksInterval>1</WeeksInterval></ScheduleByWeek></CalendarTrigger>'
         ),
         "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
-        "args": "--mode=updater",
+        "args": "--silent-update-check",
         "multi_instance": "IgnoreNew",
         "hidden": True, "wake": True, "network_required": True,
         "exec_limit": "PT30M", "priority": 7,

@@ -383,7 +383,7 @@ def check_updates_and_apply_silent() -> bool:
             installer_path = os.path.join(temp_dir, "honeypot-installer.exe")
             
             # Get download URL
-            download_url = update_info.get('download_url')
+            download_url = update_info.get('installer_url') or update_info.get('download_url')
             if not download_url:
                 log("[SILENT UPDATE] No download URL found in update info")
                 return False

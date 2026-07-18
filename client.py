@@ -1140,10 +1140,41 @@ class CloudHoneypotClient:
                 # Extract first line (commands are newline-terminated)
                 line = buf.split(b"\n", 1)[0]
                 cmd = line.decode("utf-8", "ignore").strip().upper()
-                if cmd == "SHOW" and self.show_cb:
-                    log("[CTRL] SHOW received — bringing GUI to front")
-                    self._gui_safe(self.show_cb)
+                if cmd == "SHOW":
+                    has_gui = bool(
+                        self.show_cb
+                        and getattr(self, "root", None) is not None
+                    )
+                    if has_gui:
+                        try:
+                            if not self.root.winfo_exists():
+                                has_gui = False
+                        except Exception:
+                            has_gui = False
+                    if has_gui:
+                        log("[CTRL] SHOW received — bringing GUI to front")
+                        self._gui_safe(self.show_cb)
+                        try:
+                            conn.sendall(b"OK\n")
+                        except Exception:
+                            pass
+                    else:
+                        # Daemon-only / no window — caller must start a GUI instance
+                        log("[CTRL] SHOW received — no GUI window (NOGUI)")
+                        try:
+                            conn.sendall(b"NOGUI\n")
+                        except Exception:
+                            pass
                 elif cmd in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
+                    # Protect freshly launched --show-gui from installer/kill race
+                    protect_until = float(getattr(self, "_quit_protect_until", 0) or 0)
+                    if time.time() < protect_until:
+                        log("[CTRL] QUIT ignored — GUI startup grace active")
+                        try:
+                            conn.sendall(b"BUSY\n")
+                        except Exception:
+                            pass
+                        continue
                     # Installer / updater graceful exit — bypasses DACL self-protection
                     log("[CTRL] QUIT received — graceful exit for install/update")
                     try:
@@ -2416,7 +2447,8 @@ if __name__ == "__main__":
     want_tray = getattr(args, "mode", None) == "tray"
     want_show_gui = bool(getattr(args, "show_gui", False))
 
-    # If another instance is alive, --show-gui / default GUI should raise IT instead of dying with exit 2
+    # If another instance is alive, try SHOW; only exit if it confirmed a real GUI.
+    # Daemon-only replies NOGUI → fall through and steal so the user gets a window.
     if (want_show_gui or operation_mode == GUI_MODE) and not want_tray:
         try:
             from client_instance import mutex_already_held, request_show_existing
@@ -2454,6 +2486,14 @@ if __name__ == "__main__":
             # Create app instance
             app = CloudHoneypotClient()
             app.lang = selected_language
+            if want_show_gui:
+                # Installer/desktop launch: ignore QUIT for a few seconds (kill race)
+                app._quit_protect_until = time.time() + 20.0
+                try:
+                    from client_utils import release_update_lock
+                    release_update_lock(resume_updaters=True)
+                except Exception:
+                    pass
             log(f"Application initialized with language: {selected_language}")
             
             # Task Scheduler management handled by modular system in __init__

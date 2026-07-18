@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 40
+!define VERSIONBUILD 41
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -86,6 +86,10 @@ Function LaunchAsCurrentUser
     LaunchAfterKill:
     ; Let previous _MEI* unpack dirs finish deleting
     Sleep 2000
+
+    ; Clear stale update lock so kill/watchdog and GUI are not blocked
+    ExpandEnvStrings $R9 "%ProgramData%\YesNext\CloudHoneypotClient\update_in_progress.lock"
+    Delete /REBOOTOK "$R9"
 
     ; Single launch — app __init__ installs Task Scheduler when elevated/needed
     ExecShell "open" "$INSTDIR\honeypot-client.exe" "--show-gui"

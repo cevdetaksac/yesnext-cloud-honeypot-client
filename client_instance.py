@@ -67,13 +67,27 @@ def mutex_already_held() -> bool:
 def request_show_existing(timeout: float = 1.2) -> bool:
     """Ask the already-running instance to bring its GUI to the front.
 
-    Returns True if SHOW was delivered (caller should exit 0 — do not steal).
+    Returns True only if the peer confirmed a visible GUI (OK).
+    Daemon-only instances reply NOGUI → False so the launcher can take over.
     """
     try:
         with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=timeout) as sock:
+            sock.settimeout(timeout)
             sock.sendall(b"SHOW\n")
-        log("[SINGLETON] SHOW sent to existing instance")
-        return True
+            try:
+                data = sock.recv(64) or b""
+            except Exception:
+                data = b""
+            reply = data.strip().upper()
+            if reply.startswith(b"OK"):
+                log("[SINGLETON] SHOW OK — existing GUI raised")
+                return True
+            if reply.startswith(b"NOGUI"):
+                log("[SINGLETON] SHOW NOGUI — existing instance has no window")
+                return False
+            # Legacy peers (no reply): treat as unknown — do not claim success
+            log(f"[SINGLETON] SHOW ambiguous reply {reply!r} — will allow takeover")
+            return False
     except Exception as e:
         log(f"[SINGLETON] SHOW failed (no healthy control socket): {e}")
         return False

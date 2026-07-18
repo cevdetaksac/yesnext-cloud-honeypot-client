@@ -72,6 +72,21 @@ if (-not $targetMode) {
 }
 Write-Log "✅ Target mode: $targetMode"
 
+# Skip kill/restart while interactive or silent installer download is running
+$updateLocks = @(
+    (Join-Path $env:ProgramData "YesNext\CloudHoneypotClient\update_in_progress.lock"),
+    (Join-Path $env:APPDATA "YesNext\CloudHoneypotClient\update_in_progress.lock")
+)
+foreach ($ul in $updateLocks) {
+    if (Test-Path $ul) {
+        $age = ((Get-Date) - (Get-Item $ul).LastWriteTime).TotalSeconds
+        if ($age -lt 7200) {
+            Write-Log "⏸️ Skipped memory restart — update_in_progress.lock present (age=${age}s)"
+            exit 0
+        }
+    }
+}
+
 # 4. Process kill
 Write-Log "🛑 Killing honeypot processes..."
 try {

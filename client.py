@@ -44,7 +44,8 @@ from client_task_scheduler import perform_comprehensive_task_management
 from client_utils import (ServiceController, load_i18n, install_excepthook, 
                          load_config, get_config_value, set_config_value,
                          get_from_config, start_watchdog_if_needed, get_port_table,
-                         update_language_config, watchdog_main, ensure_firewall_allow_for_port)
+                         update_language_config, resolve_app_language,
+                         watchdog_main, ensure_firewall_allow_for_port)
 
 # Import constants from central configuration
 from client_constants import (
@@ -172,10 +173,9 @@ class CloudHoneypotClient:
         
         # Initialize language with safe fallback from config
         try:
-            lang = self.config["language"]["selected"]
-            self.lang = "tr" if not isinstance(lang, str) else lang
-        except Exception as e:
-            self.lang = "tr"
+            self.lang = resolve_app_language()
+        except Exception:
+            self.lang = "en"
 
         # Initialize core components
         self.api_client = HoneypotAPIClient(str(API_URL), log)
@@ -2117,8 +2117,8 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"update watchdog thread error: {e}")
 
-        # Language from central config
-        self.lang = get_config_value("language.selected", "tr")
+        # Language from Windows UI (first run) or saved user preference
+        self.lang = resolve_app_language()
 
         # Token'ı yükle
         token = self.token_manager.load_token(self.root, self.t)
@@ -2351,10 +2351,17 @@ if __name__ == "__main__":
     log(f"Process PID: {os.getpid()}")
     log(f"Command line: {' '.join(sys.argv)}")
     
-    # Singleton check - ensure only one instance per mode
-    if not check_singleton(operation_mode):
-        log(f"ERROR: Cannot start - another instance is running or mutex failed")
-        sys.exit(2)  # Exit code 2 = Mutex taken
+    # Singleton: tray must NEVER steal/kill a visible GUI; --show-gui may take over
+    want_tray = getattr(args, "mode", None) == "tray"
+    want_show_gui = bool(getattr(args, "show_gui", False))
+    if want_tray and not want_show_gui:
+        if not check_singleton(operation_mode, allow_steal=False):
+            log("Tray launch skipped — another instance already running (GUI kept)")
+            sys.exit(0)
+    else:
+        if not check_singleton(operation_mode, allow_steal=True):
+            log("ERROR: Cannot start - another instance is running or mutex failed")
+            sys.exit(2)  # Exit code 2 = Mutex taken
 
     # ===== SIMPLIFIED MODE-BASED EXECUTION =====
     
@@ -2369,9 +2376,8 @@ if __name__ == "__main__":
         log("=== GUI MODE STARTUP - Normal interface startup ===")
         
         try:
-            # Load configuration
-            config = load_config()
-            selected_language = config["language"]["selected"]
+            # Language: Windows UI on first run; keep user override after manual change
+            selected_language = resolve_app_language()
             
             # Create app instance
             app = CloudHoneypotClient()
@@ -2384,16 +2390,15 @@ if __name__ == "__main__":
             else:
                 log("Normal user mode - Task Scheduler will be configured later")
             
-            # Check if started with --mode=tray for tray-minimized startup
             # --show-gui / onboarding / missing token → always show window (register first)
-            # Onboarding flag is written by non-silent installer only — do not re-set on every shortcut launch
-            from client_utils import should_force_gui_visible
+            from client_utils import should_force_gui_visible, set_force_gui_onboarding
             has_token = bool(app.get_token() or app.state.get("token"))
-            force_gui = bool(getattr(args, "show_gui", False)) or should_force_gui_visible(has_token)
-            tray_mode = (
-                getattr(args, "mode", None) == "tray"
-                and not force_gui
-            )
+            # Installer wrote onboarding flag; also force when no token yet
+            if want_show_gui and should_force_gui_visible(has_token):
+                set_force_gui_onboarding("show_gui_launch")
+            force_gui = want_show_gui or should_force_gui_visible(has_token)
+            # Tray-minimized ONLY for explicit --mode=tray AND not onboarding
+            tray_mode = want_tray and not force_gui
             if force_gui:
                 log("Onboarding/GUI required — starting visible (not tray-minimized)")
             
@@ -2428,14 +2433,22 @@ if __name__ == "__main__":
                     app.root.withdraw()  # Hide the window
                     app.root.update()
                     log("Tray mode: Window hidden successfully")
-            elif force_gui and hasattr(app, "root") and app.root:
-                app._tray_mode.clear()
-                try:
-                    app.root.deiconify()
-                    app.root.lift()
-                    app.root.focus_force()
-                except Exception:
-                    pass
+            else:
+                # Default / installer / onboarding: window must stay visible
+                if hasattr(app, "root") and app.root:
+                    app._tray_mode.clear()
+                    try:
+                        app.root.deiconify()
+                        app.root.lift()
+                        app.root.focus_force()
+                        # Re-assert visibility after tray icon init / consent (timing races)
+                        app.root.after(400, lambda: (
+                            app._tray_mode.clear(),
+                            app.root.deiconify(),
+                            app.root.lift(),
+                        ))
+                    except Exception:
+                        pass
             
             # Run main loop
             if hasattr(app, 'root') and app.root:
@@ -2470,8 +2483,7 @@ if __name__ == "__main__":
             os.makedirs(log_dir, exist_ok=True)
             setup_logging()
             try:
-                config = load_config()
-                selected_language = config["language"]["selected"]
+                selected_language = resolve_app_language()
                 app = CloudHoneypotClient()
                 app.lang = selected_language
                 log(f"Application initialized with language: {selected_language}")

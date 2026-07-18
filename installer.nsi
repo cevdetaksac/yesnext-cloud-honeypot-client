@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 25
+!define VERSIONBUILD 26
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -192,7 +192,7 @@ Function PreInstallKillFast
     File "scripts\kill-honeypot.ps1"
 
     DetailPrint "[PRE-KILL] Stopping tasks + DACL-protected processes..."
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1"'
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1" -Force'
     Pop $0
     DetailPrint "[PRE-KILL] kill-honeypot.ps1 exit code: $0"
     Sleep 200
@@ -259,7 +259,7 @@ Function un.PreInstallKillFast
 
     ; Prefer installed kill helper (SeDebugPrivilege)
     IfFileExists "$INSTDIR\scripts\kill-honeypot.ps1" 0 UnKillFallback
-        nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\kill-honeypot.ps1"'
+        nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\kill-honeypot.ps1" -Force'
         Pop $0
         Goto UnKillDone
 
@@ -382,11 +382,16 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
         Goto SkipAutoStart
     InteractiveOnboarding:
         ; Force visible GUI until user registers / links account (no tray hide)
-        CreateDirectory "$COMMONPROGRAMDATA\YesNext\CloudHoneypotClient"
-        FileOpen $0 "$COMMONPROGRAMDATA\YesNext\CloudHoneypotClient\force_gui_onboarding.flag" w
+        ; Use %ProgramData% — reliable on all NSIS versions ($COMMONPROGRAMDATA may be empty)
+        ExpandEnvStrings $1 "%ProgramData%\YesNext\CloudHoneypotClient"
+        CreateDirectory "$1"
+        FileOpen $0 "$1\force_gui_onboarding.flag" w
         FileWrite $0 "interactive_install$\r$\n"
         FileClose $0
         !insertmacro LOG "[ONBOARDING] force_gui_onboarding.flag written — GUI will stay visible"
+        ; End tray/daemon so finish-page --show-gui is not killed by singleton
+        nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
+        nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
     SkipAutoStart:
 
     !insertmacro LOG "[FINISH] Installation complete."

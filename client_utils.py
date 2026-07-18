@@ -726,10 +726,10 @@ DEFAULT_CONFIG: dict = {
         "author": "YesNext Technology"
     },
     "language": {
-        "selected": "tr",
+        "selected": "en",
         "selected_by_user": False,
         "available_languages": ["tr", "en"],
-        "default": "tr"
+        "default": "en"
     },
     "ui": {
         "window_width": 900,
@@ -897,11 +897,93 @@ def set_config_value(key_path: str, value) -> bool:
     return save_config(config)
 
 def update_language_config(language: str, selected_by_user: bool = True) -> bool:
-    """Update language configuration"""
+    """Update language configuration (exe config + ProgramData so upgrades keep user choice)."""
     config = load_config()
+    if "language" not in config or not isinstance(config["language"], dict):
+        config["language"] = {}
     config["language"]["selected"] = language
     config["language"]["selected_by_user"] = selected_by_user
-    return save_config(config)
+    ok = save_config(config)
+    try:
+        prefs_dir = os.path.join(
+            os.environ.get("ProgramData", r"C:\ProgramData"),
+            "YesNext",
+            "CloudHoneypotClient",
+        )
+        os.makedirs(prefs_dir, exist_ok=True)
+        prefs_path = os.path.join(prefs_dir, "language_pref.json")
+        with open(prefs_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"selected": language, "selected_by_user": bool(selected_by_user)},
+                fh,
+                ensure_ascii=False,
+            )
+    except OSError:
+        pass
+    return ok
+
+
+def detect_windows_ui_language() -> str:
+    """Map Windows UI language to supported app language (tr|en)."""
+    try:
+        lang_id = int(ctypes.windll.kernel32.GetUserDefaultUILanguage())
+        # LANGID primary language: Turkish=0x1F (0x041F)
+        if (lang_id & 0xFF) == 0x1F:
+            return "tr"
+    except Exception:
+        pass
+    try:
+        import locale
+        loc = (locale.getdefaultlocale() or (None,))[0] or ""
+        if loc.lower().startswith("tr"):
+            return "tr"
+    except Exception:
+        pass
+    return "en"
+
+
+def _load_language_pref() -> Optional[dict]:
+    try:
+        prefs_path = os.path.join(
+            os.environ.get("ProgramData", r"C:\ProgramData"),
+            "YesNext",
+            "CloudHoneypotClient",
+            "language_pref.json",
+        )
+        if os.path.isfile(prefs_path):
+            with open(prefs_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def resolve_app_language() -> str:
+    """First run: follow Windows UI language. After user picks a language, keep it across upgrades."""
+    try:
+        available = ["tr", "en"]
+        prefs = _load_language_pref()
+        if prefs and prefs.get("selected_by_user") and prefs.get("selected") in available:
+            return prefs["selected"]
+
+        config = load_config()
+        lang_cfg = config.get("language") or {}
+        available = lang_cfg.get("available_languages") or available
+        if lang_cfg.get("selected_by_user") and lang_cfg.get("selected") in available:
+            # Migrate into ProgramData so next installer overwrite keeps choice
+            update_language_config(lang_cfg["selected"], selected_by_user=True)
+            return lang_cfg["selected"]
+
+        detected = detect_windows_ui_language()
+        if detected not in available:
+            detected = "en"
+        update_language_config(detected, selected_by_user=False)
+        return detected
+    except Exception:
+        return detect_windows_ui_language()
+
 
 # ===== CONFIG SYSTEM FINALIZED =====
 # All settings are now managed through client_config.json
@@ -1606,13 +1688,19 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
         pass
 
     # Prefer dedicated kill script when available (SeDebugPrivilege)
+    # -Force: we already finished download / are installing — lock may still say "download"
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "kill-honeypot.ps1")
     if os.path.isfile(script):
         try:
+            # Mark lock as installing so kill script (and parallel tasks) know kill is intentional
+            try:
+                acquire_update_lock("installing")
+            except Exception:
+                pass
             subprocess.run(
                 [
                     "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-File", script,
+                    "-File", script, "-Force",
                 ],
                 capture_output=True,
                 timeout=30,

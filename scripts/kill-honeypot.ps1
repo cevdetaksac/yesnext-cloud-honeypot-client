@@ -1,8 +1,48 @@
 # Kill all Cloud Honeypot Client processes (installer / updater helper)
 # Handles: DACL self-protection, watchdog respawn, HoneypotClientGuard task
 # Requires: elevated (admin) for SeDebugPrivilege
+#
+# Usage:
+#   kill-honeypot.ps1           — respects update_in_progress.lock (interactive download)
+#   kill-honeypot.ps1 -Force    — kill even during download (installer after download done)
+
+param(
+    [switch]$Force
+)
 
 $ErrorActionPreference = "SilentlyContinue"
+
+function Test-UpdateLockBlocksKill {
+    if ($Force) { return $false }
+    $candidates = @(
+        (Join-Path $env:ProgramData "YesNext\CloudHoneypotClient\update_in_progress.lock"),
+        (Join-Path $env:APPDATA "YesNext\CloudHoneypotClient\update_in_progress.lock")
+    )
+    foreach ($lock in $candidates) {
+        if (-not (Test-Path $lock)) { continue }
+        try {
+            $ageSec = ((Get-Date) - (Get-Item $lock).LastWriteTime).TotalSeconds
+            if ($ageSec -gt 7200) { continue }
+            $reason = ""
+            try { $reason = (Get-Content $lock -TotalCount 1 -ErrorAction SilentlyContinue) } catch {}
+            # interactive / silent download in progress — never kill mid-download
+            if ($reason -match "download|interactive|silent") {
+                Write-Host "[KILL] Abort — update lock present ($reason, age=${ageSec}s). Use -Force only after download."
+                return $true
+            }
+            # any fresh lock without install reason still blocks casual kills
+            if ($reason -notmatch "install|preparing") {
+                Write-Host "[KILL] Abort — update_in_progress.lock present (age=${ageSec}s)"
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+if (Test-UpdateLockBlocksKill) {
+    exit 0
+}
 
 function Write-StopFlags {
     $paths = @(

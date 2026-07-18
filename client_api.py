@@ -168,10 +168,14 @@ class HoneypotAPIClient:
             self.log(f"[API] Beklenmeyen hata: {e}")
             return None
 
-    def register_client(self, server_name: str, ip_address: str) -> Optional[str]:
-        """İstemciyi API'ye kaydeder ve bir token alır."""
+    def register_client(self, server_name: str, ip_address: str, machine_id: str = "") -> Optional[str]:
+        """İstemciyi API'ye kaydeder ve bir token alır (machine_id ile upsert tercih edilir)."""
         try:
             payload = {"server_name": server_name, "ip": ip_address}
+            mid = (machine_id or "").strip()
+            if mid:
+                payload["machine_id"] = mid
+                payload["hwid"] = mid
             response = self.api_request("POST", "register", data=payload)
             if response and "token" in response:
                 token = response["token"]
@@ -839,12 +843,30 @@ def report_service_action_api(api_request_func, token: str, service: str, action
 
 # ===================== CLIENT REGISTRATION ===================== #
 
-def register_client_api(api_url: str, server_name: str, ip: str, token_save_func=None, log_func=None) -> Optional[str]:
-    """Register client with API and get token"""
+def register_client_api(
+    api_url: str,
+    server_name: str,
+    ip: str,
+    token_save_func=None,
+    log_func=None,
+    machine_id: str = "",
+) -> Optional[str]:
+    """Register client with API and get token.
+
+    Sends machine_id so the API can upsert and return the SAME durable token
+    for this machine (identity must not rotate like a session).
+    """
     import requests
     
     try:
-        payload = {"server_name": f"{server_name} ({ip})", "ip": ip}
+        payload = {
+            "server_name": f"{server_name} ({ip})",
+            "ip": ip,
+        }
+        mid = (machine_id or "").strip()
+        if mid:
+            payload["machine_id"] = mid
+            payload["hwid"] = mid  # alias for older/newer API field names
         response = requests.post(
             f"{api_url}/register", json=payload, timeout=15,
             verify=resolve_tls_verify(),

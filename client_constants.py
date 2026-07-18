@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.32"  # Fix GUI update: ShellExecute UAC + open installer after download
+VERSION = "4.4.33"  # Immutable machine token in ProgramData (no SYSTEM/user split)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -97,6 +97,18 @@ def get_app_directory() -> str:
 
 # Application directories
 APP_DIR = get_app_directory()
+
+# Machine-wide identity (SYSTEM daemon + user GUI share the same token)
+MACHINE_DATA_DIR = os.path.join(
+    os.environ.get("ProgramData", r"C:\ProgramData"),
+    "YesNext",
+    "CloudHoneypotClient",
+)
+try:
+    os.makedirs(MACHINE_DATA_DIR, exist_ok=True)
+except OSError:
+    pass
+TOKEN_FILE = os.path.join(MACHINE_DATA_DIR, "token.dat")
 
 # Application files
 LOG_FILE = os.path.join(APP_DIR, "client.log")
@@ -387,7 +399,8 @@ __all__ = [
     'RDP_SECURE_PORT', 'DEFENDER_MARKERS', 'SECURITY_METADATA', 'LEGITIMATE_DOMAINS', 'RESTRICTED_PATHS',
     
     # File paths
-    'APP_DIR', 'LOG_FILE', 'CONSENT_FILE', 'STATUS_FILE', 'WATCHDOG_TOKEN_FILE', 'TASK_STATE_FILE',
+    'APP_DIR', 'MACHINE_DATA_DIR', 'TOKEN_FILE',
+    'LOG_FILE', 'CONSENT_FILE', 'STATUS_FILE', 'WATCHDOG_TOKEN_FILE', 'TASK_STATE_FILE',
     
     # GUI configuration
     'WINDOW_WIDTH', 'WINDOW_HEIGHT', 'WINDOW_TITLE', 'TRY_TRAY', 'GUI_DASHBOARD_REFRESH_MS',

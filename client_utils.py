@@ -10,6 +10,7 @@ import hashlib
 import socket
 import time
 import struct
+import tempfile
 import ctypes
 import ctypes.wintypes as wintypes
 import subprocess
@@ -205,15 +206,48 @@ class TokenStore:
         return out[4:]  # strip prepended length
 
     @staticmethod
-    def save(token: str, token_file_new: str):
+    def save(token: str, token_file_new: str, overwrite: bool = False):
+        """Persist token with DPAPI. By default refuses to replace a different existing token."""
         try:
+            token = (token or "").strip()
+            if not token:
+                return
+            parent = os.path.dirname(token_file_new)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if os.path.isfile(token_file_new) and not overwrite:
+                existing = TokenStore.load(token_file_new)
+                if existing and existing != token:
+                    # Immutable identity: never clobber a different durable token
+                    print(
+                        f"token save refused: existing identity differs "
+                        f"(file={token_file_new})"
+                    )
+                    return
+                if existing and existing == token:
+                    return  # already stored
             data = token.encode("utf-8")
             # küçük bir header ile integrity:
             h = hashlib.sha256(data).hexdigest().encode("ascii")
             payload = b"CHP1|" + h + b"|" + data
             enc = TokenStore._crypt_protect(payload)
-            with open(token_file_new, "wb") as f:
-                f.write(enc)
+            # Atomic replace to avoid partial writes during kill/update
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="token_", suffix=".tmp", dir=parent or None
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(enc)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, token_file_new)
+            except Exception:
+                try:
+                    if os.path.isfile(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             print(f"token save error: {e}")
 
@@ -222,6 +256,8 @@ class TokenStore:
         try:
             if os.path.exists(token_file_new):
                 enc = open(token_file_new, "rb").read()
+                if not enc:
+                    return None
                 dec = TokenStore._crypt_unprotect(enc)
                 if not dec.startswith(b"CHP1|"):
                     return None
@@ -234,12 +270,24 @@ class TokenStore:
         return None
 
     @staticmethod
-    def migrate_from_plain(token_file_old: str, token_file_new: str):
+    def migrate_from_plain(
+        token_file_old: str,
+        token_file_new: str,
+        only_if_missing: bool = True,
+    ):
         try:
+            if only_if_missing and TokenStore.load(token_file_new):
+                # Still remove plaintext leftover if present
+                if os.path.exists(token_file_old):
+                    try:
+                        os.remove(token_file_old)
+                    except Exception:
+                        pass
+                return
             if os.path.exists(token_file_old):
                 token = open(token_file_old, "r", encoding="utf-8").read().strip()
                 if token:
-                    TokenStore.save(token, token_file_new)
+                    TokenStore.save(token, token_file_new, overwrite=False)
                 try:
                     os.remove(token_file_old)
                 except Exception:

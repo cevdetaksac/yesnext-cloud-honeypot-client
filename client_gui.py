@@ -46,6 +46,10 @@ class ModernGUI:
         self._active_page: str = "status"
         self._lazy_intel = bool(get_from_config("advanced.lazy_security_intel", True))
         self._refresh_ms = GUI_DASHBOARD_REFRESH_MS
+        self._pages_built: Dict[str, bool] = {}
+        self._page_placeholders: Dict[str, Any] = {}
+        self._page_data_loaded: Dict[str, bool] = {}
+        self._refresh_loop_started = False
 
     # ─── Yardımcılar ─── #
     def t(self, key: str) -> str:
@@ -129,6 +133,9 @@ class ModernGUI:
 
         self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
         self._nav_buttons: Dict[str, dict] = {}
+        self._pages_built = {"status": False, "threat": False, "services": False}
+        self._page_placeholders = {}
+        self._page_data_loaded = {}
 
         nav_items = [
             ("status", "📊", self.t("tab_status")),
@@ -142,26 +149,39 @@ class ModernGUI:
             )
             page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
             self._pages[page_id] = page
-
-        # Sayfa içerikleri
-        self._build_dashboard(self._pages["status"])
-        self._build_ip_activity_table(self._pages["status"])
-        self._build_threat_center(self._pages["threat"])
-        self._build_services_section(self._pages["services"])
-
-        self._show_page("status")
+            # Lightweight placeholder — real widgets built lazily
+            ph = ctk.CTkLabel(
+                page,
+                text="Yükleniyor…",
+                font=ctk.CTkFont(size=13),
+                text_color=COLORS["text_dim"],
+            )
+            ph.pack(anchor="w", padx=8, pady=24)
+            self._page_placeholders[page_id] = ph
 
         self.app.ip_entry = None
         self.app.attack_entry = None
-        self._schedule_dashboard_refresh()
+
+        # Show empty status shell immediately (widgets fill after paint)
+        self._active_page = "status"
+        for pid, frame in self._pages.items():
+            if pid == "status":
+                frame.pack(fill="both", expand=True, padx=16, pady=16)
+            else:
+                frame.pack_forget()
+        for pid, nav in self._nav_buttons.items():
+            self._set_nav_item_style(nav, pid == "status")
 
         if startup_mode == "minimized":
             self.app._tray_mode.set()
             root.withdraw()
         else:
             if not self.app._tray_mode.is_set():
-                # Paint first — PIN after (was blocking build for many seconds)
                 root.deiconify()
+                try:
+                    root.update_idletasks()
+                except Exception:
+                    pass
                 def _startup_pin_gate():
                     try:
                         from client_gui_lock import GuiLock, require_gui_unlock
@@ -172,9 +192,131 @@ class ModernGUI:
                     except Exception as e:
                         log(f"[GUI] startup PIN gate: {e}")
                 try:
-                    root.after(150, _startup_pin_gate)
+                    root.after(200, _startup_pin_gate)
                 except Exception:
                     _startup_pin_gate()
+
+        # Staggered content + data (GUI already visible)
+        try:
+            root.after(30, lambda: self._ensure_page_built("status"))
+            root.after(120, self._lazy_load_status_data)
+            root.after(400, self._start_refresh_loop_once)
+        except Exception:
+            self._ensure_page_built("status")
+            self._lazy_load_status_data()
+            self._start_refresh_loop_once()
+
+    def _clear_page_placeholder(self, page_id: str):
+        ph = self._page_placeholders.pop(page_id, None)
+        if ph is None:
+            return
+        try:
+            ph.destroy()
+        except Exception:
+            pass
+
+    def _ensure_page_built(self, page_id: str) -> bool:
+        """Build page widgets on first visit (skeleton only — data loads separately)."""
+        if self._pages_built.get(page_id):
+            return False
+        page = self._pages.get(page_id)
+        if page is None:
+            return False
+        self._clear_page_placeholder(page_id)
+        t0 = time.time()
+        try:
+            if page_id == "status":
+                self._build_dashboard(page)
+                self._build_ip_activity_table(page)
+            elif page_id == "threat":
+                self._build_threat_center(page)
+            elif page_id == "services":
+                self._build_services_section(page)
+            self._pages_built[page_id] = True
+            log(f"[GUI] Lazy-built page '{page_id}' in {time.time() - t0:.2f}s")
+            return True
+        except Exception as e:
+            log(f"[GUI] Lazy build failed for {page_id}: {e}")
+            self._pages_built[page_id] = True  # avoid tight retry loop
+            return False
+
+    def _lazy_load_status_data(self):
+        """Fill status page data after widgets exist (async where possible)."""
+        if self._page_data_loaded.get("status"):
+            return
+        self._page_data_loaded["status"] = True
+        try:
+            if not self._pages_built.get("status"):
+                self._ensure_page_built("status")
+            tok = self.app.state.get("token", "")
+            if tok:
+                self.app.refresh_attack_count(async_thread=True)
+            self._refresh_dashboard()
+            # IP table a bit later — heavier
+            if self.root:
+                self.root.after(250, self._refresh_ip_table)
+            else:
+                self._refresh_ip_table()
+        except Exception as e:
+            log(f"[GUI] status data load: {e}")
+
+    def _lazy_load_threat_data(self):
+        if self._page_data_loaded.get("threat"):
+            return
+        self._page_data_loaded["threat"] = True
+        try:
+            self._refresh_security_intel()
+            if self.root:
+                self.root.after(200, self._refresh_active_sessions)
+                self.root.after(400, self._refresh_user_accounts)
+                if hasattr(self, "_refresh_remote_desktop_status"):
+                    self.root.after(500, self._refresh_remote_desktop_status)
+            else:
+                self._refresh_active_sessions()
+                self._refresh_user_accounts()
+                if hasattr(self, "_refresh_remote_desktop_status"):
+                    self._refresh_remote_desktop_status()
+        except Exception as e:
+            log(f"[GUI] threat data load: {e}")
+
+    def _start_refresh_loop_once(self):
+        if self._refresh_loop_started:
+            return
+        self._refresh_loop_started = True
+        self._schedule_dashboard_refresh()
+
+    def _show_page(self, page_id: str):
+        """Sidebar navigasyon — lazy build + lazy data on first visit."""
+        self._active_page = page_id
+        # Build widgets if needed (first click)
+        if not self._pages_built.get(page_id):
+            self._ensure_page_built(page_id)
+
+        for pid, frame in self._pages.items():
+            if pid == page_id:
+                frame.pack(fill="both", expand=True, padx=16, pady=16)
+            else:
+                frame.pack_forget()
+        for pid, nav in self._nav_buttons.items():
+            self._set_nav_item_style(nav, pid == page_id)
+
+        # Load page data step-by-step after paint
+        if page_id == "status" and not self._page_data_loaded.get("status"):
+            try:
+                self.root.after(50, self._lazy_load_status_data)
+            except Exception:
+                self._lazy_load_status_data()
+        elif page_id == "threat" and not self._page_data_loaded.get("threat"):
+            try:
+                self.root.after(50, self._lazy_load_threat_data)
+            except Exception:
+                self._lazy_load_threat_data()
+        elif page_id == "threat":
+            # Already built — light refresh when revisiting
+            try:
+                self.root.after(80, self._refresh_security_intel)
+            except Exception:
+                pass
 
     def _create_sidebar_nav_item(
         self, parent, page_id: str, icon: str, label: str,
@@ -242,23 +384,6 @@ class ModernGUI:
             row.configure(fg_color="transparent")
             icon_lbl.configure(text_color=COLORS["text"])
             text_lbl.configure(text_color=COLORS["text"])
-
-    def _show_page(self, page_id: str):
-        """Sidebar navigasyon — aktif sayfayı göster."""
-        self._active_page = page_id
-        for pid, frame in self._pages.items():
-            if pid == page_id:
-                frame.pack(fill="both", expand=True, padx=16, pady=16)
-            else:
-                frame.pack_forget()
-        for pid, nav in self._nav_buttons.items():
-            self._set_nav_item_style(nav, pid == page_id)
-        # İlk açılışta threat sekmesi verilerini yükle
-        if page_id == "threat":
-            self._refresh_security_intel()
-            self._refresh_active_sessions()
-            if hasattr(self, "_refresh_remote_desktop_status"):
-                self._refresh_remote_desktop_status()
 
     # ═══════════════════════════════════════════════════════════════
     #  BİRLEŞİK ÜST BAR  (Kimlik + Dashboard + Menü — tek satır)
@@ -1043,9 +1168,7 @@ class ModernGUI:
             text_color=COLORS["text_dim"],
         )
         self._security_check_label.pack(anchor="w", padx=4, pady=2)
-
-        # İlk taramayı başlat
-        self._refresh_security_intel()
+        # Data load deferred — _lazy_load_threat_data / refresh loop
 
     # ─── User Accounts Panel ─── #
     def _build_user_accounts_panel(self, parent):
@@ -3584,8 +3707,7 @@ class ModernGUI:
         self._sessions_box.configure(state="normal")
         self._sessions_box.insert("1.0", self.t("loading_sessions"))
         self._sessions_box.configure(state="disabled")
-        # Başlangıçta otomatik yükle
-        self._refresh_active_sessions()
+        # Data load deferred — _lazy_load_threat_data
 
     # ─── Remote Desktop Status Panel ─── #
     def _build_remote_desktop_panel(self, parent):
@@ -3649,7 +3771,7 @@ class ModernGUI:
                 )
         except Exception:
             pass
-        self._refresh_remote_desktop_status()
+        # Status refresh deferred — _lazy_load_threat_data
 
     def _refresh_remote_desktop_status(self):
         """Update remote-desktop badge + details from CommandExecutor."""
@@ -3891,13 +4013,19 @@ class ModernGUI:
     # ─── Dashboard Refresh ─── #
     def _schedule_dashboard_refresh(self):
         """Dashboard kartlarını config aralığında günceller (varsayılan 10 sn)."""
-        self._refresh_dashboard()
+        # Skip until status widgets exist
+        if self._pages_built.get("status"):
+            self._refresh_dashboard()
 
         ticks_per_ip = max(1, int(20000 / self._refresh_ms))  # ~20 sn
         if not hasattr(self, '_ip_table_tick'):
             self._ip_table_tick = 0
         self._ip_table_tick += 1
-        if self._active_page == "status" and self._ip_table_tick >= ticks_per_ip:
+        if (
+            self._active_page == "status"
+            and self._pages_built.get("status")
+            and self._ip_table_tick >= ticks_per_ip
+        ):
             self._ip_table_tick = 0
             self._refresh_ip_table()
 
@@ -3905,7 +4033,11 @@ class ModernGUI:
         if not hasattr(self, '_security_tick'):
             self._security_tick = 0
         self._security_tick += 1
-        if self._active_page == "threat" and self._security_tick >= ticks_per_intel:
+        if (
+            self._active_page == "threat"
+            and self._pages_built.get("threat")
+            and self._security_tick >= ticks_per_intel
+        ):
             self._security_tick = 0
             self._refresh_security_intel()
             self._refresh_active_sessions()

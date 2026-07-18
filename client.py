@@ -2968,8 +2968,18 @@ if __name__ == "__main__":
                     is_protected, current_port = app.rdp_manager.get_rdp_protection_status()
                     if is_protected:
                         log(f"🛡️ RDP koruması aktif (port: {current_port})")
-                    app.sync_gui_with_service_state()
-                    app.update_tray_icon()
+
+                    def _ui():
+                        try:
+                            app.sync_gui_with_service_state()
+                            app.update_tray_icon()
+                        except Exception as e:
+                            log(f"post-show UI sync: {e}")
+
+                    if hasattr(app, "root") and app.root:
+                        app.root.after(0, _ui)
+                    else:
+                        _ui()
                 except Exception as e:
                     log(f"post-show sync: {e}")
             try:

@@ -1808,7 +1808,7 @@ def touch_update_lock() -> None:
 
 
 def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
-    """True if update lock exists and is not stale."""
+    """True if update lock exists and holder still looks alive."""
     try:
         path = _update_lock_path()
         if not os.path.isfile(path):
@@ -1822,24 +1822,108 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
             else:
                 return False
         age = time.time() - os.path.getmtime(path)
+        lock_pid = None
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                lines = fh.read().splitlines()
+            if len(lines) >= 2:
+                lock_pid = int(str(lines[1]).strip())
+        except Exception:
+            lock_pid = None
+
+        pid_alive = False
+        if lock_pid and lock_pid > 0:
+            try:
+                import ctypes
+                SYNCHRONIZE = 0x00100000
+                h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, int(lock_pid))
+                if h:
+                    ctypes.windll.kernel32.CloseHandle(h)
+                    pid_alive = True
+            except Exception:
+                pid_alive = False
+
+        # Dead holder → stale (failed silent update left lock + disabled tasks)
+        if lock_pid and not pid_alive and age > 90:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+
+        # Absolute ceiling
         if age > max_age_sec:
             try:
                 os.remove(path)
             except OSError:
                 pass
             return False
+
+        # "installing" with no live holder after a few minutes
+        if not pid_alive and age > 600:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+
         return True
     except OSError:
         return False
 
 
+def heal_update_machinery(log_func=None) -> None:
+    """Clear stale locks and re-enable update/watchdog tasks after failed updates."""
+    _log = log_func or (lambda m: None)
+    try:
+        # Force-evaluate stale lock (dead PID)
+        if not is_update_in_progress(max_age_sec=1800.0):
+            pass
+        path = _update_lock_path()
+        if os.path.isfile(path):
+            age = time.time() - os.path.getmtime(path)
+            if age > 1800:
+                try:
+                    os.remove(path)
+                    _log("[UPDATE] Cleared stale update lock")
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    try:
+        resume_competing_updaters()
+        _log("[UPDATE] Re-enabled updater/watchdog scheduled tasks")
+    except Exception as e:
+        _log(f"[UPDATE] Task resume failed: {e}")
+
+
+def stage_installer_for_update(src_path: str, version: str = "") -> Optional[str]:
+    """Copy installer to ProgramData so TEMP cleanup cannot delete it mid-helper."""
+    import shutil
+
+    if not src_path or not os.path.isfile(src_path):
+        return None
+    try:
+        dest_dir = _update_helper_staging_dir()
+        ver = (version or "latest").replace(" ", "")
+        dest = os.path.join(dest_dir, f"cloud-client-installer-{ver}.exe")
+        shutil.copy2(src_path, dest)
+        return dest if os.path.isfile(dest) else None
+    except Exception:
+        return src_path if os.path.isfile(src_path) else None
+
+
 def pause_competing_updaters() -> None:
-    """Stop scheduled tasks that kill/restart the client mid-download."""
+    """Stop respawners mid-download — never /end SilentUpdater or Updater.
+
+    Ending CloudHoneypot-SilentUpdater from inside --silent-update-check kills
+    THIS process before the install helper starts (lock stuck, tasks disabled).
+    """
     import subprocess
 
+    # Only force-stop tasks that would restart/kill us during download.
+    # Do NOT schtasks /end SilentUpdater or Updater (suicide).
     for task in (
-        "CloudHoneypot-SilentUpdater",
-        "CloudHoneypot-Updater",
         "CloudHoneypot-MemoryRestart",
         "CloudHoneypot-Watchdog",
     ):
@@ -1850,6 +1934,16 @@ def pause_competing_updaters() -> None:
                 timeout=3,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+        except Exception:
+            pass
+
+    for task in (
+        "CloudHoneypot-SilentUpdater",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-MemoryRestart",
+        "CloudHoneypot-Watchdog",
+    ):
+        try:
             subprocess.run(
                 ["schtasks", "/change", "/tn", task, "/disable"],
                 capture_output=True,
@@ -1941,12 +2035,19 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
         "HoneypotClientGuard",
     ):
         try:
-            subprocess.run(
-                ["schtasks", "/end", "/tn", task],
-                capture_output=True,
-                timeout=3,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            # Never /end SilentUpdater/Updater from the update process itself —
+            # that suicides --silent-update-check before the helper can start.
+            # The detached helper will /end everything after it is running.
+            if kill_processes or task not in (
+                "CloudHoneypot-SilentUpdater",
+                "CloudHoneypot-Updater",
+            ):
+                subprocess.run(
+                    ["schtasks", "/end", "/tn", task],
+                    capture_output=True,
+                    timeout=3,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
             subprocess.run(
                 ["schtasks", "/change", "/tn", task, "/disable"],
                 capture_output=True,
@@ -2084,9 +2185,18 @@ def launch_safe_update_install(
     if elevate:
         elevate = not already_admin
 
+    # Stable installer copy (TEMP dirs vanish / get cleaned)
+    stable = stage_installer_for_update(
+        installer_path,
+        version=os.path.splitext(os.path.basename(installer_path))[0],
+    )
+    if stable:
+        installer_path = stable
+
     acquire_update_lock("installing")
     # Stop respawn tasks only. Do NOT QUIT this process here — that raced with
     # ShellExecute/Popen and aborted interactive installs before the helper started.
+    # kill_processes=False also skips /end of SilentUpdater (avoids suicide).
     prepare_client_for_installer(kill_processes=False)
 
     staging = _update_helper_staging_dir()
@@ -2112,6 +2222,10 @@ def launch_safe_update_install(
         with open(launcher, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(launcher_body)
     except OSError:
+        try:
+            release_update_lock(resume_updaters=True)
+        except Exception:
+            pass
         return False
 
     try:
@@ -2123,7 +2237,7 @@ def launch_safe_update_install(
             if rc == 1223:
                 # User cancelled UAC
                 try:
-                    release_update_lock()
+                    release_update_lock(resume_updaters=True)
                 except Exception:
                     pass
                 return False
@@ -2134,15 +2248,22 @@ def launch_safe_update_install(
                     f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{launcher}\"' "
                     "-Wait:$false"
                 )
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
-                    close_fds=True,
-                )
+                try:
+                    subprocess.Popen(
+                        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+                        close_fds=True,
+                    )
+                except Exception:
+                    try:
+                        release_update_lock(resume_updaters=True)
+                    except Exception:
+                        pass
+                    return False
             return True
 
         # Already admin / silent SYSTEM path
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [
                 "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", launcher,
@@ -2152,10 +2273,17 @@ def launch_safe_update_install(
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
             close_fds=True,
         )
+        # Confirm helper process actually spawned
+        if proc.poll() is not None and proc.returncode not in (None, 0):
+            try:
+                release_update_lock(resume_updaters=True)
+            except Exception:
+                pass
+            return False
         return True
     except Exception:
         try:
-            release_update_lock()
+            release_update_lock(resume_updaters=True)
         except Exception:
             pass
         return False

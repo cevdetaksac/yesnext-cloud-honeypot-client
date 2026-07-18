@@ -416,6 +416,8 @@ def check_updates_and_apply_silent() -> bool:
             release_update_lock,
             touch_update_lock,
             pause_competing_updaters,
+            heal_update_machinery,
+            stage_installer_for_update,
         )
         import tempfile
         import subprocess
@@ -423,6 +425,10 @@ def check_updates_and_apply_silent() -> bool:
         import time
         
         log("[SILENT UPDATE] Starting server-safe silent update process...")
+        try:
+            heal_update_machinery(log_func=log)
+        except Exception:
+            pass
 
         if is_update_in_progress():
             log("[SILENT UPDATE] Skipped — another update download/install in progress")
@@ -435,7 +441,10 @@ def check_updates_and_apply_silent() -> bool:
         update_info = update_mgr.check_for_updates()
         
         if update_info.get("error") or not update_info.get("has_update"):
-            log("[SILENT UPDATE] No updates available")
+            if update_info.get("error"):
+                log(f"[SILENT UPDATE] Check error: {update_info.get('error')}")
+            else:
+                log("[SILENT UPDATE] No updates available")
             return False
             
         log(f"[SILENT UPDATE] New version found: {update_info['latest_version']}")
@@ -447,6 +456,7 @@ def check_updates_and_apply_silent() -> bool:
         # Create temp directory for update files
         temp_dir = tempfile.mkdtemp(prefix="honeypot_update_")
         log(f"[SILENT UPDATE] Using temp directory: {temp_dir}")
+        staged_installer = None
         
         try:
             # Download installer to temp directory
@@ -480,6 +490,15 @@ def check_updates_and_apply_silent() -> bool:
             log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
             touch_update_lock()
 
+            # ALWAYS stage under ProgramData — TEMP vanishes when this process dies
+            staged_installer = stage_installer_for_update(
+                installer_path, version=str(update_info.get("latest_version") or "latest")
+            )
+            if not staged_installer or not os.path.isfile(staged_installer):
+                log("[SILENT UPDATE] Failed to stage installer under ProgramData")
+                return False
+            log(f"[SILENT UPDATE] Staged installer: {staged_installer}")
+
             # Detached elevated helper waits for THIS process to exit, then kills leftovers,
             # runs installer, recreates tasks. Never overwrite a live onefile EXE.
             from client_utils import launch_safe_update_install, release_update_lock
@@ -493,7 +512,7 @@ def check_updates_and_apply_silent() -> bool:
                 show_gui = False
 
             ok = launch_safe_update_install(
-                installer_path,
+                staged_installer,
                 silent=True,
                 show_gui_after=show_gui,
                 expect_exit_pid=os.getpid(),
@@ -504,7 +523,7 @@ def check_updates_and_apply_silent() -> bool:
                 from client_utils import prepare_client_for_installer
                 prepare_client_for_installer(kill_processes=True)
                 time.sleep(3)
-                cmd = [installer_path, "/S", "/NCRC"]
+                cmd = [staged_installer, "/S", "/NCRC"]
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -517,6 +536,26 @@ def check_updates_and_apply_silent() -> bool:
                     return True
                 log(f"[SILENT UPDATE] Fallback installer failed: {result.returncode}")
                 return False
+
+            # Brief wait so helper can open update-install.log before we exit
+            log_path = os.path.join(
+                os.environ.get("ProgramData", r"C:\ProgramData"),
+                "YesNext", "CloudHoneypotClient", "update-install.log",
+            )
+            helper_alive = False
+            for _ in range(10):
+                time.sleep(0.3)
+                try:
+                    if os.path.isfile(log_path):
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                            tail = fh.read()[-800:]
+                        if "update-and-install start" in tail:
+                            helper_alive = True
+                            break
+                except Exception:
+                    pass
+            if not helper_alive:
+                log("[SILENT UPDATE] WARNING: helper log not seen yet — exiting anyway (helper may still run)")
 
             log("[SILENT UPDATE] Helper launched — exiting so install can overwrite EXE safely")
             # Keep update lock; helper clears it after install. Do NOT resume tasks yet.
@@ -541,13 +580,13 @@ def check_updates_and_apply_silent() -> bool:
             
         finally:
             try:
-                # Success path already released without resume; failure → unlock + resume
-                # (os._exit skips finally — OK; helper owns lock)
+                # Success path uses os._exit (skips finally). Failure → unlock + resume.
                 if is_update_in_progress():
                     release_update_lock(resume_updaters=True)
             except Exception:
                 pass
             try:
+                # Safe to remove TEMP copy; ProgramData staged installer is what helper uses
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:

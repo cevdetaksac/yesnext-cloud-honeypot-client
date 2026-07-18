@@ -2378,6 +2378,11 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"watchdog start error: {e}")
         try:
+            from client_utils import heal_update_machinery
+            heal_update_machinery(log_func=log)
+        except Exception as e:
+            log(f"update heal error: {e}")
+        try:
             self.start_update_watchdog()
         except Exception as e:
             log(f"update watchdog thread error: {e}")
@@ -2680,6 +2685,11 @@ if __name__ == "__main__":
     # Handle silent update check mode
     if args.silent_update_check:
         log("Silent update check mode activated - checking for updates...")
+        try:
+            from client_utils import heal_update_machinery
+            heal_update_machinery(log_func=log)
+        except Exception:
+            pass
         try:
             # Import update manager
             from client_updater import UpdateManager

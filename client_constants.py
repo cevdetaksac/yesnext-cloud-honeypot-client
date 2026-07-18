@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.1"  # Fix: GUI no longer silent-exits when control port busy; faster startup
+VERSION = "4.5.2"  # Fix silent auto-update suicide (/end SilentUpdater) + stale lock heal
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

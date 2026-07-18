@@ -93,6 +93,39 @@ function Stop-HoneypotTasks {
     }
 }
 
+function Restore-HoneypotTasks {
+    # Re-enable core tasks after aborted update so agents are not stuck forever
+    $names = @(
+        "CloudHoneypot-SilentUpdater",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-Watchdog",
+        "CloudHoneypot-Background",
+        "CloudHoneypot-MemoryRestart",
+        "CloudHoneypot-Tray"
+    )
+    foreach ($n in $names) {
+        schtasks /change /tn $n /enable 2>$null | Out-Null
+    }
+    Write-UpLog "Scheduled tasks re-enabled (recovery)"
+}
+
+function Fail-Update([int]$Code, [string]$Message) {
+    Write-UpLog $Message
+    Clear-UpdateLock
+    Restore-HoneypotTasks
+    # Best-effort: restart daemon so protection continues on old build
+    try {
+        $exe = Join-Path ${env:ProgramFiles} "YesNext\Cloud Honeypot Client\honeypot-client.exe"
+        if (-not (Test-Path -LiteralPath $exe)) {
+            $exe = Join-Path ${env:ProgramFiles} "YesNext\CloudHoneypotClient\honeypot-client.exe"
+        }
+        if (Test-Path -LiteralPath $exe) {
+            Start-Process -FilePath $exe -ArgumentList "--mode=daemon","--silent" -WindowStyle Hidden
+        }
+    } catch {}
+    exit $Code
+}
+
 function Send-QuitCommand {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
@@ -202,8 +235,7 @@ Write-UpLog "=== update-and-install start ==="
 Write-UpLog "Installer=$InstallerPath Silent=$Silent ShowGui=$ShowGuiAfter ExpectExitPid=$ExpectExitPid Grace=$GraceWaitSec"
 
 if (-not (Test-Path -LiteralPath $InstallerPath)) {
-    Write-UpLog "ERROR: Installer not found: $InstallerPath"
-    exit 2
+    Fail-Update 2 "ERROR: Installer not found: $InstallerPath"
 }
 
 Set-UpdateLock "installing"
@@ -225,14 +257,12 @@ do {
     Stop-HoneypotProcesses
     $left = @(Get-HoneypotPids)
     if ($left.Count -eq 0) { break }
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 250
 } while ($round -lt $KillRounds)
 
-if (-not (Wait-ProcessesGone -TimeoutSec 3)) {
+if (-not (Wait-ProcessesGone -TimeoutSec 5)) {
     $still = @(Get-HoneypotPids)
-    Write-UpLog "ERROR: honeypot-client still running (PIDs=$($still -join ',')). Aborting install to avoid corrupting onefile EXE."
-    Clear-UpdateLock
-    exit 3
+    Fail-Update 3 "ERROR: honeypot-client still running (PIDs=$($still -join ',')). Aborting install to avoid corrupting onefile EXE."
 }
 
 Write-UpLog "Processes gone - settling 0.8s before installer..."
@@ -250,9 +280,7 @@ try {
     $code = $p.ExitCode
     Write-UpLog "Installer exit code: $code"
 } catch {
-    Write-UpLog "ERROR: Installer failed to start: $($_.Exception.Message)"
-    Clear-UpdateLock
-    exit 4
+    Fail-Update 4 "ERROR: Installer failed to start: $($_.Exception.Message)"
 }
 
 if ($InstallDir -eq "") {
@@ -265,17 +293,13 @@ if (-not (Test-Path -LiteralPath $exe)) {
 }
 
 if (-not (Test-Path -LiteralPath $exe)) {
-    Write-UpLog "ERROR: honeypot-client.exe missing after install at $InstallDir"
-    Clear-UpdateLock
-    exit 5
+    Fail-Update 5 "ERROR: honeypot-client.exe missing after install at $InstallDir"
 }
 
 $size = (Get-Item -LiteralPath $exe).Length
 Write-UpLog "Installed exe OK ($size bytes): $exe"
 if ($size -lt 1000000) {
-    Write-UpLog "ERROR: Installed exe suspiciously small - abort launch"
-    Clear-UpdateLock
-    exit 6
+    Fail-Update 6 "ERROR: Installed exe suspiciously small - abort launch"
 }
 
 Write-UpLog "Creating scheduled tasks..."
@@ -283,6 +307,7 @@ try {
     Start-Process -FilePath $exe -ArgumentList "--create-tasks" -Wait -WindowStyle Hidden
 } catch {
     Write-UpLog "WARN: --create-tasks failed: $($_.Exception.Message)"
+    Restore-HoneypotTasks
 }
 
 Clear-UpdateLock

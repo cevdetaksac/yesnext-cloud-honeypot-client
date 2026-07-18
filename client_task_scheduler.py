@@ -196,16 +196,16 @@ TASK_CONFIGS = {
     TASK_NAME_SILENT_UPDATER: {
         "description": "Cloud Honeypot Client - Silent Update Check and Auto-Install (Every 15 minutes)",
         "trigger": (
-            '<TimeTrigger><Repetition><Interval>PT15M</Interval>'
-            '<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
-            '<StartBoundary>2025-01-01T01:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>'
+            '<CalendarTrigger><StartBoundary>2025-01-01T00:05:00</StartBoundary>'
+            '<Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>'
+            '<Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
+            '</CalendarTrigger>'
         ),
         "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
         "args": "--silent-update-check",
         "multi_instance": "IgnoreNew",
-        "hidden": True, "wake": False, "network_required": True,
+        "hidden": True, "wake": False, "network_required": False,
         "exec_limit": "PT45M", "priority": 6,
-        "idle_settings": "<Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout>",
     },
     TASK_NAME_MEMORY_RESTART: {
         "description": "Cloud Honeypot Client - Memory Restart (Every 8 hours for memory cleanup)",

@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 37
+!define VERSIONBUILD 38
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -61,14 +61,16 @@ Var LogFile
 ; UTILITY FUNCTIONS
 ; ===================================================================
 
-; Launch app as current (non-elevated) user — kill leftovers first so --show-gui is not exit-2
+; Launch app as current (non-elevated) user — ONE onefile start only.
+; Never run --create-tasks then --show-gui back-to-back: PyInstaller onefile
+; unpacks to %TEMP%\_MEI* and a second launch races → "Failed to load Python DLL".
 Function LaunchAsCurrentUser
     SetOutPath "$INSTDIR"
 
-    ; Stop tray/daemon that would hold the singleton mutex (hidden, no GUI)
     DetailPrint "[LAUNCH] Stopping leftover honeypot processes before GUI start..."
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
+    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Watchdog" >nul 2>&1'
     IfFileExists "$PLUGINSDIR\kill-honeypot.ps1" 0 LaunchKillFallback
         nsExec::Exec 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1" -Force'
         Pop $0
@@ -82,14 +84,10 @@ Function LaunchAsCurrentUser
         nsExec::Exec 'taskkill /F /T /IM honeypot-client.exe >nul 2>&1'
         Pop $0
     LaunchAfterKill:
-    Sleep 400
+    ; Let previous _MEI* unpack dirs finish deleting
+    Sleep 2000
 
-    ; Ensure scheduled tasks exist (interactive path previously skipped --create-tasks)
-    nsExec::Exec '"$INSTDIR\honeypot-client.exe" --create-tasks'
-    Pop $0
-    Sleep 300
-
-    ; ExecShell 'open' uses Windows shell — launches as the interactive user
+    ; Single launch — app __init__ installs Task Scheduler when elevated/needed
     ExecShell "open" "$INSTDIR\honeypot-client.exe" "--show-gui"
 FunctionEnd
 
@@ -421,10 +419,11 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
         !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
         IfFileExists "$INSTDIR\honeypot-client.exe" SilentStart SkipAutoStart
         SilentStart:
-            nsExec::Exec '"$INSTDIR\honeypot-client.exe" --create-tasks'
-            Sleep 2000
+            ; ONE onefile launch only (daemon __init__ creates scheduled tasks).
+            ; Back-to-back --create-tasks + daemon caused _MEI python312.dll failures.
+            Sleep 1500
             Exec '"$INSTDIR\honeypot-client.exe" --mode=daemon --silent'
-            !insertmacro LOG "[AUTO-START] Daemon started with tasks pre-created."
+            !insertmacro LOG "[AUTO-START] Daemon started (single launch)."
         Goto SkipAutoStart
     InteractiveOnboarding:
         ; Force visible GUI until user registers / links account (no tray hide)

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.6"  # Installer kill: SeDebugPrivilege + QUIT + HoneypotClientGuard
+VERSION = "4.4.8"  # V4 gaps: sessions/processes + block sync + alert/config intervals
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -295,8 +295,11 @@ THREAT_CONTEXT_MAX_AGE = 86400            # Remove IP context after 24h inactivi
 THREAT_ALERT_MIN_SCORE = 31              # Minimum score to generate an alert
 
 # Alert Pipeline — batch & rate limiting
-ALERT_BATCH_FLUSH_INTERVAL = 60           # Flush batch buffer every 60s
-ALERT_BATCH_MAX_SIZE = 50                 # Force flush at 50 buffered events
+ALERT_BATCH_FLUSH_INTERVAL = 120          # Flush batch buffer every 2 min (V4)
+ALERT_BATCH_MAX_SIZE = 500                # Force flush at 500 buffered events
+ALERT_URGENT_COOLDOWN = 300               # Same threat_type+IP: max 1 urgent / 5 min
+ALERT_URGENT_RETRY_DELAY = 30             # Retry failed urgent after 30s
+ALERT_URGENT_MAX_RETRIES = 3
 ALERT_THREAT_LOG_FILE = "threats.log"     # Local threat log filename
 ALERT_THREAT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 ALERT_THREAT_LOG_BACKUP_COUNT = 3
@@ -310,7 +313,7 @@ AUTO_RESPONSE_MAX_BLOCKS_PER_DAY = 200    # Max firewall blocks per day
 AUTO_RESPONSE_DEFAULT_BLOCK_HOURS = 24    # Default block duration (hours)
 
 # Remote Command Executor — polling & security
-REMOTE_CMD_POLL_INTERVAL = 5              # Poll API every 5 seconds
+REMOTE_CMD_POLL_INTERVAL = 10             # Poll commands every 10s (V4)
 REMOTE_CMD_EXPIRY_SECONDS = 300           # Commands expire after 5 minutes
 REMOTE_CMD_MAX_PER_MINUTE = 10            # Rate limit: max 10 commands/minute
 
@@ -324,17 +327,17 @@ SILENT_HOURS_WORK_END = "18:00"
 SILENT_HOURS_WEEKEND_SILENT = True        # All-day silent on weekends
 
 # Config sync — pull threat/silent hours config from backend
-THREAT_CONFIG_SYNC_INTERVAL = 120         # Re-fetch config every 2 minutes
+THREAT_CONFIG_SYNC_INTERVAL = 300         # Re-fetch threat config every 5 min (V4)
 
 # Ransomware Shield — canary & detection intervals
-RANSOMWARE_CANARY_CHECK_INTERVAL = 10     # Check canary files every 10s
+RANSOMWARE_CANARY_CHECK_INTERVAL = 30     # Check canary files every 30s (V4)
 RANSOMWARE_PROCESS_CHECK_INTERVAL = 5     # Check suspicious processes every 5s
 RANSOMWARE_VSS_CHECK_INTERVAL = 120       # Check VSS shadow copies every 2min
 ENABLE_RANSOMWARE_SHIELD = get_from_config("ransomware_shield.enabled", True)
 
 # System Health Monitor — collection & reporting
 HEALTH_COLLECT_INTERVAL = 10              # Collect metrics every 10s
-HEALTH_REPORT_INTERVAL = 300              # Report to API every 5 min
+HEALTH_REPORT_INTERVAL = 60               # Report to API every 60s (V4)
 HEALTH_ANOMALY_Z_THRESHOLD = 3.0          # Z-score threshold for anomaly
 
 # Self-Protection — last breath & DACL

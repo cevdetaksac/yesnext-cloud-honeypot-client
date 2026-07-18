@@ -90,6 +90,7 @@ class SilentHoursConfig:
     # Alert settings
     alert_on_block: bool = True
     alert_severity: str = "critical"
+    timezone: str = "Europe/Istanbul"
 
     @classmethod
     def from_dict(cls, data: dict) -> "SilentHoursConfig":
@@ -121,6 +122,7 @@ class SilentHoursConfig:
         cfg.whitelist_subnets = data.get("whitelist_subnets", cfg.whitelist_subnets)
         cfg.alert_on_block = data.get("alert_on_block", cfg.alert_on_block)
         cfg.alert_severity = data.get("alert_severity", cfg.alert_severity)
+        cfg.timezone = data.get("timezone", cfg.timezone) or "Europe/Istanbul"
 
         return cfg
 
@@ -197,7 +199,7 @@ class SilentHoursGuard:
 
     def is_silent_now(self) -> bool:
         """Is the current moment within a silent hours window?"""
-        now = datetime.datetime.now()
+        now = self._now_local()
 
         if self.config.mode == SilentHoursMode.DISABLED:
             return False
@@ -229,6 +231,19 @@ class SilentHoursGuard:
             return self._check_custom_schedule(now)
 
         return False
+
+    def _now_local(self) -> datetime.datetime:
+        """Current time in configured timezone (fallback: local)."""
+        tz_name = getattr(self.config, "timezone", None) or "Europe/Istanbul"
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            try:
+                import pytz
+                return datetime.datetime.now(pytz.timezone(tz_name))
+            except Exception:
+                return datetime.datetime.now()
 
     def is_whitelisted(self, ip: str) -> bool:
         """Check if an IP is in the whitelist or a trusted subnet."""

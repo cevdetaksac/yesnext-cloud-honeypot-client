@@ -43,7 +43,11 @@ from client_security_utils import verify_command_signature, sign_command
 
 # ── Constants ─────────────────────────────────────────────────────
 
-POLL_INTERVAL = 5  # seconds
+try:
+    from client_constants import REMOTE_CMD_POLL_INTERVAL as _POLL
+    POLL_INTERVAL = int(_POLL)
+except Exception:
+    POLL_INTERVAL = 10  # V4 default
 COMMAND_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_COMMANDS_PER_MINUTE = 10
 
@@ -52,14 +56,17 @@ CREATE_NO_WINDOW = 0x08000000
 ALLOWED_COMMANDS: Set[str] = {
     "block_ip", "unblock_ip",
     "logoff_user", "disable_account", "enable_account", "reset_password",
-    "kill_process", "stop_service", "disable_service",
+    "kill_process", "block_process",
+    "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
+    "enable_lockdown", "disable_lockdown",  # aliases
     "list_sessions", "list_processes", "snapshot",
     "collect_diagnostics",
 }
 
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
+    "ADMINISTRATOR", "DEFAULTACCOUNT", "GUEST",
 }
 
 PROTECTED_PROCESSES: Set[str] = {
@@ -98,10 +105,12 @@ class RemoteCommandExecutor:
         api_client=None,
         token_getter: Optional[Callable[[], str]] = None,
         auto_response=None,
+        health_monitor=None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.auto_response = auto_response  # AutoResponse instance
+        self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
 
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
@@ -354,17 +363,47 @@ class RemoteCommandExecutor:
         ip = params.get("ip", "")
         if not ip:
             return {"success": False, "error": "No IP specified"}
+        # Same delete path as pending-unblocks (all rule-name variants + ACK)
         if self.auto_response:
             ok = self.auto_response.unblock_ip(ip)
             return {"success": ok, "message": f"IP {ip} unblocked"}
-        return {"success": False, "error": "AutoResponse not available"}
+        try:
+            from client_firewall import WindowsFirewallBackend, make_logger
+            backend = WindowsFirewallBackend(logger=make_logger())
+            ok = backend.remove_block("", ip_or_cidr=ip)
+            return {"success": ok, "message": f"IP {ip} unblocked (direct)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _cmd_logoff_user(self, params: dict) -> dict:
         username = params.get("username", "")
+        session_id = params.get("session_id")
+        if session_id is not None and str(session_id).isdigit():
+            result = subprocess.run(
+                ["logoff", str(session_id)],
+                capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            ok = result.returncode == 0
+            # Push fresh sessions to dashboard
+            if self.health_monitor and hasattr(self.health_monitor, "force_report"):
+                try:
+                    self.health_monitor.force_report(refresh=True)
+                except Exception:
+                    pass
+            return {
+                "success": ok,
+                "message": f"logged off session {session_id}" if ok else (result.stderr or result.stdout or "logoff failed"),
+            }
         if not username:
-            return {"success": False, "error": "No username specified"}
+            return {"success": False, "error": "No username or session_id specified"}
         if self.auto_response:
             ok = self.auto_response.logoff_user(username)
+            if self.health_monitor and hasattr(self.health_monitor, "force_report"):
+                try:
+                    self.health_monitor.force_report(refresh=True)
+                except Exception:
+                    pass
             return {"success": ok, "message": f"Session for {username} terminated"}
         return self._logoff_direct(username)
 
@@ -415,10 +454,24 @@ class RemoteCommandExecutor:
         return {"success": False, "error": result.stderr.strip()}
 
     def _cmd_kill_process(self, params: dict) -> dict:
-        if "pid" in params:
-            cmd = ["taskkill", "/F", "/PID", str(params["pid"])]
-        elif "process_name" in params:
-            cmd = ["taskkill", "/F", "/IM", params["process_name"]]
+        pid = params.get("pid")
+        process_name = params.get("process_name", "")
+
+        # Protect critical PIDs by resolving name
+        if pid is not None:
+            try:
+                import psutil
+                p = psutil.Process(int(pid))
+                pname = (p.name() or "").lower()
+                if pname in PROTECTED_PROCESSES or int(pid) in (0, 4):
+                    return {"success": False, "error": f"Protected process: {pname or pid}"}
+            except Exception:
+                pass
+            cmd = ["taskkill", "/F", "/PID", str(pid)]
+        elif process_name:
+            if process_name.lower() in PROTECTED_PROCESSES:
+                return {"success": False, "error": f"Protected process: {process_name}"}
+            cmd = ["taskkill", "/F", "/IM", process_name]
         else:
             return {"success": False, "error": "No PID or process_name specified"}
 
@@ -426,9 +479,132 @@ class RemoteCommandExecutor:
             cmd, capture_output=True, text=True, timeout=10,
             creationflags=CREATE_NO_WINDOW,
         )
+        ok = result.returncode == 0
+        if ok and self.health_monitor and hasattr(self.health_monitor, "force_report"):
+            try:
+                self.health_monitor.force_report(refresh=True)
+            except Exception:
+                pass
         return {
-            "success": result.returncode == 0,
+            "success": ok,
             "message": result.stdout.strip() or result.stderr.strip(),
+        }
+
+    def _cmd_block_process(self, params: dict) -> dict:
+        """Persist a path/name firewall-style block via Software Restriction / netsh is limited.
+
+        Practical approach: add inbound block is wrong for process — use AppLocker-like
+        deny via Image File Execution Options debugger stub OR scheduled kill+watch.
+        We create a Defender-style block by writing an IFEO null debugger for the image
+        name (admin) when path/name_pattern given — reversible via unblock not in scope.
+        """
+        path = (params.get("path") or "").strip()
+        pattern = (params.get("name_pattern") or params.get("name") or "").strip()
+        image = ""
+        if path:
+            image = os.path.basename(path)
+        elif pattern:
+            image = pattern if pattern.lower().endswith(".exe") else f"{pattern}.exe"
+        if not image:
+            return {"success": False, "error": "path or name_pattern required"}
+        if image.lower() in PROTECTED_PROCESSES:
+            return {"success": False, "error": f"Protected process: {image}"}
+
+        # IFEO Debugger = nul → process fails to start (common admin block technique)
+        try:
+            import winreg
+            key_path = (
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                r"\Image File Execution Options\\" + image
+            )
+            with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, "Debugger", 0, winreg.REG_SZ, "nyan")
+            log(f"[REMOTE-CMD] block_process IFEO set for {image}")
+            return {
+                "success": True,
+                "message": f"Process block applied (IFEO): {image}",
+                "data": {"image": image, "path": path or None},
+            }
+        except PermissionError:
+            return {"success": False, "error": "Admin required for process block"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_list_sessions(self, params: dict) -> dict:
+        # Push fresh active_sessions via health report (dashboard source of truth)
+        reported = False
+        sessions = []
+        if self.health_monitor and hasattr(self.health_monitor, "force_report"):
+            try:
+                reported = bool(self.health_monitor.force_report(refresh=True))
+                sessions = list(
+                    (self.health_monitor.get_stats() or {}).get("active_sessions") or []
+                )
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        else:
+            # Fallback local query
+            try:
+                result = subprocess.run(
+                    ["query", "user"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                for line in result.stdout.splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        sessions.append({
+                            "username": parts[0].strip(">"),
+                            "session_name": parts[1] if len(parts) > 1 else "",
+                            "session_id": parts[2] if len(parts) > 2 else "",
+                            "status": parts[3] if len(parts) > 3 else "",
+                        })
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "message": f"{len(sessions)} session(s); health_report={'ok' if reported else 'skipped'}",
+            "data": {"sessions": sessions, "active_sessions": sessions},
+        }
+
+    def _cmd_list_processes(self, params: dict) -> dict:
+        reported = False
+        procs = []
+        if self.health_monitor and hasattr(self.health_monitor, "force_report"):
+            try:
+                reported = bool(self.health_monitor.force_report(refresh=True))
+                procs = list(
+                    (self.health_monitor.get_stats() or {}).get("top_processes") or []
+                )
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        else:
+            try:
+                import psutil
+                for p in psutil.process_iter(
+                    ["pid", "name", "cpu_percent", "memory_info", "username", "exe"]
+                ):
+                    try:
+                        info = p.info
+                        mem = info.get("memory_info")
+                        procs.append({
+                            "pid": info.get("pid", 0),
+                            "name": info.get("name", ""),
+                            "cpu_percent": info.get("cpu_percent", 0),
+                            "memory_mb": round((mem.rss if mem else 0) / 1024 / 1024, 1),
+                            "username": info.get("username", ""),
+                            "path": info.get("exe") or "",
+                        })
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                procs.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
+                procs = procs[:50]
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "message": f"{len(procs)} process(es); health_report={'ok' if reported else 'skipped'}",
+            "data": {"processes": procs, "top_processes": procs},
         }
 
     def _cmd_stop_service(self, params: dict) -> dict:
@@ -443,6 +619,34 @@ class RemoteCommandExecutor:
         return {
             "success": result.returncode == 0,
             "message": f"Service {svc} stop requested",
+        }
+
+    def _cmd_start_service(self, params: dict) -> dict:
+        svc = params.get("service_name", "")
+        if not svc:
+            return {"success": False, "error": "No service_name specified"}
+        result = subprocess.run(
+            ["sc", "start", svc],
+            capture_output=True, text=True, timeout=30,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return {
+            "success": result.returncode == 0,
+            "message": f"Service {svc} start requested",
+        }
+
+    def _cmd_restart_service(self, params: dict) -> dict:
+        svc = params.get("service_name", "")
+        if not svc:
+            return {"success": False, "error": "No service_name specified"}
+        stop = self._cmd_stop_service(params)
+        time.sleep(1.5)
+        start = self._cmd_start_service(params)
+        ok = bool(start.get("success"))
+        return {
+            "success": ok,
+            "message": f"Service {svc} restarted",
+            "data": {"stop": stop, "start": start},
         }
 
     def _cmd_disable_service(self, params: dict) -> dict:
@@ -469,58 +673,19 @@ class RemoteCommandExecutor:
             return {"success": ok, "message": f"Lockdown active, management IP: {mgmt_ip}"}
         return {"success": False, "error": "AutoResponse not available"}
 
+    def _cmd_enable_lockdown(self, params: dict) -> dict:
+        """Alias for emergency_lockdown (V4 prompt naming)."""
+        return self._cmd_emergency_lockdown(params)
+
     def _cmd_lift_lockdown(self, params: dict) -> dict:
         if self.auto_response:
             ok = self.auto_response.lift_lockdown()
             return {"success": ok, "message": "Lockdown lifted"}
         return {"success": False, "error": "AutoResponse not available"}
 
-    def _cmd_list_sessions(self, params: dict) -> dict:
-        try:
-            result = subprocess.run(
-                ["query", "session"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            sessions = []
-            for line in result.stdout.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 3:
-                    sessions.append({
-                        "username": parts[0].strip(">"),
-                        "session": parts[1] if len(parts) > 1 else "",
-                        "id": parts[2] if len(parts) > 2 else "",
-                        "state": parts[3] if len(parts) > 3 else "",
-                    })
-            return {"success": True, "sessions": sessions}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _cmd_list_processes(self, params: dict) -> dict:
-        try:
-            import psutil
-            filter_mode = params.get("filter", "")
-            procs = []
-            for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info', 'username']):
-                try:
-                    info = p.info
-                    procs.append({
-                        "pid": info.get('pid', 0),
-                        "name": info.get('name', ''),
-                        "cpu_percent": info.get('cpu_percent', 0),
-                        "memory_mb": round(
-                            (info.get('memory_info') or type('', (), {'rss': 0})).rss / 1024 / 1024, 1
-                        ),
-                        "username": info.get('username', ''),
-                    })
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-
-            # Sort by CPU usage descending
-            procs.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
-            return {"success": True, "processes": procs[:50]}  # Top 50
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def _cmd_disable_lockdown(self, params: dict) -> dict:
+        """Alias for lift_lockdown (V4 prompt naming)."""
+        return self._cmd_lift_lockdown(params)
 
     def _cmd_snapshot(self, params: dict) -> dict:
         try:

@@ -527,6 +527,18 @@ class ThreatEngine:
             stats["active_ips"] = len(self._ip_pool)
         return stats
 
+    def clear_contexts(self) -> int:
+        """Clear all IP threat contexts (local cleanup / maintenance)."""
+        with self._lock:
+            n = len(self._ip_pool)
+            self._ip_pool.clear()
+            if hasattr(self, "_rule_blocked_ips"):
+                self._rule_blocked_ips.clear()
+            if hasattr(self, "_rdp_grace"):
+                self._rdp_grace.clear()
+        log(f"[THREAT] Cleared {n} IP contexts (maintenance)")
+        return n
+
     def get_threat_level(self) -> Tuple[str, str]:
         """
         Return overall threat level for the dashboard.

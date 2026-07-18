@@ -3732,6 +3732,11 @@ class ModernGUI:
             items = [
                 (f"🇹🇷  {self.t('menu_lang_tr')}", _run_and_close(lambda: self._set_lang("tr"))),
                 (f"🇬🇧  {self.t('menu_lang_en')}", _run_and_close(lambda: self._set_lang("en"))),
+                (None, None),  # separator
+                (f"🧹  {self.t('menu_cleanup_local')}", _run_and_close(lambda: self._run_cleanup("local"))),
+                (f"🔥  {self.t('menu_cleanup_firewall')}", _run_and_close(lambda: self._run_cleanup("firewall"))),
+                (f"☁️  {self.t('menu_cleanup_server')}", _run_and_close(lambda: self._run_cleanup("server"))),
+                (f"♻️  {self.t('menu_cleanup_all')}", _run_and_close(lambda: self._run_cleanup("all"))),
             ]
         elif menu_type == "help":
             items = [
@@ -3747,7 +3752,7 @@ class ModernGUI:
             else:
                 btn = ctk.CTkButton(
                     popup, text=label, anchor="w",
-                    font=ctk.CTkFont(size=12), height=32, width=200,
+                    font=ctk.CTkFont(size=12), height=32, width=280,
                     fg_color="transparent", hover_color=COLORS["accent"],
                     text_color=COLORS["text"], corner_radius=4,
                     command=cmd,
@@ -3814,6 +3819,65 @@ class ModernGUI:
         # Dili anında değiştir ve GUI'yi yeniden oluştur (restart gerekmez)
         self.app.lang = code
         self._rebuild_gui()
+
+    def _run_cleanup(self, scope: str):
+        """Ayarlar → Bakım/Temizlik: local | firewall | server | all"""
+        cm = getattr(self.app, "cleanup_manager", None)
+        if not cm:
+            messagebox.showerror(self.t("cleanup_title"), self.t("cleanup_unavailable"))
+            return
+
+        confirm_key = {
+            "local": "cleanup_confirm_local",
+            "firewall": "cleanup_confirm_firewall",
+            "server": "cleanup_confirm_server",
+            "all": "cleanup_confirm_all",
+        }.get(scope, "cleanup_confirm_all")
+
+        if not messagebox.askyesno(self.t("cleanup_title"), self.t(confirm_key)):
+            return
+
+        def _worker():
+            try:
+                if scope == "local":
+                    result = cm.clear_local()
+                    msg = self.t("cleanup_done_local").format(
+                        ips=result.get("ip_pool_cleared", 0),
+                    )
+                elif scope == "firewall":
+                    result = cm.clear_firewall(sync_dashboard=True)
+                    msg = self.t("cleanup_done_firewall").format(
+                        rules=result.get("rules_removed", 0),
+                        synced="✓" if result.get("api_synced") else "—",
+                        server="✓" if result.get("server_cleared") else "—",
+                    )
+                elif scope == "server":
+                    result = cm.clear_server()
+                    if result.get("ok"):
+                        msg = self.t("cleanup_done_server")
+                    else:
+                        msg = self.t("cleanup_server_fail").format(
+                            err=result.get("error") or "unknown",
+                        )
+                else:
+                    result = cm.clear_all()
+                    srv_ok = (result.get("server") or {}).get("ok")
+                    msg = self.t("cleanup_done_all").format(
+                        ips=(result.get("local") or {}).get("ip_pool_cleared", 0),
+                        rules=(result.get("firewall") or {}).get("rules_removed", 0),
+                        server="✓" if srv_ok else "—",
+                    )
+                self._gui_safe(lambda: messagebox.showinfo(self.t("cleanup_title"), msg))
+            except Exception as e:
+                log(f"[CLEANUP] GUI cleanup error: {e}")
+                self._gui_safe(
+                    lambda: messagebox.showerror(
+                        self.t("cleanup_title"),
+                        self.t("cleanup_error").format(error=e),
+                    )
+                )
+
+        threading.Thread(target=_worker, daemon=True, name="CleanupWorker").start()
 
     def _open_logs(self):
         try:

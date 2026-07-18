@@ -38,22 +38,46 @@ from client_helpers import log
 
 # ── Constants ─────────────────────────────────────────────────────
 
-# Rate limiting per severity (seconds between alerts for same IP+type)
+# Rate limiting: same threat_type + source_ip → max 1 urgent / 5 min (V4)
 ALERT_COOLDOWN = {
-    "critical": 60,      # 1 min
-    "high":     300,      # 5 min
-    "warning":  900,      # 15 min
-    "info":     3600,     # 1 hour
+    "critical": 300,     # 5 min
+    "high":     300,     # 5 min
+    "warning":  900,     # 15 min
+    "info":     3600,    # 1 hour
 }
 
 # Batch buffer flush intervals (seconds)
 BATCH_INTERVALS = {
-    "info":    300,       # 5 min
-    "warning": 60,        # 1 min
+    "info":    120,       # 2 min
+    "warning": 120,       # 2 min
 }
 
-# Max alerts to buffer before force-flush
-BATCH_MAX_SIZE = 50
+# Max alerts to buffer before force-flush (V4)
+BATCH_MAX_SIZE = 500
+BATCH_FLUSH_SECONDS = 120
+URGENT_RETRY_DELAY = 30
+URGENT_MAX_RETRIES = 3
+
+# Map threat_type → events/batch category
+_THREAT_CATEGORY = {
+    "failed_logon": "failed_logon",
+    "brute_force": "failed_logon",
+    "brute_force_detected": "failed_logon",
+    "successful_logon": "successful_logon",
+    "rdp_logon": "successful_logon",
+    "account_created": "account_created",
+    "new_admin_account": "account_created",
+    "account_modified": "account_modified",
+    "audit_log_cleared": "log_cleared",
+    "log_cleared": "log_cleared",
+    "service_installed": "service_state_change",
+    "service_state_change": "service_state_change",
+    "firewall_change": "firewall_change",
+    "suspicious_process": "suspicious_process",
+    "honeypot_connection": "honeypot_connection",
+    "ransomware_canary_triggered": "suspicious_process",
+    "vss_shadow_deleted": "suspicious_process",
+}
 
 # Local threat log config
 THREAT_LOG_FILE = "threats.log"
@@ -317,17 +341,60 @@ class AlertPipeline:
                 "system_context": alert.get("system_context", {}) or {},
             }
 
-            # Fire-and-forget in thread to avoid blocking event processing
+            # Retry queue: up to 3 attempts, 30s apart; handle actions_requested
             threading.Thread(
-                target=self._do_api_call,
-                args=("alerts/urgent", payload, "urgent"),
+                target=self._send_urgent_with_retry,
+                args=(payload,),
                 daemon=True,
+                name="UrgentAlertRetry",
             ).start()
             self._send_webhook(alert)
 
         except Exception as e:
             self._stats["errors"] += 1
             log(f"[ALERTS] Urgent send error: {e}")
+
+    def _send_urgent_with_retry(self, payload: dict):
+        """POST alerts/urgent with retries; execute actions_requested from response."""
+        last_err = None
+        for attempt in range(1, URGENT_MAX_RETRIES + 1):
+            try:
+                response = self.api_client.api_request(
+                    "POST", "alerts/urgent", data=payload, timeout=15
+                )
+                ok = isinstance(response, dict) and response.get("status") in (
+                    "ok", "success", "created", "received",
+                )
+                if ok or response is not None:
+                    self._stats["alerts_sent_urgent"] += 1
+                    log(f"[ALERTS] ✅ urgent alert sent (attempt {attempt})")
+                    self._handle_actions_requested(response if isinstance(response, dict) else {})
+                    return
+                last_err = f"unexpected response: {response}"
+            except Exception as e:
+                last_err = str(e)
+                self._stats["errors"] += 1
+            if attempt < URGENT_MAX_RETRIES:
+                log(f"[ALERTS] Urgent retry {attempt}/{URGENT_MAX_RETRIES} in {URGENT_RETRY_DELAY}s — {last_err}")
+                time.sleep(URGENT_RETRY_DELAY)
+        log(f"[ALERTS] ❌ Urgent alert failed after {URGENT_MAX_RETRIES} attempts: {last_err}")
+
+    def _handle_actions_requested(self, response: dict):
+        """Execute server-requested follow-up actions from urgent response."""
+        actions = response.get("actions_requested") or []
+        if not actions or not self.auto_response:
+            return
+        # Minimal context for action executor
+        alert = {
+            "source_ip": "",
+            "username": "",
+            "threat_type": "server_requested",
+        }
+        try:
+            self._execute_auto_response(list(actions), alert)
+            log(f"[ALERTS] Executed actions_requested: {actions}")
+        except Exception as e:
+            log(f"[ALERTS] actions_requested error: {e}")
 
     # ── Batch Channel (buffered API) ──────────────────────────────
 
@@ -344,11 +411,10 @@ class AlertPipeline:
         flush_count = 0
         while self._running:
             try:
-                time.sleep(60)  # Check every minute
+                time.sleep(BATCH_FLUSH_SECONDS)
                 self._flush_batch()
                 flush_count += 1
-                # Cleanup stale dedup entries every 30 minutes
-                if flush_count % 30 == 0:
+                if flush_count % 15 == 0:  # ~30 min at 120s
                     self._cleanup_dedup()
             except Exception as e:
                 log(f"[ALERTS] Batch flush error: {e}")
@@ -373,13 +439,14 @@ class AlertPipeline:
             self._flush_batch_locked()
 
     def _flush_batch_locked(self):
-        """Flush batch buffer (must hold _batch_lock) — canonical /api/events/batch."""
+        """Flush batch buffer (must hold _batch_lock) — canonical /api/events/batch.
+
+        On failure, events stay in buffer for the next cycle.
+        """
         if not self._batch_buffer:
             return
 
         events_to_send = list(self._batch_buffer)
-        self._batch_buffer.clear()
-
         token = self.token_getter()
         if not token or not self.api_client:
             log(f"[ALERTS] Cannot flush batch ({len(events_to_send)} events) — no token/API")
@@ -394,37 +461,77 @@ class AlertPipeline:
             return str(ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
         events = []
+        by_severity: Dict[str, int] = {}
+        unique_ips: set = set()
+        period_start = None
+        period_end = None
         for e in events_to_send:
             event_ids = e.get("event_ids") or [0]
             try:
-                event_id = int(event_ids[0]) if event_ids else 0
+                win_eid = int(event_ids[0]) if event_ids else 0
             except (TypeError, ValueError, IndexError):
-                event_id = 0
+                win_eid = 0
+            threat_type = e.get("threat_type", "") or ""
+            category = e.get("category") or _THREAT_CATEGORY.get(threat_type, threat_type or "honeypot_connection")
+            sev = e.get("severity", "info") or "info"
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            sip = e.get("source_ip", "") or ""
+            if sip:
+                unique_ips.add(sip)
+            ts_iso = _iso(e.get("timestamp"))
+            if period_start is None or ts_iso < period_start:
+                period_start = ts_iso
+            if period_end is None or ts_iso > period_end:
+                period_end = ts_iso
             events.append({
-                "event_id": event_id,
-                "timestamp": _iso(e.get("timestamp")),
+                "event_id": str(_uuid.uuid4()),
+                "timestamp": ts_iso,
+                "category": category,
+                "severity": sev,
                 "channel": e.get("channel", "Security"),
-                "source_ip": e.get("source_ip", ""),
+                "source_ip": sip,
+                "source_country": e.get("source_country", ""),
                 "username": e.get("username", ""),
-                "threat_type": e.get("threat_type", ""),
-                "severity": e.get("severity", ""),
+                "threat_type": threat_type,
                 "title": e.get("title", ""),
                 "target_service": e.get("target_service", ""),
+                "target_port": int(e.get("target_port", 0) or 0),
+                "windows_event_id": win_eid,
+                "logon_type": e.get("logon_type"),
                 "threat_score": int(float(e.get("threat_score", 0) or 0)),
             })
 
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         payload = {
             "token": token,
             "batch_id": str(_uuid.uuid4()),
             "events": events,
-            "summary": {"count": len(events)},
+            "summary": {
+                "period_start": period_start or now_iso,
+                "period_end": period_end or now_iso,
+                "total_events": len(events),
+                "by_severity": by_severity,
+                "unique_source_ips": len(unique_ips),
+            },
         }
 
-        threading.Thread(
-            target=self._do_api_call,
-            args=("events/batch", payload, "batch"),
-            daemon=True,
-        ).start()
+        # Synchronous send so we can keep buffer on failure
+        try:
+            response = self.api_client.api_request(
+                "POST", "events/batch", data=payload, timeout=20
+            )
+            ok = isinstance(response, dict) and response.get("status") in (
+                "ok", "success", "created", "received",
+            )
+            if ok or response is not None:
+                self._batch_buffer.clear()
+                self._stats["alerts_sent_batch"] += len(events)
+                log(f"[ALERTS] ✅ batch flushed ({len(events)} events)")
+            else:
+                log(f"[ALERTS] ⚠️ batch flush kept buffer — response: {response}")
+        except Exception as e:
+            self._stats["errors"] += 1
+            log(f"[ALERTS] ❌ batch flush failed, buffer retained ({len(events_to_send)}): {e}")
 
     # ── Webhook (Slack / Teams / custom) ───────────────────────────
 
@@ -464,14 +571,17 @@ class AlertPipeline:
     # ── API Call Helper ───────────────────────────────────────────
 
     def _do_api_call(self, endpoint: str, payload: dict, channel: str):
-        """Execute API call (runs in daemon thread)."""
+        """Execute API call (runs in daemon thread). Legacy helper for non-batch paths."""
         try:
             response = self.api_client.api_request(
                 "POST", endpoint, data=payload, timeout=15
             )
-            if isinstance(response, dict) and response.get("status") in ("ok", "success", "created"):
+            if isinstance(response, dict) and response.get("status") in (
+                "ok", "success", "created", "received",
+            ):
                 if channel == "urgent":
                     self._stats["alerts_sent_urgent"] += 1
+                    self._handle_actions_requested(response)
                 else:
                     self._stats["alerts_sent_batch"] += len(payload.get("events", []))
                 log(f"[ALERTS] ✅ {channel} alert sent to API: {endpoint}")

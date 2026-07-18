@@ -52,7 +52,7 @@ from client_constants import (
     TRY_TRAY, RDP_SECURE_PORT,
     SERVER_NAME, HONEYPOT_SERVICES,
     API_STARTUP_DELAY, API_RETRY_INTERVAL, API_SLOW_RETRY_DELAY,
-    API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH,
+    API_HEARTBEAT_INTERVAL, ATTACK_COUNT_REFRESH, BLOCK_POLL_INTERVAL,
     CONSENT_FILE, STATUS_FILE,
     WATCHDOG_TOKEN_FILE, __version__, GITHUB_OWNER, GITHUB_REPO,
     WINDOW_WIDTH, WINDOW_HEIGHT, CONTROL_HOST, CONTROL_PORT,
@@ -264,6 +264,14 @@ class CloudHoneypotClient:
                 self.remote_commands = None
                 self.silent_hours_guard = None
 
+        # Data cleanup / maintenance (local + firewall + server sync)
+        try:
+            from client_cleanup import DataCleanupManager
+            self.cleanup_manager = DataCleanupManager(self)
+        except Exception as e:
+            log(f"⚠️ Cleanup manager init failed: {e}")
+            self.cleanup_manager = None
+
         # Initialize Faz 3 modules (v4.0) — Ransomware Shield, System Health, Self-Protection
         self.ransomware_shield = None
         self.health_monitor = None
@@ -298,6 +306,10 @@ class CloudHoneypotClient:
                 self.ransomware_shield = None
                 self.health_monitor = None
                 self.process_protection = None
+
+        # Wire health monitor into remote commands (list_sessions / list_processes push)
+        if getattr(self, "remote_commands", None) and getattr(self, "health_monitor", None):
+            self.remote_commands.health_monitor = self.health_monitor
 
         # Initialize Faz 4 modules (v4.0) — Performance Optimizer, False Positive Tuner
         self.perf_optimizer = None
@@ -583,6 +595,13 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"⚠️ MemoryGuard start failed: {e}")
 
+            # Auto firewall / IP-pool limits
+            try:
+                if getattr(self, "cleanup_manager", None):
+                    self.cleanup_manager.start_auto_enforcer()
+            except Exception as e:
+                log(f"⚠️ Cleanup auto-enforcer start failed: {e}")
+
         # Geciktirilmiş API başlangıcını başlat
         threading.Thread(target=delayed_api_start, daemon=True).start()
 
@@ -711,6 +730,10 @@ class CloudHoneypotClient:
                 if sh_cfg and self.silent_hours_guard:
                     self.silent_hours_guard.update_config(sh_cfg)
 
+                # Auto-block thresholds / limits
+                if self.auto_response and hasattr(self.auto_response, "apply_threat_config"):
+                    self.auto_response.apply_threat_config(config)
+
                 # Whitelist IP/subnet'lerini EventLogWatcher, AutoResponse
                 # ve ThreatEngine'e ilet — dashboard'dan gelen güvenli IP'ler
                 wl_ips = set(config.get("whitelist_ips", []))
@@ -724,6 +747,29 @@ class CloudHoneypotClient:
                         self.threat_engine.update_whitelist(wl_ips)
                     log(f"[CONFIG-SYNC] Whitelist synced: {len(wl_ips)} IP(s), "
                         f"{len(wl_subnets)} subnet(s)")
+
+                # Monitored event channels
+                channels = config.get("monitored_event_channels")
+                if channels and self.event_watcher and hasattr(
+                    self.event_watcher, "update_monitored_channels"
+                ):
+                    self.event_watcher.update_monitored_channels(channels)
+
+                # Ransomware / canary toggles
+                if self.ransomware_shield:
+                    try:
+                        if "ransomware_protection_enabled" in config:
+                            # Soft flag — shield already running; log only
+                            log(
+                                f"[CONFIG-SYNC] ransomware_protection_enabled="
+                                f"{config.get('ransomware_protection_enabled')}"
+                            )
+                        if "canary_files_enabled" in config:
+                            self.ransomware_shield.canary_enabled = bool(
+                                config.get("canary_files_enabled")
+                            )
+                    except Exception:
+                        pass
 
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
@@ -1805,6 +1851,9 @@ class CloudHoneypotClient:
             if getattr(self, 'auto_response', None):
                 try: self.auto_response.stop()
                 except Exception: pass
+            if getattr(self, 'cleanup_manager', None):
+                try: self.cleanup_manager.stop()
+                except Exception: pass
             # Tray cleanup
             if hasattr(self, 'tray_manager') and self.tray_manager:
                 try: self.tray_manager.stop_tray_system()
@@ -1949,7 +1998,9 @@ class CloudHoneypotClient:
                 agent = FirewallAgent(
                     api_base=api_base_root,
                     token=token,
-                    refresh_interval=int(os.environ.get("REFRESH_INTERVAL_SEC", "10")),
+                    refresh_interval=int(
+                        os.environ.get("REFRESH_INTERVAL_SEC", str(BLOCK_POLL_INTERVAL))
+                    ),
                     cidr_feed_base=cidr_feed,
                     logger=LOGGER,
                     auto_response=getattr(self, 'auto_response', None),

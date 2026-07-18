@@ -1,7 +1,7 @@
 {
     "application": {
         "name": "Cloud Honeypot Client",
-        "version": "4.4.6",
+        "version": "4.4.8",
         "author": "YesNext Technology"
     },
     "language": {
@@ -57,6 +57,25 @@
     "false_positive_tuner": {
         "enabled": true,
         "cleanup_interval_seconds": 3600
+    },
+    "cleanup": {
+        "max_firewall_rules": 500,
+        "max_ip_pool": 8000,
+        "auto_enforce": true,
+        "auto_enforce_interval_seconds": 3600
+    },
+    "threat_detection": {
+        "command_poll_interval": 10,
+        "health_report_interval": 60,
+        "event_batch_interval": 120,
+        "config_sync_interval": 300,
+        "event_buffer_max_size": 500,
+        "canary_check_interval": 30,
+        "canary_file_paths": [
+            "C:\\Users\\Public\\Documents\\.FinancialReport2024.xlsx.canary",
+            "C:\\Users\\Public\\Desktop\\.ImportantNotes.docx.canary",
+            "C:\\ProgramData\\.SystemConfig.dat.canary"
+        ]
     },
     "services": {
         "auto_start": false,

@@ -27,6 +27,7 @@ Mevcut endpointler:
 - `POST /agent/block-applied` — Blok uygulandı onayı
 - `POST /agent/block-removed` — Blok kaldırıldı onayı
 - `POST /agent/sync-rules` — Client firewall kurallarını API ile senkronize et (v4.1.1)
+- `POST /agent/clear-data` — Dashboard saldırı/blok/alert temizliği (v4.4.7) — detay: `API_CLEAR_DATA_PROMPT.md`
 
 Authentication: Tüm isteklerde `token` (string) body veya query param olarak gönderilir.
 
@@ -375,13 +376,32 @@ Content-Type: application/json
 ```
 
 **Backend davranışı:**
-1. Token'a ait mevcut "aktif blok" listesini bu payload ile güncelle
-2. Client'ta var ama backend'te yok olan blokları ekle
-3. Backend'te var ama client'ta yok olan blokları "stale" olarak işaretle
-4. Dashboard "Uygulanan Bloklar" panelini senkronize et
-5. `source` alanı blokun kaynağını belirtir: `auto_response` veya `dashboard`
+1. Token'a ait mevcut "aktif blok" listesini bu payload ile **replace** (tam değiştir) et
+2. `blocks: []` → tüm aktif bloklar silinir (client bakım temizliği)
+3. Client'ta var ama backend'te yok olan blokları ekle
+4. Backend'te var ama client'ta yok olan blokları kaldır / stale işaretle
+5. Dashboard "Uygulanan Bloklar" panelini senkronize et
+6. `source` alanı blokun kaynağını belirtir: `auto_response` veya `dashboard`
 
 **Fallback:** Eğer backend bu endpoint'i henüz desteklemiyorsa (HTTP != 200), client mevcut `POST /api/alerts/auto-block` endpoint'ine tek tek blok bildirimi yapar.
+
+---
+
+### 4c. 🧹 POST /api/agent/clear-data (v4.4.7)
+
+**Amaç:** Client bakım menüsünden dashboard KPI / saldırı / alert kayıtlarını silmek.
+Tam spec: [`API_CLEAR_DATA_PROMPT.md`](API_CLEAR_DATA_PROMPT.md)
+
+```json
+POST /api/agent/clear-data
+{
+  "token": "…",
+  "scopes": ["attacks", "blocks", "alerts", "threat_summary", "all"],
+  "reason": "user_requested_cleanup"
+}
+```
+
+**Response:** `{ "status": "ok", "cleared": { "attacks": N, "blocks": N, … } }`
 
 ---
 

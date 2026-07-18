@@ -161,6 +161,7 @@ class RansomwareShield:
         self.threat_engine = threat_engine
 
         self._running = False
+        self.canary_enabled = True
 
         # Canary state
         self._canaries: List[CanaryState] = []
@@ -309,6 +310,33 @@ class RansomwareShield:
             self._cleanup_legacy_canaries()
 
             log(f"[RANSOMWARE-SHIELD] 🎯 Deployed {len(self._canaries)} canary files (hidden)")
+
+            # Optional paths from client_config.json (V4 prompt)
+            try:
+                from client_utils import get_from_config
+                extra = get_from_config("threat_detection.canary_file_paths", None)
+                if not extra:
+                    extra = get_from_config("canary_file_paths", [])
+                for filepath in (extra or []):
+                    try:
+                        d = os.path.dirname(filepath)
+                        if d:
+                            os.makedirs(d, exist_ok=True)
+                        if not os.path.exists(filepath):
+                            with open(filepath, "wb") as f:
+                                f.write(secrets.token_bytes(4096))
+                        self._set_hidden_attribute(filepath)
+                        file_hash = self._file_hash(filepath)
+                        if file_hash:
+                            self._canaries.append(CanaryState(
+                                path=filepath,
+                                sha256=file_hash,
+                                size=os.path.getsize(filepath),
+                            ))
+                    except OSError:
+                        continue
+            except Exception as e:
+                log(f"[RANSOMWARE-SHIELD] Config canary paths error: {e}")
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] Canary deploy error: {e}")
 
@@ -355,29 +383,35 @@ class RansomwareShield:
                         pass
 
     def _canary_watch_loop(self):
-        """Periodically check canary file integrity (every 10s)."""
+        """Periodically check canary file integrity (default 30s)."""
         while self._running:
             try:
-                for canary in self._canaries:
-                    if not os.path.exists(canary.path):
-                        # DELETED — ransomware indicator!
-                        self._on_canary_triggered(canary, "DELETED")
-                        continue
+                if getattr(self, "canary_enabled", True):
+                    for canary in self._canaries:
+                        if not os.path.exists(canary.path):
+                            # DELETED — ransomware indicator!
+                            self._on_canary_triggered(canary, "DELETED")
+                            continue
 
-                    current_hash = self._file_hash(canary.path)
-                    if current_hash and current_hash != canary.sha256:
-                        # MODIFIED — ransomware indicator!
-                        self._on_canary_triggered(canary, "MODIFIED")
-                        canary.sha256 = current_hash  # Update to avoid repeat alerts
+                        current_hash = self._file_hash(canary.path)
+                        if current_hash and current_hash != canary.sha256:
+                            # MODIFIED — ransomware indicator!
+                            self._on_canary_triggered(canary, "MODIFIED")
+                            canary.sha256 = current_hash  # Update to avoid repeat alerts
 
-                    current_size = os.path.getsize(canary.path)
-                    if current_size != canary.size:
-                        self._on_canary_triggered(canary, "SIZE_CHANGED")
-                        canary.size = current_size
+                        current_size = os.path.getsize(canary.path)
+                        if current_size != canary.size:
+                            self._on_canary_triggered(canary, "SIZE_CHANGED")
+                            canary.size = current_size
             except Exception as e:
                 log(f"[RANSOMWARE-SHIELD] Canary check error: {e}")
 
-            time.sleep(10)
+            try:
+                from client_constants import RANSOMWARE_CANARY_CHECK_INTERVAL
+                interval = int(RANSOMWARE_CANARY_CHECK_INTERVAL)
+            except Exception:
+                interval = 30
+            time.sleep(interval)
 
     def _on_canary_triggered(self, canary: CanaryState, change_type: str):
         """Canary file was tampered with — CRITICAL alert."""

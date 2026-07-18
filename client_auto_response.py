@@ -51,6 +51,7 @@ AUTO_UNBLOCK_HOURS = 24
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
     "DEFAULTACCOUNT", "GUEST", "WDAGUTILITYACCOUNT",
+    "ADMINISTRATOR",  # V4: never disable/reset via remote cmd
 }
 
 PROTECTED_PROCESSES: Set[str] = {
@@ -113,7 +114,12 @@ class AutoResponse:
         self._blocks: Dict[str, BlockRecord] = {}
         self._lock = threading.Lock()
 
-        # Rate limiting
+        # Rate limiting (overridable via threats/config sync)
+        self.max_blocks_per_hour = MAX_BLOCKS_PER_HOUR
+        self.max_blocks_per_day = MAX_BLOCKS_PER_DAY
+        self.auto_block_enabled = True
+        self.auto_block_threshold = 80
+        self.auto_block_duration_hours = AUTO_UNBLOCK_HOURS
         self._block_timestamps: deque = deque(maxlen=MAX_BLOCKS_PER_DAY)
 
         # Auto-unblock thread
@@ -185,6 +191,11 @@ class AutoResponse:
         Block an IP via Windows Firewall.
         Returns True if successfully blocked.
         """
+        # Safety: feature disabled via config?
+        if not getattr(self, "auto_block_enabled", True):
+            log(f"[AUTO-RESPONSE] ⚪ Auto-block disabled — skip {ip}")
+            return False
+
         # Safety: whitelist check
         if self._is_whitelisted(ip):
             log(f"[AUTO-RESPONSE] ⚪ Skipped whitelist IP: {ip}")
@@ -241,25 +252,84 @@ class AutoResponse:
             return False
 
     def unblock_ip(self, ip: str) -> bool:
-        """Remove firewall block for an IP."""
+        """Remove firewall block for an IP (all known rule-name variants)."""
         with self._lock:
             record = self._blocks.pop(ip, None)
 
-        if record:
-            rule_name = record.rule_name
-        else:
-            rule_name = f"{FIREWALL_RULE_PREFIX}-{ip}"
+        rule_names = []
+        if record and getattr(record, "rule_name", None):
+            rule_names.append(record.rule_name)
+        try:
+            from client_firewall import WindowsFirewallBackend
+            for n in WindowsFirewallBackend.rule_name_candidates("", ip):
+                if n not in rule_names:
+                    rule_names.append(n)
+        except Exception:
+            rule_names.append(f"{FIREWALL_RULE_PREFIX}-{ip}")
 
-        cmd = [
-            "netsh", "advfirewall", "firewall", "delete", "rule",
-            f"name={rule_name}", "dir=in",
-        ]
-        success = self._run_system_cmd(cmd)
-        if success:
+        success = False
+        hard_fail = False
+        for rule_name in rule_names:
+            cmd = [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name={rule_name}", "dir=in",
+            ]
+            ok, out = self._run_system_cmd_detail(cmd)
+            combined = (out or "").lower()
+            if ok:
+                if "0 rule" not in combined:
+                    success = True
+                # missing rule still OK (idempotent)
+                if "0 rule" in combined or "no rules match" in combined:
+                    success = success or True
+            else:
+                if any(x in combined for x in ("no rules match", "not found", "bulunamad")):
+                    success = True  # already gone
+                elif any(x in combined for x in ("access", "denied", "privilege")):
+                    hard_fail = True
+
+        if success or not hard_fail:
+            # Treat pure-missing as success
+            if not hard_fail:
+                success = True
             self._stats["blocks_removed"] += 1
             log(f"[AUTO-RESPONSE] ✅ Unblocked: {ip}")
             self._report_unblock_to_api(ip)
-        return success
+            return True
+        log(f"[AUTO-RESPONSE] ❌ Unblock failed: {ip}")
+        return False
+
+    def forget_block(self, ip: str) -> None:
+        """Drop IP from local block cache only (firewall already handled)."""
+        with self._lock:
+            self._blocks.pop(ip, None)
+
+    def clear_all_blocks(self, report_api: bool = False) -> int:
+        """Remove all tracked firewall blocks (maintenance cleanup).
+
+        By default skips per-IP API reports; caller syncs empty list / clear-data.
+        """
+        with self._lock:
+            items = list(self._blocks.items())
+            self._blocks.clear()
+
+        removed = 0
+        for ip, record in items:
+            rule_name = getattr(record, "rule_name", None) or f"{FIREWALL_RULE_PREFIX}-{ip}"
+            cmd = [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name={rule_name}", "dir=in",
+            ]
+            if self._run_system_cmd(cmd):
+                removed += 1
+                self._stats["blocks_removed"] += 1
+                if report_api:
+                    try:
+                        self._report_unblock_to_api(ip)
+                    except Exception:
+                        pass
+        log(f"[AUTO-RESPONSE] Cleared {removed}/{len(items)} blocks (maintenance)")
+        return removed
 
     # ── Session Management ────────────────────────────────────────
 
@@ -401,6 +471,38 @@ class AutoResponse:
         if subnets is not None:
             self.whitelist_subnets = list(subnets)
 
+    def apply_threat_config(self, config: dict):
+        """Apply GET /api/threats/config auto-block fields."""
+        if not isinstance(config, dict):
+            return
+        if "auto_block_enabled" in config:
+            self.auto_block_enabled = bool(config.get("auto_block_enabled"))
+        if "auto_block_threshold" in config:
+            try:
+                self.auto_block_threshold = int(config.get("auto_block_threshold", 80))
+            except (TypeError, ValueError):
+                pass
+        if "auto_block_duration_hours" in config:
+            try:
+                self.auto_block_duration_hours = int(config.get("auto_block_duration_hours", 24))
+            except (TypeError, ValueError):
+                pass
+        if "max_auto_blocks_per_hour" in config:
+            try:
+                self.max_blocks_per_hour = int(config.get("max_auto_blocks_per_hour", 50))
+            except (TypeError, ValueError):
+                pass
+        if "max_auto_blocks_per_day" in config:
+            try:
+                self.max_blocks_per_day = int(config.get("max_auto_blocks_per_day", 200))
+            except (TypeError, ValueError):
+                pass
+        log(
+            f"[AUTO-RESPONSE] Config applied — enabled={self.auto_block_enabled} "
+            f"threshold={self.auto_block_threshold} duration={self.auto_block_duration_hours}h "
+            f"limits={self.max_blocks_per_hour}/h {self.max_blocks_per_day}/d"
+        )
+
     def _is_whitelisted(self, ip: str) -> bool:
         """Check if IP is whitelisted (exact match or subnet)."""
         if ip in self.whitelist_ips:
@@ -430,9 +532,9 @@ class AutoResponse:
         recent = [t for t in self._block_timestamps if t >= day_ago]
         hourly = [t for t in recent if t >= hour_ago]
 
-        if len(hourly) >= MAX_BLOCKS_PER_HOUR:
+        if len(hourly) >= getattr(self, "max_blocks_per_hour", MAX_BLOCKS_PER_HOUR):
             return False
-        if len(recent) >= MAX_BLOCKS_PER_DAY:
+        if len(recent) >= getattr(self, "max_blocks_per_day", MAX_BLOCKS_PER_DAY):
             return False
         return True
 
@@ -503,11 +605,7 @@ class AutoResponse:
         threading.Thread(target=_send, daemon=True).start()
 
     def _report_unblock_to_api(self, ip: str):
-        """Report unblock action to API (fire-and-forget).
-
-        POST /api/v4/auto-unblock
-        Body: {token, blocked_ip, unblocked_at (ISO)}
-        """
+        """Report unblock — prefer agent/block-removed (cloud ACK)."""
         if not self.api_client:
             return
 
@@ -518,16 +616,23 @@ class AutoResponse:
                     return
 
                 from datetime import datetime, timezone
+                result = self.api_client.api_request(
+                    "POST", "agent/block-removed",
+                    data={"token": token, "ip": ip},
+                )
+                if result:
+                    log(f"[AUTO-RESPONSE] ✅ block-removed reported: {ip}")
+                    return
                 payload = {
                     "token": token,
                     "blocked_ip": ip,
                     "unblocked_at": datetime.now(timezone.utc).isoformat(),
                 }
-                result = self.api_client.api_request(
+                alt = self.api_client.api_request(
                     "POST", "v4/auto-unblock", data=payload
                 )
-                if result:
-                    log(f"[AUTO-RESPONSE] ✅ Unblock reported to API: {ip}")
+                if alt:
+                    log(f"[AUTO-RESPONSE] ✅ Unblock reported (legacy): {ip}")
                 else:
                     log(f"[AUTO-RESPONSE] ⚠️ Unblock report failed for: {ip}")
             except Exception as e:
@@ -575,19 +680,26 @@ class AutoResponse:
     @staticmethod
     def _run_system_cmd(cmd: list, timeout: int = 15) -> bool:
         """Run a system command and return success status."""
+        ok, _ = AutoResponse._run_system_cmd_detail(cmd, timeout=timeout)
+        return ok
+
+    @staticmethod
+    def _run_system_cmd_detail(cmd: list, timeout: int = 15):
+        """Run command; return (ok: bool, combined_output: str)."""
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True, text=True, timeout=timeout,
                 creationflags=CREATE_NO_WINDOW,
             )
-            return result.returncode == 0
+            out = f"{result.stdout or ''}\n{result.stderr or ''}"
+            return result.returncode == 0, out
         except subprocess.TimeoutExpired:
             log(f"[AUTO-RESPONSE] Command timed out: {' '.join(cmd[:3])}...")
-            return False
+            return False, "timeout"
         except Exception as e:
             log(f"[AUTO-RESPONSE] Command error: {e}")
-            return False
+            return False, str(e)
 
     # ── Password Generation ───────────────────────────────────────
 

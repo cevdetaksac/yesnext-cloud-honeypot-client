@@ -136,6 +136,13 @@ class EventLogWatcher:
         self._subscriptions: list = []
         self._running = False
         self._lock = threading.Lock()
+        # Channel enable flags from threats/config monitored_event_channels
+        self._channel_flags = {
+            "security": True,
+            "system": True,
+            "application": True,
+            "rdp": True,
+        }
 
         # Stats
         self._stats = {
@@ -164,6 +171,9 @@ class EventLogWatcher:
 
         active = 0
         for channel, event_ids in WATCHED_CHANNELS.items():
+            if not self._is_channel_enabled(channel):
+                log(f"[EVENTLOG] ⏭ Skipped (config): {channel}")
+                continue
             try:
                 xpath = _build_xpath(event_ids)
                 handle = win32evtlog.EvtSubscribe(
@@ -181,6 +191,37 @@ class EventLogWatcher:
 
         self._stats["channels_active"] = active
         log(f"[EVENTLOG] Monitoring active — {active}/{len(WATCHED_CHANNELS)} channels")
+
+    def _is_channel_enabled(self, channel: str) -> bool:
+        cl = channel.lower()
+        if cl == "security":
+            return self._channel_flags.get("security", True)
+        if cl == "system":
+            return self._channel_flags.get("system", True)
+        if cl == "application":
+            return self._channel_flags.get("application", True)
+        if "terminalservices" in cl or "rdp" in cl:
+            return self._channel_flags.get("rdp", True)
+        return True
+
+    def update_monitored_channels(self, channels: dict):
+        """Apply monitored_event_channels from threats/config; restart if running."""
+        if not isinstance(channels, dict):
+            return
+        changed = False
+        for key in ("security", "system", "application", "rdp"):
+            if key in channels:
+                val = bool(channels.get(key))
+                if self._channel_flags.get(key) != val:
+                    self._channel_flags[key] = val
+                    changed = True
+        log(f"[EVENTLOG] Channel flags: {self._channel_flags}")
+        if changed and self._running:
+            try:
+                self.stop()
+                self.start()
+            except Exception as e:
+                log(f"[EVENTLOG] Channel re-subscribe error: {e}")
 
     def stop(self):
         """Unsubscribe from all channels and clean up."""

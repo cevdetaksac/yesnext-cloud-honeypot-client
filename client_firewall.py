@@ -200,7 +200,8 @@ class FirewallBackend:
     def apply_block(self, block_id: str, cidrs: List[str]) -> bool:
         raise NotImplementedError
 
-    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
+    def remove_block(self, block_id: str, ip_or_cidr: str = "",
+                     extra_names: Optional[List[str]] = None) -> bool:
         raise NotImplementedError
 
 
@@ -208,15 +209,46 @@ class WindowsFirewallBackend(FirewallBackend):
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
 
-    def _delete_rule_by_name(self, name: str) -> None:
-        # Deletes all rules with the given name across profiles for dir=in
+    @staticmethod
+    def rule_name_candidates(block_id: str = "", ip_or_cidr: str = "") -> List[str]:
+        """All historical / current honeypot block rule names for an IP or id."""
+        names: List[str] = []
+        bid = (block_id or "").strip()
+        ip = (ip_or_cidr or "").strip().split("/")[0]
+        if bid:
+            names.append(f"HP-BLOCK-{bid}")
+        if ip:
+            for n in (
+                f"HP-BLOCK-{ip}",
+                f"HONEYPOT_THREAT_BLOCK_{ip.replace('.', '_')}",
+                f"HONEYPOT_BLOCK_REMOTE_{ip}",
+                f"HONEYPOT_BLOCK_REMOTE_{ip.replace('.', '_')}",
+                f"HONEYPOT_REMOTE_BLOCK_{ip}",
+                f"HONEYPOT_REMOTE_BLOCK_{ip.replace('.', '_')}",
+            ):
+                if n not in names:
+                    names.append(n)
+        return names
+
+    def _delete_rule_by_name(self, name: str) -> Tuple[str, int, str, str]:
+        """Delete rule by name. Returns (status, rc, out, err).
+
+        status: 'removed' | 'missing' | 'failed'
+        """
         rc, out, err = run_cmd([
             "netsh", "advfirewall", "firewall", "delete", "rule",
             f"name={name}", "dir=in",
         ])
-        msg = out.strip() or err.strip()
-        if msg:
-            self.logger.info(msg)
+        combined = f"{out}\n{err}".lower()
+        if rc == 0:
+            if "0 rule" in combined:
+                return "missing", rc, out, err
+            return "removed", rc, out, err
+        if any(x in combined for x in (
+            "no rules match", "not found", "bulunamad", "eşleşen kural yok",
+        )):
+            return "missing", rc, out, err
+        return "failed", rc, out, err
 
     def _add_rule(self, name: str, remoteip_csv: str) -> bool:
         rc, out, err = run_cmd([
@@ -269,55 +301,48 @@ class WindowsFirewallBackend(FirewallBackend):
             pass
         return ""
 
-    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
-        """Remove firewall block rules.
+    def remove_block(self, block_id: str, ip_or_cidr: str = "",
+                     extra_names: Optional[List[str]] = None) -> bool:
+        """Remove firewall block rules (idempotent).
 
-        All rules use unified HP-BLOCK- prefix. Tries:
-          1. HP-BLOCK-{block_id}   — server-assigned block ID
-          2. HP-BLOCK-{ip}         — IP-based rule (AutoResponse)
-          3. HONEYPOT_THREAT_BLOCK_ — legacy backward compat
-
-        If ip_or_cidr is not provided, looks up the remoteip from the
-        existing rule so the IP-based variant can also be removed.
+        Returns True if removed OR already absent (ACK safe).
+        Returns False on hard failure (access denied) — do NOT ACK.
         """
-        # If API didn't provide IP, look it up from the rule itself
-        if not ip_or_cidr:
+        if not ip_or_cidr and block_id:
             ip_or_cidr = self._lookup_rule_remoteip(f"HP-BLOCK-{block_id}")
             if ip_or_cidr:
                 self.logger.info(f"Resolved IP from rule HP-BLOCK-{block_id}: {ip_or_cidr}")
 
-        names_to_try = [f"HP-BLOCK-{block_id}"]
-        if ip_or_cidr:
-            ip_clean = ip_or_cidr.strip().split("/")[0]
-            ip_name = f"HP-BLOCK-{ip_clean}"
-            if ip_name not in names_to_try:
-                names_to_try.append(ip_name)
-            # Backward compat: eski HONEYPOT_THREAT_BLOCK_ prefix'li kurallar
-            legacy_name = f"HONEYPOT_THREAT_BLOCK_{ip_clean.replace('.', '_')}"
-            names_to_try.append(legacy_name)
+        names_to_try = self.rule_name_candidates(block_id, ip_or_cidr)
+        if extra_names:
+            for n in extra_names:
+                if n and n not in names_to_try:
+                    names_to_try.append(n)
 
         removed_any = False
+        hard_fail = False
         for name in names_to_try:
-            rc, out, err = run_cmd([
-                "netsh", "advfirewall", "firewall", "delete", "rule",
-                f"name={name}", "dir=in",
-            ])
-            if rc == 0:
-                out_s = out.strip()
-                if out_s and "0 rule" not in out_s.lower():
-                    self.logger.info(f"Removed rule: {name} ({out_s})")
-                    removed_any = True
-            else:
-                msg = (out + "\n" + err).lower()
-                if "no rules match" not in msg and "0 rule(s) deleted" not in msg:
-                    self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
+            status, rc, out, err = self._delete_rule_by_name(name)
+            if status == "removed":
+                msg = (out or "").strip()
+                self.logger.info(f"Removed rule: {name}" + (f" ({msg})" if msg else ""))
+                removed_any = True
+            elif status == "failed":
+                combined = f"{out}\n{err}".lower()
+                self.logger.error(err.strip() or f"Failed to delete {name} rc={rc}")
+                if any(x in combined for x in ("access", "denied", "privilege", "izin")):
+                    hard_fail = True
+                elif not removed_any:
+                    hard_fail = True
+
+        if hard_fail and not removed_any:
+            return False
 
         if not removed_any:
-            self.logger.warning(f"No firewall rules found for block {block_id} / {ip_or_cidr}")
-
+            self.logger.info(
+                f"No firewall rules found for block {block_id} / {ip_or_cidr} (idempotent OK)"
+            )
         return True
-
-
     def scan_existing_rules(self) -> List[dict]:
         """Scan all HP-BLOCK- and legacy HONEYPOT_THREAT_BLOCK_ firewall rules.
 
@@ -511,7 +536,8 @@ class LinuxFirewallBackend(FirewallBackend):
         else:
             return self._iptables_add_with_comment(block_id, cidrs)
 
-    def remove_block(self, block_id: str, ip_or_cidr: str = "") -> bool:
+    def remove_block(self, block_id: str, ip_or_cidr: str = "",
+                     extra_names: Optional[List[str]] = None) -> bool:
         if self.has_ipset:
             return self._remove_with_ipset(block_id)
         else:
@@ -611,75 +637,142 @@ class FirewallAgent:
             if code not in (200, None):
                 self.logger.error(f"pending-blocks HTTP {code}")
             return payload_ids
-        for item in data:
-            try:
-                block_id = str(item["id"]).strip()
-                spec = str(item.get("ip_or_cidr", "")).strip()
-                reason = str(item.get("reason", ""))
-                # expires_at can be used by server; here we enforce as given
-            except Exception as e:
-                self.logger.error(f"Invalid block item: {e}")
-                continue
-            cidrs = self._expand_ip_or_cidr(spec)
-            if not cidrs: continue
-            ok = self.backend.apply_block(block_id, cidrs)
-            if ok:
-                self.logger.info(f"Applied block {block_id} ({spec})")
-                payload_ids.append(block_id)
-            else:
-                self.logger.error(f"Failed to apply block {block_id} ({spec})")
-        if payload_ids:
-            body = {"token": self.token, "block_ids": payload_ids}
-            _, code = self._post_json("/api/agent/block-applied", body)
-            if code != 200:
-                self.logger.error(f"block-applied HTTP {code}")
+
+        # Conflict: same IP in both queues — skip if we just unblocked (handled by order)
+        BATCH = 40
+        for i in range(0, len(data), BATCH):
+            batch = data[i : i + BATCH]
+            batch_ids: List[str] = []
+            for item in batch:
+                try:
+                    block_id = str(item["id"]).strip()
+                    spec = str(item.get("ip_or_cidr", "")).strip()
+                except Exception as e:
+                    self.logger.error(f"Invalid block item: {e}")
+                    continue
+                if "/" in spec or spec.lower().startswith(COUNTRY_PREFIX):
+                    # country/CIDR — apply if expandable; else log
+                    pass
+                cidrs = self._expand_ip_or_cidr(spec)
+                if not cidrs:
+                    continue
+                ok = self.backend.apply_block(block_id, cidrs)
+                if ok:
+                    self.logger.info(f"Applied block {block_id} ({spec})")
+                    batch_ids.append(block_id)
+                    payload_ids.append(block_id)
+                else:
+                    self.logger.error(f"Failed to apply block {block_id} ({spec})")
+            if batch_ids:
+                body = {"token": self.token, "block_ids": batch_ids}
+                _, ack_code = self._post_json("/api/agent/block-applied", body)
+                if ack_code != 200:
+                    self.logger.error(f"block-applied HTTP {ack_code}")
+            if i + BATCH < len(data):
+                time.sleep(0.15)
         return payload_ids
 
     def _poll_pending_unblocks(self) -> List[str]:
+        """Process remove_pending queue — batch delete + block-removed ACK."""
         removed_ids: List[str] = []
+        failed = 0
         data, code = self._get_json("/api/agent/pending-unblocks")
         if code != 200 or not isinstance(data, list):
             if code not in (200, None):
                 self.logger.error(f"pending-unblocks HTTP {code}")
             return removed_ids
-        for item in data:
-            try:
-                block_id = str(item["id"]).strip()
-                ip_or_cidr = str(item.get("ip_or_cidr", "")).strip()
-            except Exception as e:
-                self.logger.error(f"Invalid unblock item: {e}")
-                continue
-            ok = self.backend.remove_block(block_id, ip_or_cidr=ip_or_cidr)
-            if ok:
-                self.logger.info(f"Removed block {block_id} ({ip_or_cidr})")
-                removed_ids.append(block_id)
-                # Also clean up AutoResponse tracking if available
-                if ip_or_cidr and self.auto_response:
-                    ip_clean = ip_or_cidr.strip().split("/")[0]
-                    try:
-                        self.auto_response.unblock_ip(ip_clean)
-                    except Exception:
-                        pass
-            else:
-                self.logger.error(f"Failed to remove block {block_id} ({ip_or_cidr})")
-        if removed_ids:
-            body = {"token": self.token, "block_ids": removed_ids}
-            _, code = self._post_json("/api/agent/block-removed", body)
-            if code != 200:
-                self.logger.error(f"block-removed HTTP {code}")
+
+        if not data:
+            return removed_ids
+
+        total = len(data)
+        if total >= 50:
+            self.logger.info(
+                f"[FW-SYNC] Large unblock queue ({total}) — batch processing…"
+            )
+
+        # One scan: map IP → extra rule names (catches duplicates / odd names)
+        ip_to_extra: dict = {}
+        try:
+            if isinstance(self.backend, WindowsFirewallBackend):
+                for r in self.backend.scan_existing_rules():
+                    ip = (r.get("ip") or "").strip()
+                    if not ip:
+                        rip = (r.get("remoteip") or "").split(",")[0].strip().split("/")[0]
+                        ip = rip
+                    name = r.get("name") or ""
+                    if ip and name:
+                        ip_to_extra.setdefault(ip, []).append(name)
+        except Exception as e:
+            self.logger.warning(f"[FW-SYNC] pre-scan skipped: {e}")
+
+        BATCH = 40
+        for i in range(0, len(data), BATCH):
+            batch = data[i : i + BATCH]
+            batch_ids: List[str] = []
+            for item in batch:
+                try:
+                    block_id = str(item["id"]).strip()
+                    ip_or_cidr = str(item.get("ip_or_cidr", "")).strip()
+                except Exception as e:
+                    self.logger.error(f"Invalid unblock item: {e}")
+                    failed += 1
+                    continue
+
+                ip_clean = ip_or_cidr.split("/")[0].strip() if ip_or_cidr else ""
+                extra = ip_to_extra.get(ip_clean, []) if ip_clean else []
+
+                ok = self.backend.remove_block(
+                    block_id, ip_or_cidr=ip_or_cidr, extra_names=extra,
+                )
+                if ok:
+                    self.logger.info(f"Removed block {block_id} ({ip_or_cidr})")
+                    batch_ids.append(block_id)
+                    removed_ids.append(block_id)
+                    # Local cache only — do NOT re-hit netsh / alternate unblock APIs
+                    if ip_clean and self.auto_response:
+                        try:
+                            if hasattr(self.auto_response, "forget_block"):
+                                self.auto_response.forget_block(ip_clean)
+                            elif hasattr(self.auto_response, "_blocks"):
+                                lock = getattr(self.auto_response, "_lock", None)
+                                if lock:
+                                    with lock:
+                                        self.auto_response._blocks.pop(ip_clean, None)
+                                else:
+                                    self.auto_response._blocks.pop(ip_clean, None)
+                        except Exception:
+                            pass
+                else:
+                    failed += 1
+                    self.logger.error(
+                        f"Failed to remove block {block_id} ({ip_or_cidr}) — ACK deferred"
+                    )
+
+            if batch_ids:
+                body = {"token": self.token, "block_ids": batch_ids}
+                _, ack_code = self._post_json("/api/agent/block-removed", body)
+                if ack_code != 200:
+                    self.logger.error(f"block-removed HTTP {ack_code}")
+                    # IDs stay remove_pending; next poll retries
+            if i + BATCH < len(data):
+                time.sleep(0.2)
+
+        self.logger.info(
+            f"[FW-SYNC] pending_unblocks={total} removed={len(removed_ids)} failed={failed}"
+        )
         return removed_ids
 
     # --------------- Migration & sync --------------- #
 
     def _migrate_and_sync_rules(self) -> None:
-        """Startup migration: rename legacy rules and sync all local blocks to API.
+        """After unblocks/blocks: migrate legacy names + report remaining inventory.
 
-        1. Scan all HP-BLOCK-* and HONEYPOT_THREAT_BLOCK_* firewall rules
-        2. Migrate legacy names → HP-BLOCK-{ip}
-        3. POST full list to /api/agent/sync-rules so dashboard is in sync
+        Does NOT re-apply local blocks to the cloud as new pending-blocks.
+        Source of truth remains pending-unblocks / pending-blocks queues.
         """
         if not is_windows():
-            return  # Linux migration not needed yet
+            return
         if not isinstance(self.backend, WindowsFirewallBackend):
             return
 
@@ -693,11 +786,9 @@ class FirewallAgent:
 
         if not rules:
             self.logger.info("No existing HP-BLOCK / legacy rules found")
-            # Still sync empty list so API knows
             self._sync_rules_to_api([])
             return
 
-        # Phase 1: Migrate legacy rules
         migrated = 0
         for r in rules:
             if r.get("legacy"):
@@ -710,7 +801,6 @@ class FirewallAgent:
                     )
                     if ok:
                         migrated += 1
-                        # Update record in-place for sync
                         r["name"] = f"HP-BLOCK-{ip}"
                         r["legacy"] = False
                         r["suffix"] = ip
@@ -718,7 +808,6 @@ class FirewallAgent:
         if migrated:
             self.logger.info(f"✅ Migrated {migrated} legacy rule(s) to HP-BLOCK- prefix")
 
-        # Phase 2: Also load AutoResponse in-memory blocks into sync list
         auto_blocks = []
         if self.auto_response:
             try:
@@ -726,27 +815,22 @@ class FirewallAgent:
             except Exception:
                 pass
 
-        # Phase 3: Build unique IP list from firewall + AutoResponse
-        sync_ips: dict = {}  # ip -> {rule_name, source}
+        sync_ips: dict = {}
         for r in rules:
-            # Extract IP from remoteip or suffix
             remoteip = r.get("remoteip", "")
             suffix = r.get("suffix", "")
-            # For HP-BLOCK-{id} (numeric IDs from dashboard), use remoteip
-            # For HP-BLOCK-{ip}, suffix is the IP
             ip = ""
-            if suffix and not suffix.isdigit():
-                ip = suffix  # HP-BLOCK-1.2.3.4 → ip=1.2.3.4
+            if suffix and not str(suffix).isdigit():
+                ip = suffix
             elif remoteip and remoteip.lower() not in ("any", "herhangi"):
-                ip = remoteip.split(",")[0].strip()  # Take first IP from CSV
+                ip = remoteip.split(",")[0].strip().split("/")[0]
 
             if ip:
                 sync_ips[ip] = {
                     "rule_name": r["name"],
-                    "source": "auto_response" if not suffix.isdigit() else "dashboard",
+                    "source": "auto_response" if not str(suffix).isdigit() else "dashboard",
                 }
 
-        # Add AutoResponse in-memory blocks
         for ab in auto_blocks:
             ip = ab.get("ip", "")
             if ip and ip not in sync_ips:
@@ -757,14 +841,13 @@ class FirewallAgent:
                     "blocked_at": ab.get("blocked_at", 0),
                 }
 
-        # Phase 4: Sync to API
         self._sync_rules_to_api(list(sync_ips.items()))
         self.logger.info(
             f"🔄 Sync complete: {len(sync_ips)} active block(s) reported to API"
         )
 
     def _sync_rules_to_api(self, ip_entries: list) -> None:
-        """POST /api/agent/sync-rules — Send all local firewall blocks to API."""
+        """POST /api/agent/sync-rules — inventory only (replace semantics on server)."""
         import datetime as _dt
 
         blocks = []
@@ -791,27 +874,21 @@ class FirewallAgent:
         if code == 200:
             self.logger.info(f"API sync-rules accepted ({len(blocks)} blocks)")
         else:
-            # Fallback: try individual auto-block reports
             self.logger.warning(
-                f"sync-rules HTTP {code} — falling back to individual reports"
+                f"sync-rules HTTP {code} — inventory report skipped "
+                f"(pending queues remain source of truth)"
             )
-            for b in blocks:
-                if b.get("source") == "auto_response" and b.get("ip"):
-                    fallback_body = {
-                        "token": self.token,
-                        "blocked_ip": b["ip"],
-                        "reason": b.get("reason", "migration_sync"),
-                        "duration_hours": 24,
-                        "firewall_rule_name": b.get("rule_name", ""),
-                        "blocked_at": b.get("blocked_at") or _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    }
-                    self._post_json("/api/alerts/auto-block", fallback_body)
 
     def run_once(self) -> dict:
-        """Run a single poll cycle and return results"""
+        """Run a single poll cycle — unblocks first (stale cleanup), then blocks."""
         try:
-            blocked = self._poll_pending_blocks()
             unblocked = self._poll_pending_unblocks()
+            blocked = self._poll_pending_blocks()
+            self.logger.info(
+                f"[FW-SYNC] pending_blocks={len(blocked)} "
+                f"pending_unblocks={len(unblocked)} "
+                f"removed={len(unblocked)} failed=0"
+            )
             return {
                 "success": True,
                 "blocked_count": len(blocked),
@@ -830,7 +907,17 @@ class FirewallAgent:
         if not is_admin():
             self.logger.error("This agent requires Administrator/root privileges.")
 
-        # Run migration & sync once at startup
+        # Boot order (cloud is source of truth):
+        # 1) pending-unblocks → delete + ACK
+        # 2) pending-blocks → add + ACK
+        # 3) sync-rules inventory of what remains (do NOT re-apply local list)
+        self.logger.info("[FW-SYNC] Startup: unblocks → blocks → inventory sync")
+        try:
+            self._poll_pending_unblocks()
+            self._poll_pending_blocks()
+        except Exception as e:
+            self.logger.error(f"Startup poll error (non-fatal): {e}")
+
         try:
             self._migrate_and_sync_rules()
         except Exception as e:
@@ -838,17 +925,23 @@ class FirewallAgent:
 
         backoff = self.refresh_interval
         max_backoff = max(60, self.refresh_interval * 6)
-        self.logger.info("Started Honeypot Firewall Agent")
+        self.logger.info(
+            f"Started Honeypot Firewall Agent (poll every {self.refresh_interval}s)"
+        )
         while not self._stop:
             start = time.time()
             try:
-                self._poll_pending_blocks()
-                self._poll_pending_unblocks()
+                unblocked = self._poll_pending_unblocks()
+                blocked = self._poll_pending_blocks()
+                self.logger.info(
+                    f"[FW-SYNC] pending_blocks={len(blocked)} "
+                    f"pending_unblocks={len(unblocked)} "
+                    f"removed={len(unblocked)} failed=0"
+                )
                 backoff = self.refresh_interval  # reset on success
             except Exception as e:
                 self.logger.exception(f"Agent loop error: {e}")
                 backoff = min(max_backoff, max(self.refresh_interval, int(backoff * 2)))
-            # Sleep until next tick; if error, exponential backoff
             elapsed = time.time() - start
             sleep_for = max(1, backoff - int(elapsed))
             time.sleep(sleep_for)
@@ -877,8 +970,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--interval",
         type=int,
-        default=int(os.environ.get("REFRESH_INTERVAL_SEC", "10")),
-        help="Polling interval seconds (env: REFRESH_INTERVAL_SEC)",
+        default=int(os.environ.get("REFRESH_INTERVAL_SEC", "30")),
+        help="Polling interval seconds (env: REFRESH_INTERVAL_SEC, default 30)",
     )
     p.add_argument(
         "--log-file",

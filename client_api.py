@@ -587,14 +587,78 @@ class HoneypotAPIClient:
             self.log(f"[API] notification preferences update error: {e}")
             return False
 
-    def report_events_batch(self, token: str, events: list) -> bool:
-        """POST /api/events/batch — Toplu olay gönderimi (trend analizi için)"""
+    def report_events_batch(self, token: str, events: list,
+                            batch_id: str = None, summary: dict = None) -> bool:
+        """POST /api/events/batch — Toplu olay gönderimi (canonical schema)."""
         try:
-            payload = {"token": token, "events": events}
+            import uuid as _uuid
+            payload = {
+                "token": token,
+                "batch_id": batch_id or str(_uuid.uuid4()),
+                "events": events,
+            }
+            if summary:
+                payload["summary"] = summary
             resp = self.api_request("POST", "events/batch", data=payload)
-            return isinstance(resp, dict) and resp.get("status") in ("ok", "success", "received")
+            return isinstance(resp, dict) and resp.get("status") in (
+                "ok", "success", "received",
+            )
         except Exception as e:
             self.log(f"[API] events batch report error: {e}")
+            return False
+
+    def report_urgent_alert(self, token: str, alert: dict) -> Optional[Dict]:
+        """POST /api/alerts/urgent — Kritik tehdit bildirimi."""
+        try:
+            payload = {"token": token, **alert}
+            resp = self.api_request("POST", "alerts/urgent", data=payload, timeout=15)
+            return resp if isinstance(resp, dict) else None
+        except Exception as e:
+            self.log(f"[API] urgent alert error: {e}")
+            return None
+
+    def clear_client_data(self, token: str, scopes: list,
+                          reason: str = "user_requested_cleanup") -> Optional[Dict]:
+        """POST /api/agent/clear-data — Dashboard/sunucu verilerini temizle.
+
+        Canonical scopes: attacks | blocks | alerts | threat_summary | all
+        Backend yoksa None döner; client yerel temizliği yine yapar.
+        """
+        try:
+            payload = {
+                "token": token,
+                "scopes": scopes or ["all"],
+                "reason": reason,
+            }
+            resp = self.api_request("POST", "agent/clear-data", data=payload, timeout=30)
+            if resp is not None:
+                return resp if isinstance(resp, dict) else {"status": "ok"}
+            # Alias fallback
+            if "attacks" in (scopes or []) or "all" in (scopes or []):
+                alt = self.api_request("POST", "attacks/clear", data={
+                    "token": token, "reason": reason,
+                }, timeout=30)
+                if alt is not None:
+                    return alt if isinstance(alt, dict) else {"status": "ok"}
+            return None
+        except Exception as e:
+            self.log(f"[API] clear-data error: {e}")
+            return None
+
+    def sync_firewall_rules(self, token: str, blocks: list) -> bool:
+        """POST /api/agent/sync-rules — Yerel blok listesini dashboard ile hizala."""
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "token": token,
+                "blocks": blocks or [],
+                "total_rules": len(blocks or []),
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+            resp = self.api_request("POST", "agent/sync-rules", data=payload, timeout=20)
+            return resp is not None
+        except Exception as e:
+            self.log(f"[API] sync-rules error: {e}")
             return False
 
 # ===================== API WRAPPER FUNCTIONS ===================== #

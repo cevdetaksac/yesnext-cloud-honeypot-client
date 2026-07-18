@@ -40,10 +40,28 @@ from client_helpers import log
 # ── Constants ─────────────────────────────────────────────────────
 
 COLLECT_INTERVAL = 10       # Collect metrics every 10 seconds
-REPORT_INTERVAL = 300       # Report to API every 5 minutes
+REPORT_INTERVAL = 60        # Health report to API every 60s (sessions/processes for dashboard)
 ANOMALY_Z_THRESHOLD = 3.0   # Z-score threshold for anomaly
 MIN_SAMPLES = 15            # Minimum samples before anomaly detection
+MAX_TOP_PROCESSES = 120     # Cap process list for health report
 
+# Suspicious process heuristics
+_SUSPICIOUS_NAMES = (
+    "mimikatz", "procdump", "psexec", "psexesvc", "nc.exe", "ncat",
+    "cobalt", "beacon", "ransom", "lazagne", "sharpdump", "nanodump",
+)
+_SUSPICIOUS_PATH_MARKERS = (
+    "\\temp\\", "\\appdata\\local\\temp\\", "\\downloads\\", "\\public\\",
+)
+_LOLBIN_HINTS = (
+    ("powershell", ("-enc", "-encodedcommand", "-e ", "downloadstring", "iex ")),
+    ("pwsh", ("-enc", "-encodedcommand", "downloadstring")),
+    ("wscript", (".vbs", ".js", "http")),
+    ("cscript", (".vbs", ".js")),
+    ("mshta", ("http", ".hta", "javascript:")),
+    ("rundll32", ("http", "javascript:", ".dll,")),
+    ("certutil", ("-urlcache", "-decode", "-f ")),
+)
 # Metric definitions: (threshold_type, threshold_value, threat_description, score)
 METRIC_CONFIG = {
     "cpu_percent":          ("fixed", 90, "CPU spike — kripto madenci şüphesi", 60),
@@ -142,7 +160,17 @@ class SystemHealthMonitor:
             "anomalies_detected": 0,
             "reports_sent": 0,
             "top_cpu_processes": [],
+            "top_processes": [],
+            "active_sessions": [],
         }
+        self._mem_total_bytes = 0
+        self._rdp_ports = {3389}
+        try:
+            from client_constants import RDP_SECURE_PORT
+            if RDP_SECURE_PORT:
+                self._rdp_ports.add(int(RDP_SECURE_PORT))
+        except Exception:
+            pass
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -235,30 +263,20 @@ class SystemHealthMonitor:
         except Exception:
             pass
 
-        # ── Top CPU processes ──
+        # ── Top / rich processes + active sessions ──
         try:
-            top_procs = []
-            for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
-                try:
-                    pinfo = p.info
-                    cpu = pinfo.get('cpu_percent', 0) or 0
-                    if cpu > 1.0:
-                        mem_mb = round(
-                            ((pinfo.get('memory_info') or type('', (), {'rss': 0})).rss)
-                            / 1024 / 1024, 1
-                        )
-                        top_procs.append({
-                            "pid": pinfo['pid'],
-                            "name": pinfo['name'],
-                            "cpu": cpu,
-                            "memory_mb": mem_mb,
-                        })
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            top_procs.sort(key=lambda x: x["cpu"], reverse=True)
-            self._stats["top_cpu_processes"] = top_procs[:10]
-        except Exception:
-            pass
+            mem_total = mem.total or 1
+            self._mem_total_bytes = mem_total
+            rich = self._collect_rich_processes(psutil, mem_total)
+            self._stats["top_processes"] = rich
+            self._stats["top_cpu_processes"] = rich[:10]
+        except Exception as e:
+            log(f"[HEALTH] Process collect error: {e}")
+
+        try:
+            self._stats["active_sessions"] = self._collect_active_sessions()
+        except Exception as e:
+            log(f"[HEALTH] Session collect error: {e}")
 
         # ── Anomaly detection ──
         detected_anomalies = []
@@ -298,6 +316,313 @@ class SystemHealthMonitor:
             self._stats["anomalies_detected"] += len(detected_anomalies)
             for name, value, desc, score in detected_anomalies:
                 self._emit_anomaly(name, value, desc, score)
+
+    # ── Sessions & Processes ──────────────────────────────────────
+
+    def _collect_active_sessions(self) -> List[dict]:
+        """Enumerate interactive / RDP sessions (canonical active_sessions schema)."""
+        import subprocess
+        CREATE_NO_WINDOW = 0x08000000
+        sessions: List[dict] = []
+        now = time.time()
+        remote_ips = self._guess_rdp_client_ips()
+
+        # query user — richest text source
+        try:
+            r = subprocess.run(
+                ["query", "user"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            for line in (r.stdout or "").splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[0].startswith(">"):
+                    parts[0] = parts[0][1:]
+                username = parts[0]
+                # Typical: USERNAME SESSIONNAME ID STATE IDLE TIME LOGON TIME
+                # Disconnected may omit SESSIONNAME
+                session_name = ""
+                session_id = None
+                status = "Unknown"
+                idle_sec = None
+                login_time = None
+
+                # Find numeric session id
+                id_idx = None
+                for i, p in enumerate(parts[1:], 1):
+                    if p.isdigit():
+                        id_idx = i
+                        break
+                if id_idx is None:
+                    continue
+                if id_idx > 1:
+                    session_name = parts[1]
+                session_id = int(parts[id_idx])
+                status_raw = parts[id_idx + 1] if len(parts) > id_idx + 1 else ""
+                status = {
+                    "active": "Active",
+                    "disc": "Disconnected",
+                    "listen": "Listen",
+                }.get(status_raw.lower(), status_raw or "Unknown")
+
+                # Idle column often "none" or ".:" or "1+00:12"
+                rest = parts[id_idx + 2:]
+                if rest:
+                    idle_tok = rest[0]
+                    idle_sec = self._parse_idle_to_sec(idle_tok)
+                    logon_parts = rest[1:] if idle_tok.lower() != "none" or len(rest) > 1 else rest
+                    if idle_tok.lower() in ("none", ".") or ":" in idle_tok or idle_tok.isdigit() or "+" in idle_tok:
+                        logon_parts = rest[1:]
+                    else:
+                        logon_parts = rest
+                    login_time = self._parse_logon_to_iso(" ".join(logon_parts)) if logon_parts else None
+
+                protocol = "Console"
+                sn = (session_name or "").lower()
+                if sn.startswith("rdp") or "tcp#" in sn:
+                    protocol = "RDP"
+                elif not session_name or sn in ("console", "services"):
+                    protocol = "Console" if sn != "services" else "Services"
+
+                client_ip = ""
+                if protocol == "RDP" and status == "Active":
+                    if len(remote_ips) == 1:
+                        client_ip = remote_ips[0]
+                    elif remote_ips:
+                        client_ip = remote_ips[0]  # best-effort
+
+                duration_sec = None
+                if login_time:
+                    try:
+                        lt = datetime.fromisoformat(login_time.replace("Z", "+00:00"))
+                        duration_sec = max(0, int(now - lt.timestamp()))
+                    except Exception:
+                        pass
+
+                sessions.append({
+                    "username": username,
+                    "session_id": session_id,
+                    "session_name": session_name or ("Console" if protocol == "Console" else ""),
+                    "status": status,
+                    "client_ip": client_ip,
+                    "protocol": protocol,
+                    "logon_type": 10 if protocol == "RDP" else (2 if protocol == "Console" else None),
+                    "login_time": login_time,
+                    "duration_sec": duration_sec,
+                    "idle_sec": idle_sec,
+                    "client_name": "",
+                })
+        except Exception as e:
+            log(f"[HEALTH] query user failed: {e}")
+
+        # Fallback: at least console from query session
+        if not sessions:
+            try:
+                r = subprocess.run(
+                    ["query", "session"],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                for line in (r.stdout or "").splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    name = parts[0].lstrip(">")
+                    # SESSIONNAME USERNAME ID STATE
+                    if len(parts) >= 4 and not parts[1].isdigit():
+                        username, sid, state = parts[1], parts[2], parts[3]
+                    elif parts[1].isdigit():
+                        username, sid, state = "", parts[1], parts[2] if len(parts) > 2 else ""
+                    else:
+                        continue
+                    if not sid.isdigit():
+                        continue
+                    proto = "RDP" if name.lower().startswith("rdp") else "Console"
+                    sessions.append({
+                        "username": username or "SYSTEM",
+                        "session_id": int(sid),
+                        "session_name": name,
+                        "status": state or "Unknown",
+                        "client_ip": remote_ips[0] if proto == "RDP" and remote_ips else "",
+                        "protocol": proto,
+                        "logon_type": 10 if proto == "RDP" else 2,
+                        "login_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "duration_sec": None,
+                        "idle_sec": None,
+                        "client_name": "",
+                    })
+            except Exception as e:
+                log(f"[HEALTH] query session fallback failed: {e}")
+
+        return sessions
+
+    def _guess_rdp_client_ips(self) -> List[str]:
+        """Best-effort remote IPs connected to RDP listen ports."""
+        ips: List[str] = []
+        try:
+            import psutil
+            for c in psutil.net_connections(kind="inet"):
+                try:
+                    if c.status != "ESTABLISHED":
+                        continue
+                    lport = c.laddr.port if c.laddr else None
+                    if lport not in self._rdp_ports:
+                        continue
+                    rip = c.raddr.ip if c.raddr else ""
+                    if rip and rip not in ("127.0.0.1", "::1") and rip not in ips:
+                        ips.append(rip)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return ips
+
+    @staticmethod
+    def _parse_idle_to_sec(tok: str) -> Optional[int]:
+        t = (tok or "").strip().lower()
+        if not t or t in (".", "none", "hiçbir"):
+            return 0
+        try:
+            # formats: 1:23, 1+02:15, 12
+            days = 0
+            if "+" in t:
+                d, t = t.split("+", 1)
+                days = int(d)
+            if ":" in t:
+                parts = [int(x) for x in t.split(":")]
+                if len(parts) == 2:
+                    return days * 86400 + parts[0] * 3600 + parts[1] * 60
+                if len(parts) == 3:
+                    return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return int(t) * 60
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_logon_to_iso(text: str) -> Optional[str]:
+        text = (text or "").strip()
+        if not text:
+            return None
+        # Try common local formats then emit UTC ISO
+        from datetime import datetime as _dt
+        for fmt in (
+            "%d.%m.%Y %H:%M",
+            "%d/%m/%Y %H:%M",
+            "%m/%d/%Y %I:%M %p",
+            "%m/%d/%Y %H:%M",
+            "%Y-%m-%d %H:%M",
+            "%d.%m.%Y %H:%M:%S",
+        ):
+            try:
+                local = _dt.strptime(text, fmt)
+                # Assume local timezone wall clock
+                ts = time.mktime(local.timetuple())
+                return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                continue
+        return None
+
+    def _collect_rich_processes(self, psutil, mem_total: int) -> List[dict]:
+        """Build canonical top_processes list (≤ MAX_TOP_PROCESSES)."""
+        now = time.time()
+        # Prime CPU counters
+        for p in psutil.process_iter(["pid"]):
+            try:
+                p.cpu_percent(interval=None)
+            except Exception:
+                pass
+        time.sleep(0.15)
+
+        collected: Dict[int, dict] = {}
+        for p in psutil.process_iter([
+            "pid", "name", "cpu_percent", "memory_info", "username",
+            "exe", "create_time", "cmdline", "status",
+        ]):
+            try:
+                info = p.info
+                pid = info.get("pid")
+                if not pid:
+                    continue
+                mem_info = info.get("memory_info")
+                rss = getattr(mem_info, "rss", 0) if mem_info else 0
+                mem_mb = round(rss / (1024 * 1024), 1)
+                mem_pct = round((rss / mem_total) * 100, 2) if mem_total else 0.0
+                cpu = float(info.get("cpu_percent") or 0.0)
+                path = info.get("exe") or ""
+                name = info.get("name") or ""
+                cmdline_list = info.get("cmdline") or []
+                cmdline = " ".join(cmdline_list) if isinstance(cmdline_list, list) else str(cmdline_list or "")
+                create_time = info.get("create_time") or 0
+                started_at = None
+                runtime_sec = None
+                if create_time:
+                    started_at = datetime.fromtimestamp(
+                        create_time, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    runtime_sec = max(0, int(now - create_time))
+
+                suspicious, reasons = self._process_suspicion(name, path, cmdline)
+                entry = {
+                    "pid": pid,
+                    "name": name,
+                    "path": path[:260] if path else "",
+                    "username": info.get("username") or "",
+                    "cpu_percent": round(cpu, 1),
+                    "cpu": round(cpu, 1),  # alias
+                    "memory_mb": mem_mb,
+                    "memory_percent": mem_pct,
+                    "status": info.get("status") or "running",
+                    "started_at": started_at,
+                    "runtime_sec": runtime_sec,
+                    "cmdline": (cmdline[:500] if cmdline else ""),
+                    "suspicious": suspicious,
+                    "suspicion_reasons": reasons,
+                }
+                collected[pid] = entry
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+
+        procs = list(collected.values())
+        by_cpu = sorted(procs, key=lambda x: x.get("cpu_percent", 0), reverse=True)[:80]
+        by_mem = sorted(procs, key=lambda x: x.get("memory_mb", 0), reverse=True)[:40]
+        suspicious = [p for p in procs if p.get("suspicious")]
+
+        merged: Dict[int, dict] = {}
+        for group in (by_cpu, by_mem, suspicious):
+            for p in group:
+                merged[p["pid"]] = p
+
+        out = list(merged.values())
+        out.sort(
+            key=lambda x: (not x.get("suspicious"), -(x.get("cpu_percent") or 0)),
+        )
+        return out[:MAX_TOP_PROCESSES]
+
+    @staticmethod
+    def _process_suspicion(name: str, path: str, cmdline: str) -> Tuple[bool, List[str]]:
+        reasons: List[str] = []
+        nlow = (name or "").lower()
+        plow = (path or "").lower().replace("/", "\\")
+        clow = (cmdline or "").lower()
+
+        for marker in _SUSPICIOUS_PATH_MARKERS:
+            if marker in plow:
+                reasons.append("temp_path")
+                break
+        for bad in _SUSPICIOUS_NAMES:
+            if bad in nlow or bad in plow:
+                reasons.append("name_match")
+                break
+        for bin_name, hints in _LOLBIN_HINTS:
+            if bin_name in nlow or bin_name in plow:
+                if any(h in clow for h in hints):
+                    reasons.append("lolbin")
+                    break
+        return (len(reasons) > 0), reasons
 
     # ── Anomaly Alerting ──────────────────────────────────────────
 
@@ -483,17 +808,25 @@ class SystemHealthMonitor:
                 "network_bytes_recv_sec": round(self._latest.get("net_bytes_recv_rate", 0)),
                 "process_count": self._latest.get("process_count", 0),
                 "open_connections": self._latest.get("connection_count", 0),
+                "connection_count": self._latest.get("connection_count", 0),
                 "anomalies_detected": self._anomalies,
+                "top_processes": list(self._stats.get("top_processes") or []),
                 "top_cpu_processes": [
                     {
                         "pid": p.get("pid"),
                         "name": p.get("name"),
-                        "cpu_percent": p.get("cpu", p.get("cpu_percent", 0)),
+                        "cpu_percent": p.get("cpu_percent", p.get("cpu", 0)),
+                        "cpu": p.get("cpu_percent", p.get("cpu", 0)),
+                        "memory_mb": p.get("memory_mb", 0),
                         "memory_percent": p.get("memory_percent", 0),
+                        "path": p.get("path", ""),
+                        "username": p.get("username", ""),
+                        "suspicious": p.get("suspicious", False),
                     }
-                    for p in (self._stats.get("top_cpu_processes", [])[:5])
+                    for p in (self._stats.get("top_cpu_processes") or self._stats.get("top_processes") or [])[:15]
                 ],
-                "active_sessions": [],
+                "active_sessions": list(self._stats.get("active_sessions") or []),
+                "sessions": list(self._stats.get("active_sessions") or []),
                 "vss_shadow_count": vss_shadow_count,
                 "ransomware_shield_status": ransomware_shield_status,
                 "canary_files_intact": canary_files_intact,
@@ -504,12 +837,28 @@ class SystemHealthMonitor:
         try:
             resp = self.api_client.api_request(
                 "POST", "health/report",
-                data=payload, timeout=10, verbose_logging=False,
+                data=payload, timeout=15, verbose_logging=False,
             )
             if isinstance(resp, dict) and resp.get("status") in ("ok", "success", "received"):
                 self._stats["reports_sent"] += 1
+                return True
+            # Accept any 2xx-style non-null response
+            if resp is not None:
+                self._stats["reports_sent"] += 1
+                return True
         except Exception as e:
             log(f"[HEALTH] API report error: {e}")
+        return False
+
+    def force_report(self, refresh: bool = True) -> bool:
+        """Immediate health report (dashboard refresh / remote list_* cmds)."""
+        try:
+            if refresh:
+                self._collect_metrics()
+            return bool(self._send_report())
+        except Exception as e:
+            log(f"[HEALTH] force_report error: {e}")
+            return False
 
     # ── Public Accessors ──────────────────────────────────────────
 
@@ -525,6 +874,8 @@ class SystemHealthMonitor:
             "process_count": self._latest.get("process_count", 0),
             "connection_count": self._latest.get("connection_count", 0),
             "anomalies": list(self._anomalies),
+            "active_sessions": list(self._stats.get("active_sessions") or []),
+            "top_processes": list(self._stats.get("top_processes") or [])[:30],
             "status": self._get_health_status(),
         }
 

@@ -62,13 +62,80 @@ def is_session_zero() -> bool:
     return get_windows_session_id() == 0
 
 
+def has_interactive_user_session(query_stdout: Optional[str] = None) -> bool:
+    """True if any Active console/RDP session with id > 0 exists (not services/Session 0)."""
+    try:
+        import subprocess
+        stdout = query_stdout
+        if stdout is None:
+            result = subprocess.run(
+                ["query", "session"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                return False
+            stdout = result.stdout or ""
+        for line in stdout.splitlines()[1:]:
+            if "Active" not in line:
+                continue
+            low = line.lower()
+            if "services" in low:
+                continue
+            parts = line.split()
+            try:
+                # SESSIONNAME USERNAME ID STATE … — ID sits immediately before Active
+                idx = next(i for i, p in enumerate(parts) if p == "Active")
+                sid = int(parts[idx - 1])
+                if sid > 0:
+                    return True
+            except (StopIteration, ValueError, IndexError):
+                if "console" in low or "rdp" in low:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def interactive_frontend_running() -> bool:
+    """True if honeypot-client is already running in a user session (session id > 0)."""
+    try:
+        import ctypes
+        import psutil
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                cmdline = " ".join(proc.info.get("cmdline") or [])
+                if "honeypot-client" not in name and "client.py" not in cmdline:
+                    continue
+                if "--watchdog" in cmdline or "--silent-update" in cmdline:
+                    continue
+                sid = wintypes.DWORD()
+                if kernel32.ProcessIdToSessionId(int(proc.info["pid"]), ctypes.byref(sid)):
+                    if int(sid.value) > 0:
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError, ValueError):
+                continue
+        return False
+    except Exception:
+        return False
+
+
 def launch_interactive_tray_gui() -> bool:
     """Start CloudHoneypot-Tray in the logged-on user session (visible desktop)."""
     try:
         import subprocess
         from client_task_scheduler import TASK_NAME_TRAY
         CREATE_NO_WINDOW = 0x08000000
-        # Ensure task is enabled, then run it (Users group principal → interactive session)
+        if interactive_frontend_running():
+            log(f"[SESSION] Interactive frontend already running — skip {TASK_NAME_TRAY}")
+            return True
+        # Ensure task is enabled, then run (Authenticated Users → any interactive logon)
         subprocess.run(
             ["schtasks", "/change", "/tn", TASK_NAME_TRAY, "/enable"],
             capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,

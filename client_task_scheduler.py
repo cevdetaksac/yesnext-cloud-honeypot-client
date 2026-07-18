@@ -159,8 +159,14 @@ TASK_CONFIGS = {
     TASK_NAME_TRAY: {
         "description": "Cloud Honeypot Client - Interactive Tray",
         "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></LogonTrigger>",
-        "principal": "<GroupId>Users</GroupId><RunLevel>HighestAvailable</RunLevel>",
-        "args": "--show-gui",
+        # S-1-5-11 = Authenticated Users (includes local Administrator; Users group often does not)
+        "principal": (
+            "<GroupId>S-1-5-11</GroupId>"
+            "<LogonType>Group</LogonType>"
+            "<RunLevel>HighestAvailable</RunLevel>"
+        ),
+        # Logon → tray icon (not forced window); onboarding still forces GUI via should_force_gui_visible
+        "args": "--mode=tray",
         # IgnoreNew: multi-user RDP — second logon must NOT kill first user's GUI
         "multi_instance": "IgnoreNew",
         "hidden": False, "wake": False, "network_required": False,
@@ -712,7 +718,7 @@ def refresh_watchdog_and_memory_restart(log_func=None) -> bool:
         ensure_memory_restart_script_on_disk()
         for name, label in (
             (TASK_NAME_WATCHDOG, "Watchdog 2m"),
-            (TASK_NAME_TRAY, "Tray IgnoreNew (multi-user)"),
+            (TASK_NAME_TRAY, "Tray Authenticated Users logon"),
             (TASK_NAME_MEMORY_RESTART, "MemoryRestart path fix"),
         ):
             xml = create_task_xml(name)

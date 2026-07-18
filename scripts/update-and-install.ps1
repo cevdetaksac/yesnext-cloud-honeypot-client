@@ -326,6 +326,17 @@ if ($ShowGuiAfter -or -not $Silent) {
     } catch {
         Write-UpLog "WARN: daemon launch failed: $($_.Exception.Message)"
     }
+    # If someone is already interactively logged on, also bring tray onto their desktop
+    try {
+        $q = & query session 2>$null | Out-String
+        if ($q -match '(?i)(console|rdp-tcp)\S*\s+\S+\s+\d+\s+Active') {
+            Write-UpLog "Interactive session present - starting Tray..."
+            schtasks /change /tn "CloudHoneypot-Tray" /enable 2>$null | Out-Null
+            schtasks /run /tn "CloudHoneypot-Tray" 2>$null | Out-Null
+        }
+    } catch {
+        Write-UpLog "WARN: Tray handoff after silent update: $($_.Exception.Message)"
+    }
 }
 
 Write-UpLog "=== update-and-install done ==="

@@ -561,6 +561,7 @@ class CloudHoneypotClient:
         
         log("Daemon: User session monitoring started")
         check_interval = 30  # seconds
+        last_tray_attempt = 0.0
         
         while True:
             try:
@@ -576,19 +577,22 @@ class CloudHoneypotClient:
                     time.sleep(check_interval)
                     continue
                 
-                # Look for Active sessions (interactive logon)
-                has_active = any(
-                    'Active' in line and 'console' in line.lower()
-                    for line in result.stdout.split('\n')[1:]
+                from client_helpers import (
+                    has_interactive_user_session,
+                    interactive_frontend_running,
+                    launch_interactive_tray_gui,
                 )
+                # Active console OR RDP (Admin often logs on via RDP, not console)
+                has_active = has_interactive_user_session(result.stdout)
                 
-                if has_active:
-                    # Keep SYSTEM motor alive — only ensure interactive frontend exists
-                    try:
-                        from client_helpers import launch_interactive_tray_gui
-                        launch_interactive_tray_gui()
-                    except Exception as e:
-                        log(f"Daemon tray handoff (non-fatal): {e}")
+                if has_active and not interactive_frontend_running():
+                    now = time.time()
+                    if now - last_tray_attempt >= 60:
+                        last_tray_attempt = now
+                        try:
+                            launch_interactive_tray_gui()
+                        except Exception as e:
+                            log(f"Daemon tray handoff (non-fatal): {e}")
                     # Do not os._exit — multi-user + RD require permanent Session 0 motor
                     
             except subprocess.TimeoutExpired:
@@ -2718,24 +2722,39 @@ if __name__ == "__main__":
             # Check if main app is running
             is_running = helper.is_app_running()
             
+            from client_helpers import (
+                has_interactive_user_session,
+                interactive_frontend_running,
+                is_session_zero,
+                launch_interactive_tray_gui,
+            )
             if not is_running:
-                log("Main app not running, starting new instance...")
-                # Start main app without watchdog flag
+                log("Main app not running — starting daemon + tray if needed")
                 import subprocess
                 import sys
-                
-                # Get executable path
                 exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
-                
-                # Start main app
-                if getattr(sys, 'frozen', False):
-                    subprocess.Popen([exe_path, "--show-gui"],
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-                else:
-                    subprocess.Popen([sys.executable, "client.py", "--show-gui"],
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-                
-                log("New app instance started successfully")
+                CREATE_NO_WINDOW = 0x08000000
+                # Always prefer Background task (Session 0 motor)
+                try:
+                    from client_task_scheduler import TASK_NAME_BACKGROUND
+                    subprocess.run(
+                        ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
+                        capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW,
+                    )
+                except Exception as e:
+                    log(f"Watchdog Background task run failed: {e}")
+                    if getattr(sys, 'frozen', False):
+                        subprocess.Popen(
+                            [exe_path, "--mode=daemon", "--silent"],
+                            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        )
+                if has_interactive_user_session():
+                    launch_interactive_tray_gui()
+                log("Watchdog recovery triggered")
+            elif is_session_zero() and has_interactive_user_session() and not interactive_frontend_running():
+                # Daemon alive but no tray after logon (e.g. silent update while nobody logged on)
+                log("Daemon running but no interactive tray — launching Tray task")
+                launch_interactive_tray_gui()
             else:
                 log("Main app is already running - no action needed")
                 
@@ -3039,10 +3058,8 @@ if __name__ == "__main__":
         import time
         def is_user_logged_on():
             try:
-                result = subprocess.run(['query', 'session'], capture_output=True, text=True, timeout=10)
-                for line in result.stdout.split('\n')[1:]:
-                    if 'Active' in line and 'console' in line.lower():
-                        return True
+                from client_helpers import has_interactive_user_session
+                return has_interactive_user_session()
             except Exception as e:
                 log(f"User session check error: {e}")
             return False
@@ -3056,6 +3073,7 @@ if __name__ == "__main__":
                     "Keeping headless daemon and launching interactive Tray/GUI."
                 )
                 try:
+                    from client_helpers import launch_interactive_tray_gui
                     launch_interactive_tray_gui()
                 except Exception as e:
                     log(f"Interactive tray launch failed: {e}")

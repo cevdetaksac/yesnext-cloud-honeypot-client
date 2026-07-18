@@ -101,6 +101,11 @@ class RemoteDesktopStreamer:
         self._capture_method = "none"
         self._stream_started_at = 0.0
         self._use_user_helper = False  # Session 0 → capture via CreateProcessAsUser helper
+        self._input_desktop = None
+        self._desktop_attached = False
+        self._tscon_attempted = False
+        self._last_good_jpeg: Optional[bytes] = None
+        self._last_good_wh: Tuple[int, int] = (0, 0)
 
         self._input_ts: deque = deque(maxlen=INPUT_RATE_LIMIT * 4)
         self._stats = {
@@ -136,6 +141,10 @@ class RemoteDesktopStreamer:
             self._stats["bytes_sent"] = 0
             self._stats["frames_failed"] = 0
             self._stats["black_frames"] = 0
+            self._desktop_attached = False
+            self._tscon_attempted = False
+            self._last_good_jpeg = None
+            self._last_good_wh = (0, 0)
 
             if self._running and self._thread and self._thread.is_alive():
                 st = self.get_status()
@@ -152,11 +161,26 @@ class RemoteDesktopStreamer:
                 self._stop.set()
 
             sid, csid = self._session_ids()
-            log(f"[REMOTE-DESKTOP] start probe — pid_session={sid} console={csid}")
+            state = self._session_connect_state(sid)
+            log(f"[REMOTE-DESKTOP] start probe — pid_session={sid} console={csid} "
+                f"state={state}")
+
+            # Capture thread-less probe: attach input desktop first (RDP/elevated)
+            self._attach_input_desktop()
+            if state in ("Disconnected", "Down", "Init"):
+                self._try_reconnect_session_to_console(sid)
 
             # Probe BEFORE advertising streaming=true
             jpeg, w, h = self._grab_jpeg()
             blackish = "+black" in (self._capture_method or "")
+            if blackish or not jpeg:
+                # One more attempt after forced console reconnect
+                if not self._tscon_attempted:
+                    self._try_reconnect_session_to_console(sid)
+                    time.sleep(0.4)
+                    self._attach_input_desktop()
+                    jpeg, w, h = self._grab_jpeg()
+                    blackish = "+black" in (self._capture_method or "")
             if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES or blackish:
                 # Session 0 / wrong session: try one-shot capture in interactive user session
                 jpeg2, w2, h2 = self._grab_via_user_helper()
@@ -219,10 +243,14 @@ class RemoteDesktopStreamer:
             # Push probe frame immediately so dashboard is not blank for 1s
             try:
                 token = self.token_getter()
-                if token:
-                    self._http_send_frame(token, jpeg, w, h, 0)
-                    self._stats["frames_sent"] = 1
-                    self._stats["bytes_sent"] = len(jpeg)
+                if token and jpeg:
+                    self._last_good_jpeg = jpeg
+                    self._last_good_wh = (w, h)
+                    self._enqueue_ws_frame(jpeg, w, h, 0)
+                    if self._http_send_frame(token, jpeg, w, h, 0):
+                        self._stats["frames_sent"] = 1
+                        self._stats["bytes_sent"] = len(jpeg)
+                        self._last_activity = time.time()
             except Exception:
                 pass
 
@@ -389,9 +417,24 @@ class RemoteDesktopStreamer:
             log("[REMOTE-DESKTOP] Invalid JPEG magic — skip frame")
             return
         if "+black" in (self._capture_method or ""):
-            # Do NOT send nearly-black frames (prompt §3)
-            self._stats["frames_failed"] += 1
-            return
+            # Disconnected RDP → try console reconnect once, then skip black
+            sid, _ = self._session_ids()
+            if not self._tscon_attempted:
+                if self._try_reconnect_session_to_console(sid):
+                    time.sleep(0.35)
+                    self._attach_input_desktop()
+                    jpeg2, w2, h2 = self._grab_jpeg()
+                    if jpeg2 and "+black" not in (self._capture_method or ""):
+                        jpeg, w, h = jpeg2, w2, h2
+                    else:
+                        self._stats["frames_failed"] += 1
+                        return
+                else:
+                    self._stats["frames_failed"] += 1
+                    return
+            else:
+                self._stats["frames_failed"] += 1
+                return
 
         self._seq += 1
         seq = self._seq
@@ -418,6 +461,9 @@ class RemoteDesktopStreamer:
         if ws_ok or http_ok:
             self._stats["frames_sent"] += 1
             self._stats["bytes_sent"] += len(jpeg)
+            self._last_good_jpeg = jpeg
+            self._last_good_wh = (w, h)
+            self._last_activity = time.time()
             if self._stats["frames_sent"] == 1 or seq == 1:
                 log(f"[REMOTE-DESKTOP] frame ok — {w}x{h} {len(jpeg)}B "
                     f"method={self._capture_method} ws={ws_ok} http={http_ok}")
@@ -443,6 +489,9 @@ class RemoteDesktopStreamer:
         except ImportError:
             log("[REMOTE-DESKTOP] Pillow (PIL) not available")
             return None, 0, 0
+
+        # Ensure this thread is on the interactive input desktop (RDP black-BitBlt fix)
+        self._attach_input_desktop()
 
         img = None
         method = "none"
@@ -481,6 +530,19 @@ class RemoteDesktopStreamer:
             except Exception as e:
                 log(f"[REMOTE-DESKTOP] ImageGrab variants failed: {e}")
 
+        # Optional mss (if installed) — often works when GDI is black on RDP
+        if img is None or self._is_mostly_black(img):
+            try:
+                alt = self._grab_mss()
+                if alt is not None and (
+                    img is None
+                    or self._mean_brightness(alt) > self._mean_brightness(img)
+                ):
+                    img = alt
+                    method = "mss"
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] mss grab failed: {e}")
+
         if img is None:
             log("[REMOTE-DESKTOP] all in-process capture methods returned None")
             return None, 0, 0
@@ -491,9 +553,10 @@ class RemoteDesktopStreamer:
             if now - self._black_warn_ts > 10:
                 self._black_warn_ts = now
                 sid, csid = self._session_ids()
+                state = self._session_connect_state(sid)
                 log(f"[REMOTE-DESKTOP] ⚠ Nearly-black frame "
                     f"(mean={self._mean_brightness(img):.1f}) "
-                    f"session={sid}/{csid} method={method}")
+                    f"session={sid}/{csid} state={state} method={method}")
             method = method + "+black"
 
         self._capture_method = method
@@ -656,6 +719,109 @@ class RemoteDesktopStreamer:
 
     def _is_mostly_black(self, img) -> bool:
         return self._mean_brightness(img) < BLACK_MEAN_THRESHOLD
+
+    def _attach_input_desktop(self) -> bool:
+        """Bind capture thread to the interactive input desktop.
+
+        Elevated / tray processes often BitBlt a black screen when not on
+        the input desktop (classic RDP remote-desktop black frame cause).
+        """
+        if self._desktop_attached:
+            return True
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetLastError(0)
+            GENERIC_ALL = 0x10000000
+            hdesk = user32.OpenInputDesktop(0, False, GENERIC_ALL)
+            if not hdesk:
+                err = kernel32.GetLastError()
+                log(f"[REMOTE-DESKTOP] OpenInputDesktop failed err={err}")
+                return False
+            if not user32.SetThreadDesktop(hdesk):
+                err = kernel32.GetLastError()
+                log(f"[REMOTE-DESKTOP] SetThreadDesktop failed err={err}")
+                try:
+                    user32.CloseDesktop(hdesk)
+                except Exception:
+                    pass
+                return False
+            self._input_desktop = hdesk
+            self._desktop_attached = True
+            log("[REMOTE-DESKTOP] attached to input desktop")
+            return True
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] desktop attach error: {e}")
+            return False
+
+    def _session_connect_state(self, session_id: Optional[int]) -> str:
+        """Return WTS connect state name for logging (Active/Disconnected/…)."""
+        if session_id is None:
+            return "unknown"
+        try:
+            import ctypes
+            from ctypes import wintypes
+            WTSConnectState = 8
+            states = {
+                0: "Active", 1: "Connected", 2: "ConnectQuery",
+                3: "Shadow", 4: "Disconnected", 5: "Idle",
+                6: "Listen", 7: "Reset", 8: "Down", 9: "Init",
+            }
+            wts = ctypes.windll.wtsapi32
+            buf = ctypes.c_void_p()
+            length = wintypes.DWORD()
+            if not wts.WTSQuerySessionInformationW(
+                0, int(session_id), WTSConnectState,
+                ctypes.byref(buf), ctypes.byref(length),
+            ):
+                return "query_failed"
+            try:
+                # Value is a ULONG / DWORD at buf
+                val = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+                return states.get(int(val), f"state_{val}")
+            finally:
+                wts.WTSFreeMemory(buf)
+        except Exception:
+            return "unknown"
+
+    def _try_reconnect_session_to_console(self, session_id: Optional[int]) -> bool:
+        """Disconnected RDP sessions don't render → BitBlt is black.
+
+        `tscon <sid> /dest:console` forces the session onto the console so
+        the desktop is drawn again (may switch physical console briefly).
+        """
+        if self._tscon_attempted or session_id is None or session_id <= 0:
+            return False
+        self._tscon_attempted = True
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["tscon", str(int(session_id)), "/dest:console"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=0x08000000,
+            )
+            ok = r.returncode == 0
+            log(f"[REMOTE-DESKTOP] tscon session={session_id} → console "
+                f"rc={r.returncode} out={(r.stdout or r.stderr or '').strip()[:200]}")
+            # Reset desktop attach so next grab re-opens input desktop
+            self._desktop_attached = False
+            return ok
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] tscon failed: {e}")
+            return False
+
+    def _grab_mss(self):
+        """Optional mss capture (if package present)."""
+        try:
+            import mss
+            from PIL import Image
+            with mss.mss() as sct:
+                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                shot = sct.grab(mon)
+                return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        except ImportError:
+            return None
 
     @staticmethod
     def _session_ids() -> Tuple[Optional[int], Optional[int]]:
@@ -916,6 +1082,14 @@ class RemoteDesktopStreamer:
                 self._transport = "websocket"
                 ws.send(json.dumps({"t": "hello", "role": "agent"}))
                 self._enqueue_meta(force=True)
+                # Re-push last good frame so viewer is not blank while waiting
+                if self._last_good_jpeg and self._last_good_wh[0] > 0:
+                    self._enqueue_ws_frame(
+                        self._last_good_jpeg,
+                        self._last_good_wh[0],
+                        self._last_good_wh[1],
+                        max(1, self._seq),
+                    )
                 log("[REMOTE-DESKTOP] WS connected")
 
                 ws.settimeout(0.15)

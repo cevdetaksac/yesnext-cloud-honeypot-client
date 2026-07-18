@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.22"  # Long-uptime memory: honeypot caps, alert hard-cap, bounded BG threads
+VERSION = "4.4.23"  # RD black: OpenInputDesktop + tscon disconnected RDP → console
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

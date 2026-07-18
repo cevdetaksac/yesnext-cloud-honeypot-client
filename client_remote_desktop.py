@@ -40,8 +40,12 @@ INPUT_RATE_WINDOW = 1.0
 HTTP_INPUT_POLL_SEC = 0.30
 WS_RECONNECT_SEC = 3.0
 META_EVERY_N_FRAMES = 5
-BLACK_MEAN_THRESHOLD = 6.0            # nearly-black capture → retry / warn
+BLACK_MEAN_THRESHOLD = 6.0            # nearly-black capture → skip send
 HTTP_KEYFRAME_EVERY = 6               # also POST HTTP every N frames (dashboard cache)
+MIN_JPEG_BYTES = 1500                 # API rejects tinier frames ("Frame too small")
+MIN_GOOD_JPEG_BYTES = 5 * 1024        # healthy 1280q35 frame is usually ≥5KB
+CAPTURE_FAIL_SECONDS = 10.0           # no frames in this window → fail stream
+PROBE_TIMEOUT_SEC = 3.0
 
 
 def _api_to_ws_agent_url(api_base: str, token: str) -> str:
@@ -95,6 +99,8 @@ class RemoteDesktopStreamer:
         self._ws_send_lock = threading.Lock()
         self._black_warn_ts = 0.0
         self._capture_method = "none"
+        self._stream_started_at = 0.0
+        self._use_user_helper = False  # Session 0 → capture via CreateProcessAsUser helper
 
         self._input_ts: deque = deque(maxlen=INPUT_RATE_LIMIT * 4)
         self._stats = {
@@ -115,7 +121,10 @@ class RemoteDesktopStreamer:
 
     def start(self, fps: float = DEFAULT_FPS, quality: int = DEFAULT_QUALITY,
               max_width: int = DEFAULT_MAX_WIDTH) -> dict:
-        """Start capture + WS (with HTTP fallback)."""
+        """Start capture + WS (with HTTP fallback).
+
+        Honest start: probe desktop first. screen/capture 0×0 → CAPTURE_NO_DESKTOP.
+        """
         with self._lock:
             self._fps = max(1.0, min(float(fps or DEFAULT_FPS), 10.0))
             self._quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
@@ -123,28 +132,70 @@ class RemoteDesktopStreamer:
             self._seq = 0
             self._last_activity = time.time()
             self._stop.clear()
+            self._stats["frames_sent"] = 0
+            self._stats["bytes_sent"] = 0
+            self._stats["frames_failed"] = 0
+            self._stats["black_frames"] = 0
 
             if self._running and self._thread and self._thread.is_alive():
-                log(f"[REMOTE-DESKTOP] Already streaming — params updated "
-                    f"(fps={self._fps} q={self._quality} w={self._max_width})")
-                return {
-                    "success": True,
-                    "message": "stream already active; params updated",
-                    "data": self.get_status(),
-                }
+                st = self.get_status()
+                if (st.get("screen") or {}).get("w", 0) > 0:
+                    log(f"[REMOTE-DESKTOP] Already streaming — params updated "
+                        f"(fps={self._fps} q={self._quality} w={self._max_width})")
+                    return {
+                        "success": True,
+                        "message": "stream already active; params updated",
+                        "data": st,
+                    }
+                # Was "streaming" but never captured — restart probe
+                self._running = False
+                self._stop.set()
+
+            sid, csid = self._session_ids()
+            log(f"[REMOTE-DESKTOP] start probe — pid_session={sid} console={csid}")
+
+            # Probe BEFORE advertising streaming=true
+            jpeg, w, h = self._grab_jpeg()
+            blackish = "+black" in (self._capture_method or "")
+            if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES or blackish:
+                # Session 0 / wrong session: try one-shot capture in interactive user session
+                jpeg2, w2, h2 = self._grab_via_user_helper()
+                if jpeg2 and w2 > 0 and h2 > 0 and len(jpeg2) >= MIN_JPEG_BYTES:
+                    jpeg, w, h = jpeg2, w2, h2
+                    self._use_user_helper = True
+                    self._screen_w = self._screen_w or w2
+                    self._screen_h = self._screen_h or h2
+                    self._capture_w, self._capture_h = w2, h2
+                else:
+                    err = "CAPTURE_NO_DESKTOP"
+                    msg = (
+                        "No interactive desktop bitmap "
+                        f"(session={sid}/{csid}, size={w}x{h}, jpeg={0 if not jpeg else len(jpeg)}B). "
+                        "Run agent in console/RDP user session — Session 0 service cannot capture."
+                    )
+                    log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
+                    self._running = False
+                    self._transport = "idle"
+                    return {
+                        "success": False,
+                        "error": err,
+                        "message": msg,
+                        "data": self.get_status(),
+                    }
+
+            self._screen_w = self._screen_w or w
+            self._screen_h = self._screen_h or h
+            self._capture_w, self._capture_h = w, h
+            log(f"[REMOTE-DESKTOP] probe ok — screen={self._screen_w}x{self._screen_h} "
+                f"capture={w}x{h} jpeg={len(jpeg)}B method={self._capture_method}")
 
             self._running = True
-            self._transport = "http"  # until WS connects
+            self._transport = "http"
             self._drain_out_q()
-            sid, csid = self._session_ids()
-            if sid == 0:
-                log("[REMOTE-DESKTOP] ⚠ Process in Session 0 (service) — "
-                    "screen capture is often BLACK. Prefer interactive tray session.")
-            elif csid is not None and sid != csid:
-                log(f"[REMOTE-DESKTOP] ⚠ Process session={sid} ≠ console={csid} — "
-                    "capture may be blank/black")
-            else:
-                log(f"[REMOTE-DESKTOP] Session ok (pid_session={sid} console={csid})")
+            self._stream_started_at = time.time()
+            if self._use_user_helper:
+                # CreateProcessAsUser per frame is heavy — keep IR usable
+                self._fps = min(self._fps, 2.0)
 
             self._thread = threading.Thread(
                 target=self._capture_loop,
@@ -164,6 +215,16 @@ class RemoteDesktopStreamer:
                 daemon=True,
             )
             self._input_poll_thread.start()
+
+            # Push probe frame immediately so dashboard is not blank for 1s
+            try:
+                token = self.token_getter()
+                if token:
+                    self._http_send_frame(token, jpeg, w, h, 0)
+                    self._stats["frames_sent"] = 1
+                    self._stats["bytes_sent"] = len(jpeg)
+            except Exception:
+                pass
 
             log(f"[REMOTE-DESKTOP] ▶ Stream started "
                 f"(fps={self._fps} q={self._quality} max_w={self._max_width} ws+http)")
@@ -289,6 +350,16 @@ class RemoteDesktopStreamer:
                     log("[REMOTE-DESKTOP] Idle timeout — auto stop")
                     self.stop(reason="idle_timeout")
                     break
+                # Honest fail: streaming but no frames for 10s
+                if (
+                    self._stats.get("frames_sent", 0) <= 0
+                    and self._stream_started_at
+                    and (time.time() - self._stream_started_at) >= CAPTURE_FAIL_SECONDS
+                ):
+                    log("[REMOTE-DESKTOP] ✖ CAPTURE_NO_DESKTOP — "
+                        f"no frames in {CAPTURE_FAIL_SECONDS:.0f}s (screen still empty)")
+                    self.stop(reason="CAPTURE_NO_DESKTOP")
+                    break
                 self._capture_and_send()
             except Exception as e:
                 self._stats["frames_failed"] += 1
@@ -303,12 +374,23 @@ class RemoteDesktopStreamer:
             return
 
         jpeg, w, h = self._grab_jpeg()
-        if not jpeg:
+        if (not jpeg or w <= 0 or h <= 0) and self._use_user_helper:
+            jpeg, w, h = self._grab_via_user_helper()
+        if not jpeg or w <= 0 or h <= 0:
+            self._stats["frames_failed"] += 1
             return
-        # Validate JPEG magic — corrupt payload shows as black on dashboard
-        if len(jpeg) < 24 or jpeg[:2] != b"\xff\xd8" or jpeg[-2:] != b"\xff\xd9":
+        # API rejects tiny frames; black frames look like "live" black desktop
+        if len(jpeg) < MIN_JPEG_BYTES:
+            self._stats["frames_failed"] += 1
+            self._stats["black_frames"] += 1
+            return
+        if jpeg[:2] != b"\xff\xd8" or jpeg[-2:] != b"\xff\xd9":
             self._stats["frames_failed"] += 1
             log("[REMOTE-DESKTOP] Invalid JPEG magic — skip frame")
+            return
+        if "+black" in (self._capture_method or ""):
+            # Do NOT send nearly-black frames (prompt §3)
+            self._stats["frames_failed"] += 1
             return
 
         self._seq += 1
@@ -321,8 +403,6 @@ class RemoteDesktopStreamer:
             if ws_ok:
                 self._transport = "websocket"
 
-        # Always keep HTTP keyframes so dashboard last-frame cache is not empty
-        # if WS binary is dropped/mis-handled by a proxy.
         need_http = (
             not ws_ok
             or seq <= 12
@@ -338,8 +418,8 @@ class RemoteDesktopStreamer:
         if ws_ok or http_ok:
             self._stats["frames_sent"] += 1
             self._stats["bytes_sent"] += len(jpeg)
-            if seq == 1:
-                log(f"[REMOTE-DESKTOP] first frame ok — {w}x{h} {len(jpeg)}B "
+            if self._stats["frames_sent"] == 1 or seq == 1:
+                log(f"[REMOTE-DESKTOP] frame ok — {w}x{h} {len(jpeg)}B "
                     f"method={self._capture_method} ws={ws_ok} http={http_ok}")
         else:
             self._stats["frames_failed"] += 1
@@ -532,6 +612,201 @@ class RemoteDesktopStreamer:
             return None, console
         except Exception:
             return None, None
+
+    def _grab_via_user_helper(self) -> Tuple[Optional[bytes], int, int]:
+        """Session 0 / wrong-session: capture once via CreateProcessAsUser in active console.
+
+        Spawns: honeypot-client.exe --rd-capture-once <temp.jpg>
+        """
+        import os
+        import sys
+        import tempfile
+        import subprocess
+
+        sid, csid = self._session_ids()
+        target = csid if csid not in (None, 0xFFFFFFFF) else None
+        if target is None or target == 0:
+            # Try to find any active RDP/console session via query
+            target = self._find_active_session_id()
+        if not target:
+            log("[REMOTE-DESKTOP] No interactive session for helper capture")
+            return None, 0, 0
+
+        out_path = os.path.join(
+            tempfile.gettempdir(), f"honeypot_rd_capture_{os.getpid()}.jpg"
+        )
+        try:
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+        except OSError:
+            pass
+
+        exe = sys.executable
+        if getattr(sys, "frozen", False):
+            exe = sys.executable
+        cmd = f'"{exe}" --rd-capture-once "{out_path}"'
+
+        # Prefer CreateProcessAsUser when we are SYSTEM/session 0
+        launched = self._launch_in_session(int(target), cmd)
+        if not launched:
+            # Fallback: same-user subprocess (works if we already have desktop)
+            try:
+                subprocess.run(
+                    [exe, "--rd-capture-once", out_path],
+                    timeout=PROBE_TIMEOUT_SEC + 2,
+                    capture_output=True,
+                    creationflags=0x08000000,
+                )
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] helper subprocess failed: {e}")
+                return None, 0, 0
+
+        # Wait for file
+        deadline = time.time() + PROBE_TIMEOUT_SEC + 2
+        while time.time() < deadline:
+            if os.path.isfile(out_path) and os.path.getsize(out_path) >= MIN_JPEG_BYTES:
+                break
+            time.sleep(0.15)
+        else:
+            log("[REMOTE-DESKTOP] helper capture timed out (no JPEG file)")
+            return None, 0, 0
+
+        try:
+            with open(out_path, "rb") as fh:
+                data = fh.read()
+            if len(data) < MIN_JPEG_BYTES or data[:2] != b"\xff\xd8":
+                return None, 0, 0
+            # Decode size
+            try:
+                from PIL import Image
+                import io as _io
+                im = Image.open(_io.BytesIO(data))
+                w, h = im.size
+            except Exception:
+                w = self._max_width
+                h = int(self._max_width * 9 / 16)
+            self._capture_method = "user-helper"
+            self._stats["capture_method"] = "user-helper"
+            self._use_user_helper = True
+            self._screen_w, self._screen_h = w, h
+            self._capture_w, self._capture_h = w, h
+            log(f"[REMOTE-DESKTOP] helper capture ok — {w}x{h} {len(data)}B session={target}")
+            return data, w, h
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] helper read failed: {e}")
+            return None, 0, 0
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _find_active_session_id() -> Optional[int]:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["query", "session"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000,
+            )
+            for line in (r.stdout or "").splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                # SESSIONNAME USERNAME ID STATE  OR  SESSIONNAME ID STATE
+                state = ""
+                sid = None
+                for p in parts:
+                    if p.isdigit() and sid is None:
+                        sid = int(p)
+                    if p.lower() in ("active", "aktif"):
+                        state = "Active"
+                if sid and state == "Active" and sid > 0:
+                    return sid
+        except Exception:
+            pass
+        return None
+
+    def _launch_in_session(self, session_id: int, command: str) -> bool:
+        """CreateProcessAsUser in target WTS session (requires SYSTEM / SeTcbPrivilege)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            import subprocess
+
+            wts = ctypes.windll.wtsapi32
+            adv = ctypes.windll.advapi32
+            kernel = ctypes.windll.kernel32
+
+            h_token = wintypes.HANDLE()
+            if not wts.WTSQueryUserToken(session_id, ctypes.byref(h_token)):
+                err = kernel.GetLastError()
+                log(f"[REMOTE-DESKTOP] WTSQueryUserToken({session_id}) failed err={err}")
+                return False
+
+            class STARTUPINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("lpReserved", wintypes.LPWSTR),
+                    ("lpDesktop", wintypes.LPWSTR),
+                    ("lpTitle", wintypes.LPWSTR),
+                    ("dwX", wintypes.DWORD),
+                    ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD),
+                    ("dwYSize", wintypes.DWORD),
+                    ("dwXCountChars", wintypes.DWORD),
+                    ("dwYCountChars", wintypes.DWORD),
+                    ("dwFillAttribute", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("wShowWindow", wintypes.WORD),
+                    ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+                    ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE),
+                    ("hStdError", wintypes.HANDLE),
+                ]
+
+            class PROCESS_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("hProcess", wintypes.HANDLE),
+                    ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD),
+                    ("dwThreadId", wintypes.DWORD),
+                ]
+
+            si = STARTUPINFO()
+            si.cb = ctypes.sizeof(STARTUPINFO)
+            si.lpDesktop = "winsta0\\default"
+            pi = PROCESS_INFORMATION()
+            CREATE_NO_WINDOW = 0x08000000
+            cmd_buf = ctypes.create_unicode_buffer(command)
+
+            ok = adv.CreateProcessAsUserW(
+                h_token,
+                None,
+                cmd_buf,
+                None,
+                None,
+                False,
+                CREATE_NO_WINDOW,
+                None,
+                None,
+                ctypes.byref(si),
+                ctypes.byref(pi),
+            )
+            kernel.CloseHandle(h_token)
+            if not ok:
+                log(f"[REMOTE-DESKTOP] CreateProcessAsUser failed err={kernel.GetLastError()}")
+                return False
+            # Wait up to probe timeout
+            kernel.WaitForSingleObject(pi.hProcess, int((PROBE_TIMEOUT_SEC + 2) * 1000))
+            kernel.CloseHandle(pi.hThread)
+            kernel.CloseHandle(pi.hProcess)
+            return True
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] launch_in_session error: {e}")
+            return False
 
     def _drain_out_q(self):
         try:
@@ -884,3 +1159,23 @@ class RemoteDesktopStreamer:
             return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
         except Exception:
             return 1920, 1080
+
+
+def capture_once_to_file(path: str, max_width: int = DEFAULT_MAX_WIDTH, quality: int = DEFAULT_QUALITY) -> bool:
+    """CLI helper: grab desktop JPEG to path (runs in interactive session)."""
+    import os
+    rd = RemoteDesktopStreamer()
+    rd._max_width = max_width
+    rd._quality = quality
+    jpeg, w, h = rd._grab_jpeg()
+    if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES:
+        log(f"[REMOTE-DESKTOP] capture_once failed — {w}x{h} bytes={0 if not jpeg else len(jpeg)}")
+        return False
+    if "+black" in (rd._capture_method or ""):
+        log("[REMOTE-DESKTOP] capture_once nearly-black — refuse write")
+        return False
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(jpeg)
+    log(f"[REMOTE-DESKTOP] capture_once wrote {path} ({w}x{h} {len(jpeg)}B)")
+    return True

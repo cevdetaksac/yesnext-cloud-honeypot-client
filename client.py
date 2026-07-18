@@ -2186,6 +2186,8 @@ if __name__ == "__main__":
     parser.add_argument("--silent-update-check", action="store_true", help="Silent update check mode - check for updates and install automatically")
     parser.add_argument("--create-tasks", action="store_true", help="Create Task Scheduler tasks and exit (for installer)")
     parser.add_argument("--show-gui", action="store_true", help="Force show GUI window (used by installer launch)")
+    parser.add_argument("--rd-capture-once", metavar="PATH", default=None,
+                        help="Capture one desktop JPEG to PATH and exit (Session 0 helper)")
     parser.add_argument("--debug", action="store_true", help="Debug mode: verbose logs, skip consent, optional no admin")
     args = parser.parse_args()
     
@@ -2242,6 +2244,19 @@ if __name__ == "__main__":
         
         sys.exit(0)
     
+    # One-shot desktop capture for Session 0 → interactive helper
+    if getattr(args, "rd_capture_once", None):
+        try:
+            from client_remote_desktop import capture_once_to_file
+            ok = capture_once_to_file(args.rd_capture_once)
+            sys.exit(0 if ok else 1)
+        except Exception as e:
+            try:
+                log(f"--rd-capture-once failed: {e}")
+            except Exception:
+                pass
+            sys.exit(1)
+
     # Handle silent update check mode
     if args.silent_update_check:
         log("Silent update check mode activated - checking for updates...")

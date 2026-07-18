@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.17"  # Fix black remote desktop: GDI capture + thread-safe WS + HTTP keyframes
+VERSION = "4.4.18"  # CAPTURE_NO_DESKTOP honest fail + Session 0 user-helper capture
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

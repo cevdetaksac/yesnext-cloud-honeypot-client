@@ -401,7 +401,11 @@ class RemoteCommandExecutor:
             quality=int(params.get("quality", 35) or 35),
             max_width=int(params.get("max_width", 1280) or 1280),
         )
-        self._notify_remote_desktop_ui("started")
+        if result.get("success"):
+            self._notify_remote_desktop_ui("started")
+        else:
+            log(f"[REMOTE-DESKTOP] start rejected: {result.get('error')} {result.get('message')}")
+            self._notify_remote_desktop_ui("failed")
         return result
 
     def _cmd_remote_stream_stop(self, params: dict) -> dict:

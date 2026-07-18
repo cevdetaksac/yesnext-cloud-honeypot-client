@@ -51,6 +51,13 @@ class ModernGUI:
     def t(self, key: str) -> str:
         return self.app.t(key)
 
+    def _emoji_font(self, size: int = 16, weight: str = "normal"):
+        """Windows'ta emoji için Segoe UI Emoji; yoksa varsayılan font."""
+        try:
+            return ctk.CTkFont(family="Segoe UI Emoji", size=size, weight=weight)
+        except Exception:
+            return ctk.CTkFont(size=size, weight=weight)
+
     def _gui_safe(self, func):
         """Thread-safe CTk çağrısı"""
         try:
@@ -92,7 +99,7 @@ class ModernGUI:
         brand.pack(fill="x", padx=16, pady=(20, 8))
         ctk.CTkLabel(
             brand, text="🛡️",
-            font=ctk.CTkFont(size=28),
+            font=self._emoji_font(28),
         ).pack(anchor="w")
         ctk.CTkLabel(
             brand, text=self.t("app_title"),
@@ -175,7 +182,7 @@ class ModernGUI:
 
         icon_lbl = ctk.CTkLabel(
             icon_col, text=icon, anchor="center",
-            font=ctk.CTkFont(size=NAV_FONT_ICON),
+            font=self._emoji_font(NAV_FONT_ICON),
             text_color=COLORS["text"],
         )
         icon_lbl.pack(expand=True, fill="both")
@@ -766,13 +773,19 @@ class ModernGUI:
         hdr.pack(fill="x", pady=(0, 0))
         hdr.pack_propagate(False)
 
-        lbl = ctk.CTkLabel(
-            hdr,
-            text=f"🛡️  {self.t('app_title')}  v{__version__}",
+        title_wrap = ctk.CTkFrame(hdr, fg_color="transparent")
+        title_wrap.pack(side="left", padx=16)
+        ctk.CTkLabel(
+            title_wrap, text="🛡️",
+            font=self._emoji_font(17),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            title_wrap,
+            text=f"  {self.t('app_title')}  v{__version__}",
             font=ctk.CTkFont(size=17, weight="bold"),
             text_color=COLORS["text_bright"],
-        )
-        lbl.pack(side="left", padx=16)
+        ).pack(side="left")
 
         # Sağ taraf — durum göstergesi
         self._header_status = ctk.CTkLabel(
@@ -811,8 +824,15 @@ class ModernGUI:
         hdr_row = ctk.CTkFrame(sec, fg_color="transparent")
         hdr_row.pack(fill="x", padx=16, pady=(12, 6))
 
+        dash_hdr = ctk.CTkFrame(hdr_row, fg_color="transparent")
+        dash_hdr.pack(side="left")
         ctk.CTkLabel(
-            hdr_row, text=f"📈  {self.t('dash_title')}",
+            dash_hdr, text="📈",
+            font=self._emoji_font(14),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            dash_hdr, text=f"  {self.t('dash_title')}",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
@@ -971,7 +991,7 @@ class ModernGUI:
 
         ctk.CTkButton(
             hdr, text="🔄", width=28, height=22,
-            font=ctk.CTkFont(size=11),
+            font=self._emoji_font(11),
             fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",
             command=self._refresh_security_intel,
@@ -1012,7 +1032,7 @@ class ModernGUI:
 
         ctk.CTkButton(
             hdr, text="🔄", width=28, height=22,
-            font=ctk.CTkFont(size=11),
+            font=self._emoji_font(11),
             fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",
             command=self._refresh_user_accounts,
@@ -2102,26 +2122,57 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _build_ip_activity_table(self, parent):
-        """Anlık IP aktivite tablosu — giriş denemeleri, durum, butonlar."""
+        """IP listeleri — Aktivite | Engellenen | Whitelist sekmeleri."""
         sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
         sec.pack(fill="x", pady=(0, 12))
+
+        self._ip_table_tab = "activity"
+        self._ip_table_rows: list = []
+        self._ip_tab_buttons: Dict[str, ctk.CTkButton] = {}
 
         hdr = ctk.CTkFrame(sec, fg_color="transparent")
         hdr.pack(fill="x", padx=16, pady=(12, 4))
 
+        title_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        title_row.pack(side="left")
         ctk.CTkLabel(
-            hdr, text=self.t("section_ip_activity"),
+            title_row, text="📡",
+            font=self._emoji_font(14),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            title_row, text=f"  {self.t('section_ip_activity')}",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
         ).pack(side="left")
 
         ctk.CTkButton(
             hdr, text="🔄", width=28, height=22,
-            font=ctk.CTkFont(size=11),
+            font=self._emoji_font(11),
             fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",
             command=self._refresh_ip_table,
         ).pack(side="right")
+
+        # Sekme çubuğu
+        tabs = ctk.CTkFrame(sec, fg_color="transparent")
+        tabs.pack(fill="x", padx=16, pady=(6, 4))
+
+        for tab_id, key in (
+            ("activity", "ip_tab_activity"),
+            ("blocked", "ip_tab_blocked"),
+            ("whitelist", "ip_tab_whitelist"),
+        ):
+            btn = ctk.CTkButton(
+                tabs, text=self.t(key),
+                height=28, width=110,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                corner_radius=6,
+                command=lambda t=tab_id: self._set_ip_table_tab(t),
+            )
+            btn.pack(side="left", padx=(0, 6))
+            self._ip_tab_buttons[tab_id] = btn
+        self._update_ip_tab_styles()
 
         sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
         sep.pack(fill="x", padx=16, pady=(4, 8))
@@ -2165,45 +2216,82 @@ class ModernGUI:
         )
         self._ip_table_empty.pack(anchor="w", padx=4, pady=8)
 
+    def _update_ip_tab_styles(self):
+        """Aktif sekme vurgusu."""
+        for tab_id, btn in getattr(self, "_ip_tab_buttons", {}).items():
+            if tab_id == getattr(self, "_ip_table_tab", "activity"):
+                btn.configure(
+                    fg_color=COLORS["blue"],
+                    hover_color=COLORS["blue_hover"],
+                    text_color=COLORS["text_bright"],
+                    border_width=0,
+                )
+            else:
+                btn.configure(
+                    fg_color=COLORS["bg"],
+                    hover_color=COLORS["card_hover"],
+                    text_color=COLORS["text"],
+                    border_width=1,
+                    border_color=COLORS["border"],
+                )
+
+    def _set_ip_table_tab(self, tab_id: str):
+        """Sekme değiştir — mevcut veriyi filtrele."""
+        self._ip_table_tab = tab_id
+        self._update_ip_tab_styles()
+        self._render_ip_table(getattr(self, "_ip_table_rows", []))
+
     def _refresh_ip_table(self):
         """ThreatEngine IP pool'undan verileri alıp tabloyu güncelle."""
         threading.Thread(target=self._collect_ip_table_data, daemon=True).start()
 
     def _collect_ip_table_data(self):
-        """Arka planda IP verilerini topla."""
+        """Arka planda IP verilerini topla (aktivite + engellenen + whitelist)."""
         threat_engine = getattr(self.app, 'threat_engine', None)
         auto_response = getattr(self.app, 'auto_response', None)
         if not threat_engine:
             return
 
         rows = []
+        seen: set = set()
         contexts = threat_engine.get_all_contexts()
-        blocked_ips = getattr(threat_engine, '_rule_blocked_ips', set())
-        whitelist_ips = getattr(threat_engine, '_whitelist_ips', set())
+        blocked_ips = set(getattr(threat_engine, '_rule_blocked_ips', set()) or set())
+        whitelist_ips = set(getattr(threat_engine, '_whitelist_ips', set()) or set())
 
-        # AutoResponse'daki aktif blokları da kontrol et (firewall gerçeği)
+        # AutoResponse'daki aktif blokları / whitelist'i de birleştir
         ar_blocked: set = set()
         if auto_response:
             try:
                 ar_blocked = set(getattr(auto_response, '_blocks', {}).keys())
             except Exception:
                 pass
+            try:
+                whitelist_ips |= set(getattr(auto_response, 'whitelist_ips', set()) or set())
+            except Exception:
+                pass
+        ew = getattr(self.app, 'event_watcher', None)
+        if ew and hasattr(ew, 'whitelist_ips'):
+            try:
+                whitelist_ips |= set(ew.whitelist_ips or set())
+            except Exception:
+                pass
+
+        skip = {"local", "", "127.0.0.1", "::1"}
 
         for ip, ctx in contexts.items():
-            if ip in ("local", "", "127.0.0.1", "::1"):
+            if ip in skip:
                 continue
             if ctx.threat_score < 1 and ctx.failed_attempts < 1:
-                continue
+                # Blok/whitelist kayıtları aşağıda ayrıca eklenir
+                if ip not in blocked_ips and ip not in ar_blocked and ip not in whitelist_ips:
+                    continue
 
             services = list(ctx.services_targeted) if ctx.services_targeted else ["—"]
             service_str = "/".join(services[:2])
 
-            attempts = ctx.failed_attempts
-            last_seen = ctx.last_seen
-
             if ip in whitelist_ips:
                 status = "whitelisted"
-            elif ip in blocked_ips or ip in ar_blocked or ctx.is_blocked:
+            elif ip in blocked_ips or ip in ar_blocked or getattr(ctx, "is_blocked", False):
                 status = "blocked"
             else:
                 status = "watching"
@@ -2211,29 +2299,77 @@ class ModernGUI:
             rows.append({
                 "ip": ip,
                 "service": service_str,
-                "attempts": attempts,
-                "last_seen": last_seen,
+                "attempts": ctx.failed_attempts,
+                "last_seen": ctx.last_seen,
                 "status": status,
                 "score": ctx.threat_score,
             })
+            seen.add(ip)
 
-        # En yeni ilk sıraya
+        # Context'te olmayan engellenmiş IP'ler
+        for ip in (blocked_ips | ar_blocked):
+            if ip in skip or ip in seen or ip in whitelist_ips:
+                continue
+            rows.append({
+                "ip": ip,
+                "service": "—",
+                "attempts": 0,
+                "last_seen": 0,
+                "status": "blocked",
+                "score": 0,
+            })
+            seen.add(ip)
+
+        # Context'te olmayan whitelist IP'ler
+        for ip in whitelist_ips:
+            if ip in skip or ip in seen:
+                continue
+            rows.append({
+                "ip": ip,
+                "service": "—",
+                "attempts": 0,
+                "last_seen": 0,
+                "status": "whitelisted",
+                "score": 0,
+            })
+            seen.add(ip)
+
         rows.sort(key=lambda r: r["last_seen"], reverse=True)
-        # Max 50 satır
-        rows = rows[:50]
+        rows = rows[:200]
 
         self._gui_safe(lambda: self._render_ip_table(rows))
 
+    def _filter_ip_rows(self, rows: list) -> list:
+        """Aktif sekmeye göre satırları filtrele."""
+        tab = getattr(self, "_ip_table_tab", "activity")
+        if tab == "blocked":
+            return [r for r in rows if r.get("status") == "blocked"]
+        if tab == "whitelist":
+            return [r for r in rows if r.get("status") == "whitelisted"]
+        # Aktivite: izlenen + son aktivitesi olan (blocked/whitelist hariç)
+        return [r for r in rows if r.get("status") == "watching"]
+
+    def _ip_empty_message(self) -> str:
+        tab = getattr(self, "_ip_table_tab", "activity")
+        if tab == "blocked":
+            return self.t("ip_no_blocked")
+        if tab == "whitelist":
+            return self.t("ip_no_whitelist")
+        return self.t("ip_no_activity")
+
     def _render_ip_table(self, rows: list):
-        """IP tablosunu GUI'ye render et."""
+        """IP tablosunu GUI'ye render et (aktif sekmeye göre)."""
         try:
+            self._ip_table_rows = list(rows)
+            filtered = self._filter_ip_rows(rows)
+
             for w in self._ip_table_frame.winfo_children():
                 w.destroy()
 
-            if not rows:
+            if not filtered:
                 ctk.CTkLabel(
                     self._ip_table_frame,
-                    text=self.t("ip_no_activity"),
+                    text=self._ip_empty_message(),
                     font=ctk.CTkFont(size=12),
                     text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=4, pady=8)
@@ -2241,7 +2377,7 @@ class ModernGUI:
 
             from datetime import datetime
 
-            for i, r in enumerate(rows):
+            for i, r in enumerate(filtered):
                 bg = COLORS["bg"] if i % 2 == 0 else COLORS["card"]
                 row_frame = ctk.CTkFrame(
                     self._ip_table_frame, fg_color=bg,
@@ -2277,7 +2413,10 @@ class ModernGUI:
 
                 # Son zaman
                 try:
-                    ts = datetime.fromtimestamp(r["last_seen"]).strftime("%d.%m %H:%M:%S")
+                    if r["last_seen"]:
+                        ts = datetime.fromtimestamp(r["last_seen"]).strftime("%d.%m %H:%M:%S")
+                    else:
+                        ts = "—"
                 except Exception:
                     ts = "—"
                 ctk.CTkLabel(
@@ -2306,7 +2445,6 @@ class ModernGUI:
                 # Aksiyon butonları — duruma göre dinamik
                 ip = r["ip"]
                 if status == "blocked":
-                    # Engeli kaldır butonu
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_unblock"),
                         width=70, height=20,
@@ -2315,7 +2453,6 @@ class ModernGUI:
                         text_color=COLORS["text_bright"], corner_radius=3,
                         command=lambda _ip=ip: self._ip_table_unblock(_ip),
                     ).pack(side="left", padx=2)
-                    # Güvenli listeye al
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_whitelist"),
                         width=55, height=20,
@@ -2325,7 +2462,6 @@ class ModernGUI:
                         command=lambda _ip=ip: self._ip_table_whitelist(_ip),
                     ).pack(side="left", padx=2)
                 elif status == "whitelisted":
-                    # Güvenden çıkar butonu
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_remove_whitelist"),
                         width=75, height=20,
@@ -2334,7 +2470,6 @@ class ModernGUI:
                         text_color=COLORS["text_bright"], corner_radius=3,
                         command=lambda _ip=ip: self._ip_table_remove_whitelist(_ip),
                     ).pack(side="left", padx=2)
-                    # Engelle butonu
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_block"),
                         width=55, height=20,
@@ -2344,7 +2479,6 @@ class ModernGUI:
                         command=lambda _ip=ip: self._ip_table_block(_ip),
                     ).pack(side="left", padx=2)
                 else:
-                    # İzleniyor — Engelle + Güvenli
                     ctk.CTkButton(
                         row_frame, text=self.t("ip_btn_block"),
                         width=55, height=20,
@@ -2469,9 +2603,9 @@ class ModernGUI:
             card.bind("<Enter>", _on_enter)
             card.bind("<Leave>", _on_leave)
 
-        # Emoji
+        # Emoji — Segoe UI Emoji (Windows'ta tofu/boş kutu önler)
         emoji_lbl = ctk.CTkLabel(
-            card, text=emoji, font=ctk.CTkFont(size=20),
+            card, text=emoji, font=self._emoji_font(20),
         )
         emoji_lbl.pack(anchor="w", padx=12, pady=(10, 0))
 
@@ -2493,14 +2627,22 @@ class ModernGUI:
 
         # Tıkla göstergesi
         if on_click:
+            hint_row = ctk.CTkFrame(card, fg_color="transparent")
+            hint_row.pack(anchor="w", padx=12, pady=(0, 6))
+            hint_icon = ctk.CTkLabel(
+                hint_row, text="🔍",
+                font=self._emoji_font(9),
+                text_color=COLORS["text_dim"],
+            )
+            hint_icon.pack(side="left")
             hint_lbl = ctk.CTkLabel(
-                card, text="🔍 " + self.t("card_click_detail"),
+                hint_row, text=" " + self.t("card_click_detail"),
                 font=ctk.CTkFont(size=9),
                 text_color=COLORS["text_dim"],
             )
-            hint_lbl.pack(anchor="w", padx=12, pady=(0, 6))
+            hint_lbl.pack(side="left")
             # Click bind — card ve tüm child widget'lara
-            for widget in [card, emoji_lbl, value_lbl, label_lbl, hint_lbl]:
+            for widget in [card, emoji_lbl, value_lbl, label_lbl, hint_row, hint_icon, hint_lbl]:
                 widget.bind("<Button-1>", lambda e, cb=on_click: cb())
         else:
             # Alt padding
@@ -3345,7 +3487,7 @@ class ModernGUI:
 
         ctk.CTkButton(
             hdr, text="🔄", width=28, height=22,
-            font=ctk.CTkFont(size=11),
+            font=self._emoji_font(11),
             fg_color=COLORS.get("bg", "#1a1b2e"),
             border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",
@@ -3403,7 +3545,7 @@ class ModernGUI:
 
         ctk.CTkButton(
             btn_row, text="🔄", width=28, height=22,
-            font=ctk.CTkFont(size=11),
+            font=self._emoji_font(11),
             fg_color=COLORS.get("bg", "#1a1b2e"),
             border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",

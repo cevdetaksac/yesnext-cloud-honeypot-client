@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.12"  # Fix: tray UI-only also starts HealthMonitor (sessions)
+VERSION = "4.4.13"  # Fix: daemon→GUI logon path starts HealthMonitor (sessions)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

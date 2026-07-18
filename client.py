@@ -2422,6 +2422,10 @@ if __name__ == "__main__":
                 log("Building main GUI (daemon detected logon)...")
                 app.build_gui(minimized=False)
                 log("GUI build completed successfully")
+                # Previously missing: without this, HealthMonitor never starts when
+                # Background task pivots daemon→GUI on interactive logon, while Tray
+                # skips health because it still sees --mode=daemon in cmdline.
+                app.start_delayed_api_sync()
                 if hasattr(app, 'root') and app.root:
                     app.root.mainloop()
             except Exception as gui_error:

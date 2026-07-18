@@ -53,7 +53,7 @@ def show_completion_dialog(installer_path: str, version: str, parent=None):
     from tkinter import messagebox
 
     def _exit_for_update():
-        """Quit quickly so elevated helper can overwrite onefile EXE."""
+        """Quit quickly so NSIS can overwrite the onefile EXE."""
         try:
             import socket as _sock
             try:
@@ -62,19 +62,44 @@ def show_completion_dialog(installer_path: str, version: str, parent=None):
             except Exception:
                 pass
             threading.Thread(
-                target=lambda: (time.sleep(0.6), os._exit(0)),
+                target=lambda: (time.sleep(0.8), os._exit(0)),
                 daemon=True,
             ).start()
         except Exception:
             os._exit(0)
 
     def _start_install(dialog_widget=None):
+        """Open NSIS installer visibly first; exit client after it starts."""
         from client_utils import (
+            launch_interactive_installer_and_exit_prep,
             launch_safe_update_install,
-            launch_installer_elevated_fallback,
             release_update_lock,
         )
         try:
+            if not installer_path or not os.path.isfile(installer_path):
+                messagebox.showerror(
+                    _updater_t("error"),
+                    _updater_t("update_download_fail"),
+                )
+                return False
+
+            log(f"[UPDATER] Starting interactive installer: {installer_path}")
+
+            # Primary: open the NSIS wizard NOW (what the user expects after Yes)
+            ok = launch_interactive_installer_and_exit_prep(installer_path)
+            if ok:
+                log("[UPDATER] Installer process started (visible)")
+                if dialog_widget is not None:
+                    try:
+                        dialog_widget.destroy()
+                    except Exception:
+                        pass
+                # Exit immediately — NSIS is already visible; do not block on messagebox
+                _exit_for_update()
+                return True
+
+            # Secondary: elevated helper (silent-style orchestrator)
+            log("[UPDATER] Direct installer launch failed — trying safe helper")
             ok = launch_safe_update_install(
                 installer_path,
                 silent=False,
@@ -84,7 +109,6 @@ def show_completion_dialog(installer_path: str, version: str, parent=None):
                 grace_wait_sec=15,
             )
             if ok:
-                log("[UPDATER] Safe update helper launched (UAC)")
                 if dialog_widget is not None:
                     try:
                         dialog_widget.destroy()
@@ -93,32 +117,21 @@ def show_completion_dialog(installer_path: str, version: str, parent=None):
                 _exit_for_update()
                 return True
 
-            # UAC cancel or helper missing — offer direct installer as fallback
-            if messagebox.askyesno(
-                _updater_t("update_title"),
-                _updater_t("update_helper_failed")
-                + "\n\n"
-                + _updater_t("update_ready_ask", version=version, path=installer_path),
-            ):
-                if launch_installer_elevated_fallback(installer_path):
-                    log("[UPDATER] Fallback: opened installer via ShellExecute")
-                    if dialog_widget is not None:
-                        try:
-                            dialog_widget.destroy()
-                        except Exception:
-                            pass
-                    messagebox.showinfo(
-                        _updater_t("update_title"),
-                        _updater_t("update_installer_started"),
-                    )
-                    return True
             release_update_lock()
+            messagebox.showerror(
+                _updater_t("error"),
+                _updater_t("update_helper_failed"),
+            )
+            # Last resort: open Downloads folder
+            try:
+                os.startfile(os.path.dirname(installer_path))
+            except Exception:
+                pass
             return False
         except Exception as e:
             log(f"[UPDATER] start install error: {e}")
             try:
-                if launch_installer_elevated_fallback(installer_path):
-                    return True
+                release_update_lock()
             except Exception:
                 pass
             messagebox.showerror(

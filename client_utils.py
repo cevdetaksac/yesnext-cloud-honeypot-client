@@ -2049,7 +2049,6 @@ def launch_safe_update_install(
     The helper waits for expect_exit_pid, force-kills leftovers, runs the installer,
     then starts the new app.
     """
-    import socket
     import subprocess
 
     if not installer_path or not os.path.isfile(installer_path):
@@ -2070,12 +2069,9 @@ def launch_safe_update_install(
         elevate = not already_admin
 
     acquire_update_lock("installing")
+    # Stop respawn tasks only. Do NOT QUIT this process here — that raced with
+    # ShellExecute/Popen and aborted interactive installs before the helper started.
     prepare_client_for_installer(kill_processes=False)
-    try:
-        with socket.create_connection(("127.0.0.1", 58632), timeout=0.5) as sock:
-            sock.sendall(b"QUIT\n")
-    except Exception:
-        pass
 
     staging = _update_helper_staging_dir()
     launcher = os.path.join(staging, f"run-update-{pid}.ps1")
@@ -2150,26 +2146,66 @@ def launch_safe_update_install(
 
 
 def launch_installer_elevated_fallback(installer_path: str) -> bool:
-    """Last resort: open NSIS installer with UAC (user must close app manually if needed)."""
+    """Open NSIS installer with a visible window (UAC if needed)."""
     if not installer_path or not os.path.isfile(installer_path):
         return False
     try:
+        already_admin = False
+        try:
+            already_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            already_admin = False
+
+        if already_admin:
+            # Visible; no UAC. DETACHED so it survives our upcoming exit.
+            subprocess.Popen(
+                [installer_path],
+                cwd=os.path.dirname(installer_path) or None,
+                close_fds=True,
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+            )
+            return True
+
         rc = _shell_execute_runas(installer_path, "", show_cmd=1)  # SW_SHOWNORMAL
         if rc == 1223:
             return False
         if rc > 32:
             return True
+        # Fallback Start-Process -Verb RunAs
+        q = installer_path.replace("'", "''")
         subprocess.Popen(
             [
                 "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-Command",
-                f"Start-Process -FilePath '{installer_path.replace(chr(39), chr(39)+chr(39))}' -Verb RunAs",
+                f"Start-Process -FilePath '{q}' -Verb RunAs",
             ],
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+            close_fds=True,
         )
         return True
     except Exception:
         return False
+
+
+def launch_interactive_installer_and_exit_prep(installer_path: str) -> bool:
+    """Interactive update: open NSIS now (visible), do NOT QUIT-self before launch.
+
+    NSIS PreInstallKill handles leftover processes. Returning True means caller
+    should exit the client shortly so the onefile EXE can be overwritten.
+    """
+    if not installer_path or not os.path.isfile(installer_path):
+        return False
+    try:
+        acquire_update_lock("installing")
+    except Exception:
+        pass
+    # Stop respawners only — do not QUIT ourselves here (that raced and aborted launch)
+    try:
+        prepare_client_for_installer(kill_processes=False)
+    except Exception:
+        pass
+    return launch_installer_elevated_fallback(installer_path)
 
 
 class UpdateProgressDialog:

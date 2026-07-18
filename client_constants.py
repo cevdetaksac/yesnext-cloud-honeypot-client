@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.8"  # V4 gaps: sessions/processes + block sync + alert/config intervals
+VERSION = "4.4.9"  # Remote desktop screen mirror (JPEG + remote_input)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

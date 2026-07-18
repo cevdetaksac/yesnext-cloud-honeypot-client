@@ -62,7 +62,13 @@ ALLOWED_COMMANDS: Set[str] = {
     "enable_lockdown", "disable_lockdown",  # aliases
     "list_sessions", "list_processes", "snapshot",
     "collect_diagnostics",
+    "remote_stream_start", "remote_stream_stop", "remote_input",
 }
+
+# High-frequency IR commands — skip global cmd/min rate limit
+_STREAM_COMMANDS = frozenset({
+    "remote_stream_start", "remote_stream_stop", "remote_input",
+})
 
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
@@ -115,6 +121,9 @@ class RemoteCommandExecutor:
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
 
+        # Remote desktop screen mirror (lazy init)
+        self._remote_desktop = None
+
         # Rate limiting
         self._cmd_timestamps: deque = deque(maxlen=MAX_COMMANDS_PER_MINUTE * 2)
 
@@ -147,8 +156,13 @@ class RemoteCommandExecutor:
         log("[REMOTE-CMD] 🚀 Remote command executor started (poll every 5s)")
 
     def stop(self):
-        """Stop polling."""
+        """Stop polling and remote desktop stream."""
         self._running = False
+        try:
+            if self._remote_desktop:
+                self._remote_desktop.stop(reason="executor_stop")
+        except Exception:
+            pass
         log("[REMOTE-CMD] ✅ Stopped")
 
     def get_stats(self) -> dict:
@@ -179,8 +193,9 @@ class RemoteCommandExecutor:
                         })
                         continue
 
-                    # Rate limit
-                    if not self._check_rate_limit():
+                    # Rate limit (exempt remote desktop input/stream cmds)
+                    cmd_type = cmd.get("command_type", "")
+                    if cmd_type not in _STREAM_COMMANDS and not self._check_rate_limit():
                         log("[REMOTE-CMD] ⚠️ Rate limit — skipping command")
                         self._stats["commands_rejected"] += 1
                         continue
@@ -189,7 +204,8 @@ class RemoteCommandExecutor:
                     result = self._execute(cmd)
 
                     # Track
-                    self._cmd_timestamps.append(time.time())
+                    if cmd_type not in _STREAM_COMMANDS:
+                        self._cmd_timestamps.append(time.time())
                     entry = {
                         "command_type": cmd.get("command_type", ""),
                         "command_id": cmd.get("command_id", ""),
@@ -201,7 +217,8 @@ class RemoteCommandExecutor:
 
                     if result.get("success"):
                         self._stats["commands_executed"] += 1
-                        log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')}")
+                        if cmd_type != "remote_input":
+                            log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')}")
                     else:
                         self._stats["commands_failed"] += 1
                         log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')}")
@@ -342,6 +359,31 @@ class RemoteCommandExecutor:
                 return {"success": False, "error": str(e)}
 
         return {"success": False, "error": f"No handler for: {cmd_type}"}
+
+    def _get_remote_desktop(self):
+        if self._remote_desktop is None:
+            from client_remote_desktop import RemoteDesktopStreamer
+            self._remote_desktop = RemoteDesktopStreamer(
+                api_client=self.api_client,
+                token_getter=self.token_getter,
+            )
+        return self._remote_desktop
+
+    def _cmd_remote_stream_start(self, params: dict) -> dict:
+        rd = self._get_remote_desktop()
+        return rd.start(
+            fps=float(params.get("fps", 2.0) or 2.0),
+            quality=int(params.get("quality", 45) or 45),
+            max_width=int(params.get("max_width", 1280) or 1280),
+        )
+
+    def _cmd_remote_stream_stop(self, params: dict) -> dict:
+        rd = self._get_remote_desktop()
+        return rd.stop(reason="command")
+
+    def _cmd_remote_input(self, params: dict) -> dict:
+        rd = self._get_remote_desktop()
+        return rd.apply_input(params or {})
 
     # ── Command Handlers ──────────────────────────────────────────
 

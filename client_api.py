@@ -617,6 +617,59 @@ class HoneypotAPIClient:
             self.log(f"[API] urgent alert error: {e}")
             return None
 
+    def upload_remote_frame(self, token: str, jpeg_bytes: bytes,
+                            width: int, height: int, seq: int,
+                            fps: float = 2.0) -> bool:
+        """POST /api/remote/frame (multipart) — fallback frame-json base64."""
+        import base64
+        try:
+            url = f"{self.base_url}/remote/frame"
+            req_params, _, headers = self._prepare_request(None, None, token)
+            headers = dict(headers or {})
+            headers.pop("Content-Type", None)
+
+            files = {
+                "file": ("frame.jpg", jpeg_bytes, "image/jpeg"),
+            }
+            data = {
+                "token": token,
+                "width": str(int(width)),
+                "height": str(int(height)),
+                "seq": str(int(seq)),
+                "fps": str(fps),
+            }
+            r = self.session.post(
+                url,
+                data=data,
+                files=files,
+                params=req_params,
+                headers=headers or None,
+                timeout=20,
+                verify=resolve_tls_verify(),
+            )
+            if 200 <= r.status_code < 300:
+                return True
+
+            b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            alt = self.api_request(
+                "POST", "remote/frame-json",
+                data={
+                    "token": token,
+                    "image_base64": b64,
+                    "width": int(width),
+                    "height": int(height),
+                    "seq": int(seq),
+                    "fps": fps,
+                },
+                timeout=20,
+                verbose_logging=False,
+                token=token,
+            )
+            return alt is not None
+        except Exception as e:
+            self.log(f"[API] remote frame upload error: {e}")
+            return False
+
     def clear_client_data(self, token: str, scopes: list,
                           reason: str = "user_requested_cleanup") -> Optional[Dict]:
         """POST /api/agent/clear-data — Dashboard/sunucu verilerini temizle.

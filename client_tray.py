@@ -347,12 +347,18 @@ class TrayManager:
                     log(f"tray link account error: {e}")
 
             from client_constants import SERVER_NAME
+            from client_utils import is_account_linked
             host_label = f"{SERVER_NAME}"[:40]
+            account_item = (
+                TrayItem(self.t('btn_account_linked'), lambda: _link_account())
+                if is_account_linked()
+                else TrayItem(self.t('btn_link_account'), lambda: _link_account())
+            )
             menu = pystray.Menu(
                 TrayItem(self.t('tray_show'), lambda: self.show_window(), default=True),
                 TrayItem(host_label, lambda: None, enabled=False),
                 TrayItem(self.t('tray_dashboard'), lambda: _open_dashboard()),
-                TrayItem(self.t('btn_link_account'), lambda: _link_account()),
+                account_item,
                 TrayItem(self.t('menu_copy_token'), lambda: _copy_token()),
                 TrayItem(self.t('tray_exit'), lambda: self.exit_app())
             )

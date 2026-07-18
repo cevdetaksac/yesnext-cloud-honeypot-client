@@ -285,7 +285,7 @@ class ModernGUI:
         # Token
         token_short = token[:16] + "…" if len(token) > 16 else token
         ctk.CTkLabel(
-            bar, text=f"Token: {token_short}",
+            bar, text=f"{self.t('lbl_token')}: {token_short}",
             font=ctk.CTkFont(size=11, family="Consolas"),
             text_color=COLORS["text_dim"],
         ).pack(side="left", padx=(6, 2))
@@ -299,15 +299,32 @@ class ModernGUI:
             command=lambda: self._copy_token_with_hint(token),
         ).pack(side="left", padx=(0, 4))
 
-        # Hesaba bağla
-        ctk.CTkButton(
-            bar, text=self.t("btn_link_account"),
-            width=100, height=22,
-            font=ctk.CTkFont(size=10),
-            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
-            text_color=COLORS["text_bright"], corner_radius=4,
-            command=lambda: self._open_link_account(token),
-        ).pack(side="left", padx=(0, 4))
+        # Hesaba bağla — yalnızca henüz bağlı değilse CTA; bağlıysa rozet
+        from client_utils import is_account_linked, refresh_account_link_status
+        try:
+            refresh_account_link_status(
+                token,
+                api_client=getattr(self.app, "api_client", None),
+            )
+        except Exception:
+            pass
+        linked = is_account_linked()
+        self._account_linked = linked
+        if linked:
+            ctk.CTkLabel(
+                bar, text=f"✓ {self.t('btn_account_linked')}",
+                font=ctk.CTkFont(size=10),
+                text_color=COLORS["green"],
+            ).pack(side="left", padx=(0, 4))
+        else:
+            ctk.CTkButton(
+                bar, text=self.t("btn_link_account"),
+                width=100, height=22,
+                font=ctk.CTkFont(size=10),
+                fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+                text_color=COLORS["text_bright"], corner_radius=4,
+                command=lambda: self._open_link_account(token),
+            ).pack(side="left", padx=(0, 4))
 
         # ════════ SAĞ TARAF ════════ #
         # Yardım butonu
@@ -433,16 +450,57 @@ class ModernGUI:
             msg = self.t("token_copied_link_hint")
         messagebox.showinfo(self.t("btn_link_account"), msg)
         try:
-            from client_utils import clear_force_gui_onboarding
-            # User saw onboarding CTA — allow tray minimize later
+            from client_utils import clear_force_gui_onboarding, set_account_linked
             if tok:
                 clear_force_gui_onboarding()
+            # Ask whether linking is done — hide CTA when yes
+            if messagebox.askyesno(
+                self.t("btn_link_account"),
+                self.t("link_account_confirm_done"),
+            ):
+                set_account_linked(True, source="user_confirm")
+                self._account_linked = True
+                try:
+                    self.show_toast(
+                        self.t("btn_account_linked"),
+                        self.t("link_account_marked"),
+                        "info",
+                    )
+                except Exception:
+                    pass
+                # Refresh top bar state without full rebuild if possible
+                try:
+                    self._rebuild_gui()
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
             self.show_toast(self.t("btn_link_account"), self.t("token_copied_toast"), "info")
         except Exception:
             pass
+
+    def _mark_account_linked(self):
+        """Settings: already linked on web — hide Hesaba bağla CTA."""
+        try:
+            from client_utils import set_account_linked
+            set_account_linked(True, source="user_mark")
+            self._account_linked = True
+            messagebox.showinfo(self.t("info"), self.t("link_account_marked"))
+            self._rebuild_gui()
+        except Exception as e:
+            log(f"mark account linked error: {e}")
+
+    def _unmark_account_linked(self):
+        """Settings: show link CTA again."""
+        try:
+            from client_utils import set_account_linked
+            set_account_linked(False, source="user_unmark")
+            self._account_linked = False
+            messagebox.showinfo(self.t("info"), self.t("link_account_unmarked"))
+            self._rebuild_gui()
+        except Exception as e:
+            log(f"unmark account linked error: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     #  BAŞLIK BANDI
@@ -3982,9 +4040,25 @@ class ModernGUI:
 
         items = []
         if menu_type == "settings":
-            items = [
-                (f"🔗  {self.t('btn_link_account')}", _run_and_close(
-                    lambda: self._open_link_account(self.app.state.get("token", "")))),
+            from client_utils import is_account_linked
+            linked = is_account_linked()
+            if linked:
+                items = [
+                    (f"✓  {self.t('btn_account_linked')}", _run_and_close(
+                        lambda: webbrowser.open(f"{self._account_base_url()}/servers"))),
+                    (f"🔗  {self.t('menu_open_my_servers')}", _run_and_close(
+                        lambda: webbrowser.open(f"{self._account_base_url()}/servers"))),
+                    (f"↩️  {self.t('menu_unmark_account_linked')}", _run_and_close(
+                        self._unmark_account_linked)),
+                ]
+            else:
+                items = [
+                    (f"🔗  {self.t('btn_link_account')}", _run_and_close(
+                        lambda: self._open_link_account(self.app.state.get("token", "")))),
+                    (f"✓  {self.t('menu_mark_account_linked')}", _run_and_close(
+                        self._mark_account_linked)),
+                ]
+            items += [
                 (f"📋  {self.t('menu_copy_token')}", _run_and_close(
                     lambda: self._copy_token_with_hint(self.app.state.get("token", "")))),
                 (None, None),  # separator

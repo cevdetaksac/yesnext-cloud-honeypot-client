@@ -985,6 +985,123 @@ def resolve_app_language() -> str:
         return detect_windows_ui_language()
 
 
+def _programdata_client_dir() -> str:
+    base = os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+        "YesNext",
+        "CloudHoneypotClient",
+    )
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    return base
+
+
+def _account_link_pref_path() -> str:
+    return os.path.join(_programdata_client_dir(), "account_link.json")
+
+
+def is_account_linked() -> bool:
+    """True when this agent was marked linked to a YesNext Account (local + optional API)."""
+    try:
+        path = _account_link_pref_path()
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and data.get("linked"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def set_account_linked(linked: bool = True, *, source: str = "user") -> None:
+    """Persist Account↔Client link state (survives upgrades; ProgramData)."""
+    try:
+        path = _account_link_pref_path()
+        payload = {
+            "linked": bool(linked),
+            "source": source,
+            "updated_at": time.time(),
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def refresh_account_link_status(token: str = "", api_client=None) -> Optional[bool]:
+    """Ask cloud whether this client token is linked to an Account.
+
+    Returns True/False when cloud answers; None when endpoint missing / unknown.
+    On True, persists local linked flag.
+    """
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    try:
+        # Prefer dedicated agent endpoint when cloud ships it
+        resp = None
+        if api_client is not None and hasattr(api_client, "api_request"):
+            resp = api_client.api_request(
+                "GET", "agent/account-status",
+                params={"token": tok},
+                timeout=8,
+                verbose_logging=False,
+            )
+            if resp is None:
+                resp = api_client.api_request(
+                    "GET", "client_status",
+                    params={"token": tok},
+                    timeout=8,
+                    verbose_logging=False,
+                )
+        else:
+            import requests
+            from client_constants import API_URL
+            from client_security_utils import resolve_tls_verify
+            base = API_URL.rstrip("/")
+            for path in ("agent/account-status", "client_status"):
+                try:
+                    r = requests.get(
+                        f"{base}/{path}",
+                        params={"token": tok},
+                        timeout=8,
+                        verify=resolve_tls_verify(),
+                    )
+                    if r.status_code == 404:
+                        continue
+                    if r.status_code == 200:
+                        resp = r.json()
+                        break
+                except Exception:
+                    continue
+        if not isinstance(resp, dict):
+            return None
+        linked = None
+        for key in (
+            "account_linked", "linked", "has_account", "is_linked",
+            "linked_to_account", "has_account_membership",
+        ):
+            if key in resp:
+                linked = bool(resp.get(key))
+                break
+        acct = resp.get("account")
+        if linked is None and isinstance(acct, dict):
+            linked = bool(acct.get("email") or acct.get("id") or acct.get("linked"))
+        if linked is None and isinstance(resp.get("accounts"), list):
+            linked = len(resp["accounts"]) > 0
+        if linked is True:
+            set_account_linked(True, source="api")
+            return True
+        if linked is False:
+            return False
+    except Exception:
+        pass
+    return None
+
+
 # ===== CONFIG SYSTEM FINALIZED =====
 # All settings are now managed through client_config.json
 # No legacy migration needed - pure config-driven architecture

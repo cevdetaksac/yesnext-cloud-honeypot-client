@@ -22,6 +22,28 @@ from typing import Optional, Dict, Any, Callable
 from client_constants import GITHUB_OWNER, GITHUB_REPO
 from client_helpers import log
 
+def _updater_t(key: str, **kwargs) -> str:
+    """i18n helper for updater dialogs (no app instance required)."""
+    try:
+        from client_utils import load_i18n, resolve_app_language
+        lang = resolve_app_language()
+        i18n = load_i18n(language=lang)
+        if isinstance(i18n, dict) and lang in i18n:
+            table = i18n[lang]
+        elif isinstance(i18n, dict):
+            table = i18n.get("tr") or i18n.get("en") or {}
+        else:
+            table = {}
+        text = table.get(key) or (i18n.get("en", {}) or {}).get(key) or key
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except Exception:
+                return text
+        return text
+    except Exception:
+        return key
+
 # ===================== UPDATE MANAGEMENT ===================== #
 
 def show_completion_dialog(installer_path: str, version: str):
@@ -29,14 +51,13 @@ def show_completion_dialog(installer_path: str, version: str):
     import tkinter as tk
     import tkinter.ttk as ttk
     from tkinter import messagebox
-    import os
     import subprocess
     import webbrowser
     
     try:
         # Ana dialog penceresi
         dialog = tk.Toplevel()
-        dialog.title("Güncelleme Tamamlandı")
+        dialog.title(_updater_t("update_done_title"))
         dialog.resizable(False, False)
         dialog.grab_set()  # Modal yap
         
@@ -49,16 +70,18 @@ def show_completion_dialog(installer_path: str, version: str):
         dialog.grid_columnconfigure(0, weight=1)
         
         # Başlık
-        title_label = ttk.Label(main_frame, text="✅ İndirme Tamamlandı!", 
-                               font=("Arial", 16, "bold"))
+        title_label = ttk.Label(
+            main_frame,
+            text=f"✅ {_updater_t('update_download_done')}",
+            font=("Arial", 16, "bold"),
+        )
         title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
         
-        # Bilgi metni - daha kompakt
-        info_text = f"""📥 Yeni sürüm başarıyla indirildi: v{version}
-📁 Konum: Downloads klasörü
-📄 Dosya: {os.path.basename(installer_path)}
-
-🔧 İlerlemek için aşağıdaki seçeneklerden birini kullanın:"""
+        info_text = _updater_t(
+            "update_download_info",
+            version=version,
+            filename=os.path.basename(installer_path),
+        )
         
         info_label = ttk.Label(main_frame, text=info_text, justify="left", wraplength=420)
         info_label.grid(row=1, column=0, columnspan=2, pady=(0, 15), sticky="ew")
@@ -81,24 +104,18 @@ def show_completion_dialog(installer_path: str, version: str):
                 )
                 if not ok:
                     messagebox.showerror(
-                        "Hata",
-                        "Güncelleme yardımcısı başlatılamadı.\n"
-                        "Lütfen indirilen installer'ı yönetici olarak çalıştırın.",
+                        _updater_t("error"),
+                        _updater_t("update_helper_failed"),
                     )
                     return
 
                 messagebox.showinfo(
-                    "Güncelleme",
-                    "Kurulum yardımcısı başlatıldı.\n\n"
-                    "UAC onayını verin. Uygulama kapanacak, kurulum bitecek "
-                    "ve yeni sürüm otomatik açılacak.",
+                    _updater_t("update_title"),
+                    _updater_t("update_helper_started"),
                 )
                 dialog.destroy()
                 # Exit ourselves so helper can overwrite the onefile EXE safely
                 try:
-                    root = dialog.master if hasattr(dialog, "master") else None
-                    app = None
-                    # Best-effort: signal graceful exit via control port / hard exit
                     import socket as _sock
                     try:
                         with _sock.create_connection(("127.0.0.1", 58632), timeout=0.5) as s:
@@ -112,7 +129,10 @@ def show_completion_dialog(installer_path: str, version: str):
                 except Exception:
                     os._exit(0)
             except Exception as e:
-                messagebox.showerror("Hata", f"Installer başlatılamadı:\n{str(e)}")
+                messagebox.showerror(
+                    _updater_t("error"),
+                    _updater_t("update_installer_fail", err=str(e)),
+                )
         
         def open_downloads():
             """Downloads klasörünü aç"""
@@ -121,15 +141,17 @@ def show_completion_dialog(installer_path: str, version: str):
                 release_update_lock()
                 os.startfile(os.path.dirname(installer_path))
                 messagebox.showinfo(
-                    "Klasör Açıldı", 
-                    f"📁 Downloads klasörü açıldı!\n\n"
-                    f"🔧 Manuel kurulum:\n"
-                    f"1. {os.path.basename(installer_path)} dosyasına sağ tıklayın\n"
-                    f"2. 'Yönetici olarak çalıştır' seçin\n"
-                    f"3. UAC onayını verin"
+                    _updater_t("folder_opened_title"),
+                    _updater_t(
+                        "update_folder_opened",
+                        filename=os.path.basename(installer_path),
+                    ),
                 )
             except Exception as e:
-                messagebox.showerror("Hata", f"Klasör açılamadı:\n{str(e)}")
+                messagebox.showerror(
+                    _updater_t("error"),
+                    _updater_t("update_folder_fail", err=str(e)),
+                )
         
         def open_github():
             """GitHub releases sayfasını aç"""
@@ -137,13 +159,14 @@ def show_completion_dialog(installer_path: str, version: str):
                 github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
                 webbrowser.open(github_url)
                 messagebox.showinfo(
-                    "GitHub Açıldı", 
-                    f"🌐 GitHub releases sayfası açıldı!\n\n"
-                    f"Alternatif olarak oradan da indirebilirsiniz:\n"
-                    f"{github_url}"
+                    _updater_t("github_opened_title"),
+                    _updater_t("update_github_opened", url=github_url),
                 )
             except Exception as e:
-                messagebox.showerror("Hata", f"GitHub açılamadı:\n{str(e)}")
+                messagebox.showerror(
+                    _updater_t("error"),
+                    _updater_t("update_github_fail", err=str(e)),
+                )
         
         def close_dialog():
             """Dialog'u kapat"""
@@ -155,22 +178,38 @@ def show_completion_dialog(installer_path: str, version: str):
             dialog.destroy()
         
         # Ana installer butonu
-        install_btn = ttk.Button(button_frame, text="🚀 Installer'ı Çalıştır", 
-                                command=run_installer, width=25)
+        install_btn = ttk.Button(
+            button_frame,
+            text=f"🚀 {_updater_t('update_run_installer')}",
+            command=run_installer,
+            width=25,
+        )
         install_btn.grid(row=0, column=0, columnspan=2, pady=(5, 3), sticky="ew")
         
         # Alternatif butonlar
-        downloads_btn = ttk.Button(button_frame, text="📁 Downloads Klasörü", 
-                                  command=open_downloads, width=20)
+        downloads_btn = ttk.Button(
+            button_frame,
+            text=f"📁 {_updater_t('update_open_downloads')}",
+            command=open_downloads,
+            width=20,
+        )
         downloads_btn.grid(row=1, column=0, padx=(0, 3), pady=3, sticky="ew")
         
-        github_btn = ttk.Button(button_frame, text="🌐 GitHub Alternatif", 
-                               command=open_github, width=20)
+        github_btn = ttk.Button(
+            button_frame,
+            text=f"🌐 {_updater_t('update_open_github_alt')}",
+            command=open_github,
+            width=20,
+        )
         github_btn.grid(row=1, column=1, padx=(3, 0), pady=3, sticky="ew")
         
         # Kapat butonu
-        close_btn = ttk.Button(button_frame, text="❌ Şimdi Değil", 
-                              command=close_dialog, width=25)
+        close_btn = ttk.Button(
+            button_frame,
+            text=f"❌ {_updater_t('update_not_now')}",
+            command=close_dialog,
+            width=25,
+        )
         close_btn.grid(row=2, column=0, columnspan=2, pady=(8, 5), sticky="ew")
         
         # Grid weights
@@ -208,11 +247,10 @@ def show_completion_dialog(installer_path: str, version: str):
     except Exception as e:
         # Fallback - basit messagebox
         log(f"[UPDATE] Dialog error: {e}")
+        from tkinter import messagebox
         result = messagebox.askyesno(
-            "Güncelleme Hazır",
-            f"✅ v{version} indirildi!\n\n"
-            f"📁 {installer_path}\n\n"
-            f"Installer'ı şimdi çalıştırmak ister misiniz?"
+            _updater_t("update_ready"),
+            _updater_t("update_ready_ask", version=version, path=installer_path),
         )
         if result:
             try:
@@ -230,7 +268,10 @@ def show_completion_dialog(installer_path: str, version: str):
                 subprocess.run(cmd, shell=True, check=False,
                               creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception as e2:
-                messagebox.showerror("Hata", f"Installer başlatılamadı: {e2}")
+                messagebox.showerror(
+                    _updater_t("error"),
+                    _updater_t("update_installer_fail", err=str(e2)),
+                )
 
 def check_updates_and_prompt(app_instance) -> bool:
     """Check for updates with immediate progress UI; installer starts only on user action."""
@@ -247,12 +288,12 @@ def check_updates_and_prompt(app_instance) -> bool:
     root = getattr(app_instance, "root", None)
     gui_safe = getattr(app_instance, "_gui_safe", lambda fn: fn())
 
-    progress_dialog = UpdateProgressDialog(root, "Güncelleme")
+    progress_dialog = UpdateProgressDialog(root, _updater_t("update_title"))
     if not progress_dialog.create_dialog():
-        messagebox.showerror("Güncelleme", "İlerleme penceresi açılamadı")
+        messagebox.showerror(_updater_t("update_title"), _updater_t("update_progress_fail"))
         return False
 
-    progress_dialog.update_progress(5, "Güncelleme kontrol ediliyor...")
+    progress_dialog.update_progress(5, _updater_t("update_checking"))
     update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
 
     def _close_progress():
@@ -262,7 +303,7 @@ def check_updates_and_prompt(app_instance) -> bool:
         # SilentUpdater / kill-honeypot indirme ortasında süreçleri öldürmesin
         acquire_update_lock("interactive-download")
         pause_competing_updaters()
-        progress_dialog.update_progress(10, f"v{latest_ver} indiriliyor...")
+        progress_dialog.update_progress(10, _updater_t("update_downloading", version=latest_ver))
 
         def _download_worker():
             try:
@@ -270,7 +311,10 @@ def check_updates_and_prompt(app_instance) -> bool:
                     gui_safe(lambda p=percent, m=message: progress_dialog.update_progress(p, m))
 
                 def _download_progress(percent):
-                    _progress(15 + int(percent * 0.8), f"İndiriliyor... %{percent}")
+                    _progress(
+                        15 + int(percent * 0.8),
+                        _updater_t("update_downloading_pct", percent=percent),
+                    )
 
                 installer_path = update_mgr.download_installer(
                     update_info["installer_url"],
@@ -285,15 +329,18 @@ def check_updates_and_prompt(app_instance) -> bool:
                     else:
                         release_update_lock()
                         messagebox.showerror(
-                            "Güncelleme",
-                            "Installer indirilemedi. Lütfen daha sonra tekrar deneyin.",
+                            _updater_t("update_title"),
+                            _updater_t("update_download_fail"),
                         )
 
                 gui_safe(_on_download_done)
             except Exception as exc:
                 log(f"[UPDATER] İndirme hatası: {exc}")
                 release_update_lock()
-                gui_safe(lambda: (_close_progress(), messagebox.showerror("Güncelleme", str(exc))))
+                gui_safe(lambda: (
+                    _close_progress(),
+                    messagebox.showerror(_updater_t("update_title"), str(exc)),
+                ))
 
         threading.Thread(target=_download_worker, daemon=True, name="UpdateDownload").start()
 
@@ -304,29 +351,41 @@ def check_updates_and_prompt(app_instance) -> bool:
             def _on_check_done():
                 if update_info.get("error"):
                     _close_progress()
-                    messagebox.showerror("Güncelleme", f"Hata: {update_info['error']}")
+                    messagebox.showerror(
+                        _updater_t("update_title"),
+                        _updater_t("update_error_fmt", err=update_info["error"]),
+                    )
                     return
 
                 if not update_info.get("has_update"):
                     _close_progress()
-                    messagebox.showinfo("Güncelleme", "Yüklü sürüm güncel.")
+                    messagebox.showinfo(
+                        _updater_t("update_title"),
+                        _updater_t("update_uptodate"),
+                    )
                     return
 
                 latest_ver = update_info["latest_version"]
                 _close_progress()
                 if messagebox.askyesno(
-                    "Güncelleme",
-                    f"Yeni sürüm v{latest_ver} mevcut.\n\nŞimdi indirmek ister misiniz?",
+                    _updater_t("update_title"),
+                    _updater_t("update_found_ask", version=latest_ver),
                 ):
                     if not progress_dialog.create_dialog():
-                        messagebox.showerror("Güncelleme", "İlerleme penceresi açılamadı")
+                        messagebox.showerror(
+                            _updater_t("update_title"),
+                            _updater_t("update_progress_fail"),
+                        )
                         return
                     _start_download(latest_ver, update_info)
 
             gui_safe(_on_check_done)
         except Exception as exc:
             log(f"update prompt error: {exc}")
-            gui_safe(lambda: (_close_progress(), messagebox.showerror("Güncelleme", str(exc))))
+            gui_safe(lambda: (
+                _close_progress(),
+                messagebox.showerror(_updater_t("update_title"), str(exc)),
+            ))
 
     threading.Thread(target=_check_worker, daemon=True, name="UpdateCheck").start()
     return True

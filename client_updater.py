@@ -46,96 +46,135 @@ def _updater_t(key: str, **kwargs) -> str:
 
 # ===================== UPDATE MANAGEMENT ===================== #
 
-def show_completion_dialog(installer_path: str, version: str):
-    """İndirme tamamlandığında özel dialog göster"""
+def show_completion_dialog(installer_path: str, version: str, parent=None):
+    """After download: offer install now (primary) with reliable elevated launch."""
     import tkinter as tk
     import tkinter.ttk as ttk
     from tkinter import messagebox
-    import subprocess
-    import webbrowser
-    
+
+    def _exit_for_update():
+        """Quit quickly so elevated helper can overwrite onefile EXE."""
+        try:
+            import socket as _sock
+            try:
+                with _sock.create_connection(("127.0.0.1", 58632), timeout=0.4) as s:
+                    s.sendall(b"QUIT\n")
+            except Exception:
+                pass
+            threading.Thread(
+                target=lambda: (time.sleep(0.6), os._exit(0)),
+                daemon=True,
+            ).start()
+        except Exception:
+            os._exit(0)
+
+    def _start_install(dialog_widget=None):
+        from client_utils import (
+            launch_safe_update_install,
+            launch_installer_elevated_fallback,
+            release_update_lock,
+        )
+        try:
+            ok = launch_safe_update_install(
+                installer_path,
+                silent=False,
+                show_gui_after=True,
+                expect_exit_pid=os.getpid(),
+                elevate=True,
+                grace_wait_sec=15,
+            )
+            if ok:
+                log("[UPDATER] Safe update helper launched (UAC)")
+                if dialog_widget is not None:
+                    try:
+                        dialog_widget.destroy()
+                    except Exception:
+                        pass
+                _exit_for_update()
+                return True
+
+            # UAC cancel or helper missing — offer direct installer as fallback
+            if messagebox.askyesno(
+                _updater_t("update_title"),
+                _updater_t("update_helper_failed")
+                + "\n\n"
+                + _updater_t("update_ready_ask", version=version, path=installer_path),
+            ):
+                if launch_installer_elevated_fallback(installer_path):
+                    log("[UPDATER] Fallback: opened installer via ShellExecute")
+                    if dialog_widget is not None:
+                        try:
+                            dialog_widget.destroy()
+                        except Exception:
+                            pass
+                    messagebox.showinfo(
+                        _updater_t("update_title"),
+                        _updater_t("update_installer_started"),
+                    )
+                    return True
+            release_update_lock()
+            return False
+        except Exception as e:
+            log(f"[UPDATER] start install error: {e}")
+            try:
+                if launch_installer_elevated_fallback(installer_path):
+                    return True
+            except Exception:
+                pass
+            messagebox.showerror(
+                _updater_t("error"),
+                _updater_t("update_installer_fail", err=str(e)),
+            )
+            return False
+
     try:
-        # Ana dialog penceresi
-        dialog = tk.Toplevel()
+        # Primary path: ask immediately after download (installer must start on Yes)
+        if messagebox.askyesno(
+            _updater_t("update_ready"),
+            _updater_t("update_ready_ask", version=version, path=installer_path),
+            parent=parent,
+        ):
+            _start_install(None)
+            return
+
+        dialog = tk.Toplevel(parent) if parent is not None else tk.Toplevel()
         dialog.title(_updater_t("update_done_title"))
         dialog.resizable(False, False)
-        dialog.grab_set()  # Modal yap
-        
-        # Ana frame - önce oluştur
+        try:
+            dialog.transient(parent)
+        except Exception:
+            pass
+        dialog.grab_set()
+
         main_frame = ttk.Frame(dialog, padding="15")
         main_frame.grid(row=0, column=0, sticky="nsew")
-        
-        # Dialog grid konfigürasyonu
         dialog.grid_rowconfigure(0, weight=1)
         dialog.grid_columnconfigure(0, weight=1)
-        
-        # Başlık
-        title_label = ttk.Label(
+
+        ttk.Label(
             main_frame,
             text=f"✅ {_updater_t('update_download_done')}",
             font=("Arial", 16, "bold"),
-        )
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
-        
-        info_text = _updater_t(
-            "update_download_info",
-            version=version,
-            filename=os.path.basename(installer_path),
-        )
-        
-        info_label = ttk.Label(main_frame, text=info_text, justify="left", wraplength=420)
-        info_label.grid(row=1, column=0, columnspan=2, pady=(0, 15), sticky="ew")
-        
-        # Butonlar frame
+        ).grid(row=0, column=0, columnspan=2, pady=(0, 12))
+
+        ttk.Label(
+            main_frame,
+            text=_updater_t(
+                "update_download_info",
+                version=version,
+                filename=os.path.basename(installer_path),
+            ),
+            justify="left",
+            wraplength=420,
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 12), sticky="ew")
+
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=2, column=0, columnspan=2, pady=(5, 0), sticky="ew")
-        
+
         def run_installer():
-            """Elevated helper: wait for us to exit → kill leftovers → install → relaunch."""
-            try:
-                from client_utils import launch_safe_update_install
+            _start_install(dialog)
 
-                ok = launch_safe_update_install(
-                    installer_path,
-                    silent=False,
-                    show_gui_after=True,
-                    expect_exit_pid=os.getpid(),
-                    elevate=True,
-                )
-                if not ok:
-                    messagebox.showerror(
-                        _updater_t("error"),
-                        _updater_t("update_helper_failed"),
-                    )
-                    return
-
-                messagebox.showinfo(
-                    _updater_t("update_title"),
-                    _updater_t("update_helper_started"),
-                )
-                dialog.destroy()
-                # Exit ourselves so helper can overwrite the onefile EXE safely
-                try:
-                    import socket as _sock
-                    try:
-                        with _sock.create_connection(("127.0.0.1", 58632), timeout=0.5) as s:
-                            s.sendall(b"QUIT\n")
-                    except Exception:
-                        pass
-                    threading.Thread(
-                        target=lambda: (time.sleep(1.2), os._exit(0)),
-                        daemon=True,
-                    ).start()
-                except Exception:
-                    os._exit(0)
-            except Exception as e:
-                messagebox.showerror(
-                    _updater_t("error"),
-                    _updater_t("update_installer_fail", err=str(e)),
-                )
-        
         def open_downloads():
-            """Downloads klasörünü aç"""
             try:
                 from client_utils import release_update_lock
                 release_update_lock()
@@ -152,129 +191,89 @@ def show_completion_dialog(installer_path: str, version: str):
                     _updater_t("error"),
                     _updater_t("update_folder_fail", err=str(e)),
                 )
-        
+
         def open_github():
-            """GitHub releases sayfasını aç"""
+            import webbrowser
             try:
                 github_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}"
                 webbrowser.open(github_url)
-                messagebox.showinfo(
-                    _updater_t("github_opened_title"),
-                    _updater_t("update_github_opened", url=github_url),
-                )
             except Exception as e:
                 messagebox.showerror(
                     _updater_t("error"),
                     _updater_t("update_github_fail", err=str(e)),
                 )
-        
+
         def close_dialog():
-            """Dialog'u kapat"""
             try:
                 from client_utils import release_update_lock
                 release_update_lock()
             except Exception:
                 pass
             dialog.destroy()
-        
-        # Ana installer butonu
+
         install_btn = ttk.Button(
             button_frame,
             text=f"🚀 {_updater_t('update_run_installer')}",
             command=run_installer,
-            width=25,
+            width=28,
         )
         install_btn.grid(row=0, column=0, columnspan=2, pady=(5, 3), sticky="ew")
-        
-        # Alternatif butonlar
-        downloads_btn = ttk.Button(
+
+        ttk.Button(
             button_frame,
             text=f"📁 {_updater_t('update_open_downloads')}",
             command=open_downloads,
             width=20,
-        )
-        downloads_btn.grid(row=1, column=0, padx=(0, 3), pady=3, sticky="ew")
-        
-        github_btn = ttk.Button(
+        ).grid(row=1, column=0, padx=(0, 3), pady=3, sticky="ew")
+
+        ttk.Button(
             button_frame,
             text=f"🌐 {_updater_t('update_open_github_alt')}",
             command=open_github,
             width=20,
-        )
-        github_btn.grid(row=1, column=1, padx=(3, 0), pady=3, sticky="ew")
-        
-        # Kapat butonu
-        close_btn = ttk.Button(
+        ).grid(row=1, column=1, padx=(3, 0), pady=3, sticky="ew")
+
+        ttk.Button(
             button_frame,
             text=f"❌ {_updater_t('update_not_now')}",
             command=close_dialog,
-            width=25,
-        )
-        close_btn.grid(row=2, column=0, columnspan=2, pady=(8, 5), sticky="ew")
-        
-        # Grid weights
+            width=28,
+        ).grid(row=2, column=0, columnspan=2, pady=(8, 5), sticky="ew")
+
         main_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
-        
-        # İçerik yüklendikten sonra boyutu ayarla
+
         dialog.update_idletasks()
-        
-        # Gereken minimum boyutu hesapla
-        req_width = main_frame.winfo_reqwidth() + 30
-        req_height = main_frame.winfo_reqheight() + 30
-        
-        # Minimum ve maksimum boyutları belirle
-        min_width = max(req_width, 450)
-        min_height = max(req_height, 300)
-        max_width = min(min_width, 600)
-        max_height = min(min_height, 500)
-        
-        # Dialog boyutunu ayarla
-        dialog.geometry(f"{max_width}x{max_height}")
-        
-        # Pencereyi ortala
-        x = (dialog.winfo_screenwidth() // 2) - (max_width // 2)
-        y = (dialog.winfo_screenheight() // 2) - (max_height // 2)
-        dialog.geometry(f"{max_width}x{max_height}+{x}+{y}")
-        
-        # Ana installer butonuna focus ver
-        install_btn.focus()
-        
-        # Dialog'u çalıştır
+        req_width = max(main_frame.winfo_reqwidth() + 30, 450)
+        req_height = max(main_frame.winfo_reqheight() + 30, 280)
+        x = (dialog.winfo_screenwidth() // 2) - (req_width // 2)
+        y = (dialog.winfo_screenheight() // 2) - (req_height // 2)
+        dialog.geometry(f"{req_width}x{req_height}+{x}+{y}")
+
+        try:
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+            dialog.after(400, lambda: dialog.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        install_btn.focus_set()
+        dialog.bind("<Return>", lambda _e: run_installer())
         dialog.wait_window()
-        
+
     except Exception as e:
-        # Fallback - basit messagebox
         log(f"[UPDATE] Dialog error: {e}")
-        from tkinter import messagebox
         result = messagebox.askyesno(
             _updater_t("update_ready"),
             _updater_t("update_ready_ask", version=version, path=installer_path),
         )
         if result:
-            try:
-                from client_utils import launch_safe_update_install
-                if launch_safe_update_install(
-                    installer_path,
-                    silent=False,
-                    show_gui_after=True,
-                    expect_exit_pid=os.getpid(),
-                    elevate=True,
-                ):
-                    time.sleep(1.0)
-                    os._exit(0)
-                cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
-                subprocess.run(cmd, shell=True, check=False,
-                              creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception as e2:
-                messagebox.showerror(
-                    _updater_t("error"),
-                    _updater_t("update_installer_fail", err=str(e2)),
-                )
+            _start_install(None)
+
 
 def check_updates_and_prompt(app_instance) -> bool:
-    """Check for updates with immediate progress UI; installer starts only on user action."""
+    """Check for updates with immediate progress UI; then download + install start."""
     import threading
     import tkinter.messagebox as messagebox
     from client_utils import (
@@ -300,7 +299,6 @@ def check_updates_and_prompt(app_instance) -> bool:
         progress_dialog.close_dialog()
 
     def _start_download(latest_ver: str, update_info: dict):
-        # SilentUpdater / kill-honeypot indirme ortasında süreçleri öldürmesin
         acquire_update_lock("interactive-download")
         pause_competing_updaters()
         progress_dialog.update_progress(10, _updater_t("update_downloading", version=latest_ver))
@@ -324,8 +322,8 @@ def check_updates_and_prompt(app_instance) -> bool:
                 def _on_download_done():
                     _close_progress()
                     if installer_path:
-                        log("[UPDATER] İndirme tamamlandı — kullanıcı onayı bekleniyor")
-                        show_completion_dialog(installer_path, latest_ver)
+                        log(f"[UPDATER] Download complete: {installer_path}")
+                        show_completion_dialog(installer_path, latest_ver, parent=root)
                     else:
                         release_update_lock()
                         messagebox.showerror(
@@ -335,7 +333,7 @@ def check_updates_and_prompt(app_instance) -> bool:
 
                 gui_safe(_on_download_done)
             except Exception as exc:
-                log(f"[UPDATER] İndirme hatası: {exc}")
+                log(f"[UPDATER] Download error: {exc}")
                 release_update_lock()
                 gui_safe(lambda: (
                     _close_progress(),

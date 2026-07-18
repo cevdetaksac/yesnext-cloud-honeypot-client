@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.31"  # Faster installer kill (no 15x re-run, short polls)
+VERSION = "4.4.32"  # Fix GUI update: ShellExecute UAC + open installer after download
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

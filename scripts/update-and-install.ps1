@@ -12,6 +12,7 @@
 # Usage (elevated):
 #   update-and-install.ps1 -InstallerPath "C:\Users\..\Downloads\cloud-client-installer-vX.exe" `
 #       -ExpectExitPid 1234 -Silent -ShowGuiAfter
+# NOTE: Keep this file ASCII-only (Windows PowerShell encoding).
 
 param(
     [Parameter(Mandatory = $true)]
@@ -25,9 +26,9 @@ param(
 
     [string]$InstallDir = "",
 
-    [int]$GraceWaitSec = 45,
+    [int]$GraceWaitSec = 20,
 
-    [int]$KillRounds = 12
+    [int]$KillRounds = 4
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -78,34 +79,30 @@ function Write-StopFlags {
 
 function Stop-HoneypotTasks {
     $names = @(
-        "CloudHoneypot-Background", "CloudHoneypot-Tray", "CloudHoneypot-Watchdog",
-        "CloudHoneypot-Updater", "CloudHoneypot-SilentUpdater", "CloudHoneypot-MemoryRestart",
-        "CloudHoneypotClientBoot", "CloudHoneypotClientLogon",
-        "HoneypotClientGuard", "HoneypotClientAutostart", "Cloud Honeypot Client"
+        "HoneypotClientGuard",
+        "CloudHoneypot-Watchdog",
+        "CloudHoneypot-Background",
+        "CloudHoneypot-Tray",
+        "CloudHoneypot-MemoryRestart",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-SilentUpdater"
     )
     foreach ($n in $names) {
         schtasks /end /tn $n 2>$null | Out-Null
         schtasks /change /tn $n /disable 2>$null | Out-Null
     }
-    Get-ScheduledTask -ErrorAction SilentlyContinue |
-        Where-Object { $_.TaskName -like "CloudHoneypot*" -or $_.TaskName -like "HoneypotClient*" } |
-        ForEach-Object {
-            schtasks /end /tn $_.TaskName 2>$null | Out-Null
-            schtasks /change /tn $_.TaskName /disable 2>$null | Out-Null
-        }
 }
 
 function Send-QuitCommand {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect("127.0.0.1", 58632, $null, $null)
-        $ok = $iar.AsyncWaitHandle.WaitOne(1000)
+        $ok = $iar.AsyncWaitHandle.WaitOne(200)
         if ($ok -and $client.Connected) {
             $stream = $client.GetStream()
             $bytes = [Text.Encoding]::ASCII.GetBytes("QUIT`n")
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush()
-            Start-Sleep -Milliseconds 400
         }
         $client.Close()
     } catch {}
@@ -141,11 +138,9 @@ public class HpTokUp {
 }
 
 function Get-HoneypotPids {
-    $pids = @()
-    Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.Id }
-    Get-CimInstance Win32_Process -Filter "Name='honeypot-client.exe'" -ErrorAction SilentlyContinue |
-        ForEach-Object { if ($pids -notcontains $_.ProcessId) { $pids += $_.ProcessId } }
-    return $pids
+    $list = @()
+    Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | ForEach-Object { $list += $_.Id }
+    return $list
 }
 
 function Stop-HoneypotProcesses {
@@ -163,19 +158,19 @@ public class HpKillUp {
 "@
     try { Add-Type -TypeDefinition $kdef -ErrorAction Stop | Out-Null } catch {}
 
+    try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
     $pids = Get-HoneypotPids
-    foreach ($pid in $pids) {
+    foreach ($procId in $pids) {
         try {
-            $h = [HpKillUp]::OpenProcess(0x1F0FFF, $false, [int]$pid)
+            $h = [HpKillUp]::OpenProcess(0x1F0FFF, $false, [int]$procId)
             if ($h -ne [IntPtr]::Zero) {
                 [void][HpKillUp]::TerminateProcess($h, 1)
                 [void][HpKillUp]::CloseHandle($h)
             }
         } catch {}
-        try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
-        try { & taskkill.exe /F /T /PID $pid 2>$null | Out-Null } catch {}
+        try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+        try { & taskkill.exe /F /T /PID $procId 2>$null | Out-Null } catch {}
     }
-    try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
 }
 
 function Wait-ProcessesGone([int]$TimeoutSec) {
@@ -183,7 +178,7 @@ function Wait-ProcessesGone([int]$TimeoutSec) {
     while ((Get-Date) -lt $deadline) {
         $left = @(Get-HoneypotPids)
         if ($left.Count -eq 0) { return $true }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 200
     }
     return (@(Get-HoneypotPids).Count -eq 0)
 }
@@ -197,14 +192,14 @@ function Wait-CallerExit([int]$PidToWait, [int]$TimeoutSec) {
             Write-UpLog "Caller PID $PidToWait exited."
             return
         }
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 200
     }
     Write-UpLog "Caller PID $PidToWait still running after grace - will force-kill."
 }
 
-# ── Main ──────────────────────────────────────────────────────────
+# -- Main --
 Write-UpLog "=== update-and-install start ==="
-Write-UpLog "Installer=$InstallerPath Silent=$Silent ShowGui=$ShowGuiAfter ExpectExitPid=$ExpectExitPid"
+Write-UpLog "Installer=$InstallerPath Silent=$Silent ShowGui=$ShowGuiAfter ExpectExitPid=$ExpectExitPid Grace=$GraceWaitSec"
 
 if (-not (Test-Path -LiteralPath $InstallerPath)) {
     Write-UpLog "ERROR: Installer not found: $InstallerPath"
@@ -218,8 +213,6 @@ Stop-HoneypotTasks
 
 Write-UpLog "Sending QUIT to control port..."
 Send-QuitCommand
-Start-Sleep -Milliseconds 800
-Send-QuitCommand
 
 Wait-CallerExit -PidToWait $ExpectExitPid -TimeoutSec $GraceWaitSec
 
@@ -230,20 +223,20 @@ do {
     $round++
     Write-UpLog "Kill round $round..."
     Stop-HoneypotProcesses
-    Start-Sleep -Milliseconds 400
     $left = @(Get-HoneypotPids)
-} while ($left.Count -gt 0 -and $round -lt $KillRounds)
+    if ($left.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 100
+} while ($round -lt $KillRounds)
 
-if (-not (Wait-ProcessesGone -TimeoutSec 8)) {
+if (-not (Wait-ProcessesGone -TimeoutSec 3)) {
     $still = @(Get-HoneypotPids)
     Write-UpLog "ERROR: honeypot-client still running (PIDs=$($still -join ',')). Aborting install to avoid corrupting onefile EXE."
     Clear-UpdateLock
     exit 3
 }
 
-# Extra settle time so Windows releases file locks on Program Files exe
-Write-UpLog "Processes gone - settling 3s before installer..."
-Start-Sleep -Seconds 3
+Write-UpLog "Processes gone - settling 0.8s before installer..."
+Start-Sleep -Milliseconds 800
 
 $argList = @()
 if ($Silent) {
@@ -252,6 +245,7 @@ if ($Silent) {
 
 Write-UpLog "Starting installer (wait)..."
 try {
+    # Interactive: show NSIS UI. Silent: /S args above.
     $p = Start-Process -FilePath $InstallerPath -ArgumentList $argList -PassThru -Wait
     $code = $p.ExitCode
     Write-UpLog "Installer exit code: $code"
@@ -266,7 +260,6 @@ if ($InstallDir -eq "") {
 }
 $exe = Join-Path $InstallDir "honeypot-client.exe"
 if (-not (Test-Path -LiteralPath $exe)) {
-    # Fallback alternate folder names
     $alt = Join-Path ${env:ProgramFiles} "YesNext\CloudHoneypotClient\honeypot-client.exe"
     if (Test-Path -LiteralPath $alt) { $exe = $alt; $InstallDir = Split-Path $alt -Parent }
 }
@@ -285,7 +278,6 @@ if ($size -lt 1000000) {
     exit 6
 }
 
-# Recreate tasks from new binary (admin)
 Write-UpLog "Creating scheduled tasks..."
 try {
     Start-Process -FilePath $exe -ArgumentList "--create-tasks" -Wait -WindowStyle Hidden

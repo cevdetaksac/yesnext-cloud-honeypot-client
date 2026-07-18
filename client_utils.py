@@ -1966,6 +1966,24 @@ def stage_update_install_helper() -> Optional[str]:
         return src if os.path.isfile(src) else None
 
 
+def _shell_execute_runas(file_path: str, params: str = "", *, show_cmd: int = 0) -> int:
+    """ShellExecuteW runas. Returns >32 on success, 1223 if UAC cancelled, else error code."""
+    try:
+        rc = int(
+            ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                file_path,
+                params or None,
+                None,
+                int(show_cmd),
+            )
+        )
+        return rc
+    except Exception:
+        return 0
+
+
 def launch_safe_update_install(
     installer_path: str,
     *,
@@ -1973,12 +1991,15 @@ def launch_safe_update_install(
     show_gui_after: bool = True,
     expect_exit_pid: Optional[int] = None,
     elevate: bool = True,
+    grace_wait_sec: int = 20,
 ) -> bool:
-    """Start elevated update helper (detached). Caller should then exit gracefully.
+    """Start elevated update helper (detached). Caller should then exit quickly.
+
+    Interactive path uses ShellExecuteW runas so the UAC prompt is visible (hidden
+    CREATE_NO_WINDOW parents often swallow/skip UAC and the installer never starts).
 
     The helper waits for expect_exit_pid, force-kills leftovers, runs the installer,
-    then starts the new app. This prevents overwriting a still-running onefile EXE
-    (which causes Failed to load Python DLL / _MEI errors).
+    then starts the new app.
     """
     import socket
     import subprocess
@@ -1990,16 +2011,17 @@ def launch_safe_update_install(
     if not helper:
         return False
 
+    # Always re-stage helper from package so older ProgramData copies are refreshed
     pid = int(expect_exit_pid if expect_exit_pid is not None else os.getpid())
-    # Already elevated (admin/SYSTEM)? Skip UAC — SilentUpdater runs as SYSTEM.
+    already_admin = False
+    try:
+        already_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        already_admin = False
     if elevate:
-        try:
-            elevate = not bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception:
-            elevate = True
+        elevate = not already_admin
 
     acquire_update_lock("installing")
-    # Stop respawners first; do NOT force-kill self here — helper does that elevated
     prepare_client_for_installer(kill_processes=False)
     try:
         with socket.create_connection(("127.0.0.1", 58632), timeout=0.5) as sock:
@@ -2007,7 +2029,6 @@ def launch_safe_update_install(
     except Exception:
         pass
 
-    # Tiny launcher avoids nested quoting hell for Start-Process -Verb RunAs
     staging = _update_helper_staging_dir()
     launcher = os.path.join(staging, f"run-update-{pid}.ps1")
     flags = []
@@ -2016,43 +2037,88 @@ def launch_safe_update_install(
     if show_gui_after:
         flags.append("-ShowGuiAfter")
     flag_str = " ".join(flags)
+    # Escape single quotes in paths for PowerShell single-quoted strings
+    helper_q = helper.replace("'", "''")
+    installer_q = installer_path.replace("'", "''")
+    grace = max(8, int(grace_wait_sec))
     launcher_body = (
-        f"$ErrorActionPreference = 'SilentlyContinue'\n"
-        f"& '{helper}' -InstallerPath '{installer_path}' "
-        f"-ExpectExitPid {pid} -GraceWaitSec 45 {flag_str}\n"
-        f"exit $LASTEXITCODE\n"
+        "$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"& '{helper_q}' -InstallerPath '{installer_q}' "
+        f"-ExpectExitPid {pid} -GraceWaitSec {grace} -KillRounds 4 {flag_str}\n"
+        "exit $LASTEXITCODE\n"
     )
     try:
-        with open(launcher, "w", encoding="utf-8") as fh:
+        # ASCII-friendly write; BOM-less UTF-8 is fine for this launcher
+        with open(launcher, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(launcher_body)
     except OSError:
         return False
 
     try:
         if elevate:
-            ps = (
-                "Start-Process -FilePath 'powershell.exe' -Verb RunAs "
-                f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{launcher}\"' "
-                "-WindowStyle Hidden"
-            )
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                creationflags=subprocess.CREATE_NO_WINDOW
-                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
-                close_fds=True,
-            )
-        else:
-            subprocess.Popen(
-                [
-                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-File", launcher,
-                ],
-                creationflags=subprocess.CREATE_NO_WINDOW
-                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
-                close_fds=True,
-            )
+            # Interactive: ShellExecute runas from this process (has desktop/GUI affinity)
+            # so UAC is visible. Hidden powershell parents often fail to show UAC.
+            params = f'-NoProfile -ExecutionPolicy Bypass -File "{launcher}"'
+            rc = _shell_execute_runas("powershell.exe", params, show_cmd=0)  # SW_HIDE after consent
+            if rc == 1223:
+                # User cancelled UAC
+                try:
+                    release_update_lock()
+                except Exception:
+                    pass
+                return False
+            if rc <= 32:
+                # Fallback: Start-Process -Verb RunAs (visible)
+                ps = (
+                    "Start-Process -FilePath 'powershell.exe' -Verb RunAs "
+                    f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{launcher}\"' "
+                    "-Wait:$false"
+                )
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+                    close_fds=True,
+                )
+            return True
+
+        # Already admin / silent SYSTEM path
+        subprocess.Popen(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", launcher,
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW
+            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        try:
+            release_update_lock()
+        except Exception:
+            pass
+        return False
+
+
+def launch_installer_elevated_fallback(installer_path: str) -> bool:
+    """Last resort: open NSIS installer with UAC (user must close app manually if needed)."""
+    if not installer_path or not os.path.isfile(installer_path):
+        return False
+    try:
+        rc = _shell_execute_runas(installer_path, "", show_cmd=1)  # SW_SHOWNORMAL
+        if rc == 1223:
+            return False
+        if rc > 32:
+            return True
+        subprocess.Popen(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-Command",
+                f"Start-Process -FilePath '{installer_path.replace(chr(39), chr(39)+chr(39))}' -Verb RunAs",
+            ],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+        )
         return True
     except Exception:
         return False

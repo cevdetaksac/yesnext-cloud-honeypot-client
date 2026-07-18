@@ -39,7 +39,9 @@ exe = EXE(
     strip=False,
     upx=False,  # UPX disabled to prevent python312.dll issues
     upx_exclude=[],
-    runtime_tmpdir=None,
+    # NEVER unpack under C:\WINDOWS\TEMP — LoadLibrary Access denied / AV / execute-from-TEMP policies
+    # break python312.dll for SYSTEM daemon + Admin tray. ProgramData is writable+executable.
+    runtime_tmpdir='%ProgramData%\\YesNext\\CloudHoneypotClient\\runtime',
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

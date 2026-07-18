@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 5
-!define VERSIONBUILD 12
+!define VERSIONBUILD 13
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -382,6 +382,13 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
     File /oname=scripts\memory_restart.ps1 "memory_restart.ps1"
     !insertmacro LOG "[FILES] Application files installed."
+
+    ; PyInstaller onefile runtime unpack dir (NOT C:\WINDOWS\TEMP — Access denied / AV)
+    ExpandEnvStrings $R8 "%ProgramData%\YesNext\CloudHoneypotClient"
+    CreateDirectory "$R8"
+    CreateDirectory "$R8\runtime"
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath ''$R8'' -Force -ErrorAction SilentlyContinue"'
+    !insertmacro LOG "[FILES] ProgramData runtime dir ready for _MEI unpack"
 
     ; =================================================================
     ; PHASE 3: POST-INSTALLATION CONFIGURATION

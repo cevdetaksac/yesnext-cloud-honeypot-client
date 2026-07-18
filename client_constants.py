@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.12"  # Fix: motor_ok STATUS; GUI never steals :58632; guarantee commands/pending
+VERSION = "4.5.13"  # PyInstaller unpack to ProgramData (fix TEMP _MEI Access denied)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

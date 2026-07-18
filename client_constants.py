@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.33"  # Immutable machine token in ProgramData (no SYSTEM/user split)
+VERSION = "4.4.34"  # Fix post-install GUI: SHOW existing / force-kill singleton steal
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

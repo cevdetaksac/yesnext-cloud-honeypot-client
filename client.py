@@ -1093,19 +1093,21 @@ class CloudHoneypotClient:
         """Handle control server connections for single instance enforcement"""
         MAX_CMD_LEN = 256  # Prevent malicious clients from sending unbounded data
         while True:
+            conn = None
             try:
                 conn, _ = sock.accept()
                 conn.settimeout(2.0)
-                
+
                 # Buffered read with size limit (replaces byte-by-byte recv(1))
                 buf = conn.recv(MAX_CMD_LEN)
                 if not buf:
                     continue
-                
+
                 # Extract first line (commands are newline-terminated)
                 line = buf.split(b"\n", 1)[0]
                 cmd = line.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW" and self.show_cb:
+                    log("[CTRL] SHOW received — bringing GUI to front")
                     self._gui_safe(self.show_cb)
                 elif cmd in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
                     # Installer / updater graceful exit — bypasses DACL self-protection
@@ -1119,14 +1121,19 @@ class CloudHoneypotClient:
                         target=lambda: (time.sleep(0.2), self.graceful_exit(0)),
                         daemon=True,
                     ).start()
-                        
+
             except Exception as e:
-                log(f"Control server loop error: {e}")
+                # Avoid log storms when socket is half-closed during shutdown
+                msg = str(e)
+                if "10038" not in msg and "10004" not in msg:
+                    log(f"Control server loop error: {e}")
+                time.sleep(0.05)
             finally:
-                try: 
-                    conn.close()
-                except Exception as e: 
-                    log(f"Control server conn.close() failed: {e}")
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
     def start_single_instance_server(self):
         """Start single instance enforcement server"""
@@ -2366,9 +2373,20 @@ if __name__ == "__main__":
     log(f"Process PID: {os.getpid()}")
     log(f"Command line: {' '.join(sys.argv)}")
     
-    # Singleton: tray must NEVER steal/kill a visible GUI; --show-gui may take over
+    # Singleton: tray must NEVER steal/kill a visible GUI; --show-gui prefers SHOW then force-takeover
     want_tray = getattr(args, "mode", None) == "tray"
     want_show_gui = bool(getattr(args, "show_gui", False))
+
+    # If another instance is alive, --show-gui / default GUI should raise IT instead of dying with exit 2
+    if (want_show_gui or operation_mode == GUI_MODE) and not want_tray:
+        try:
+            from client_instance import mutex_already_held, request_show_existing
+            if mutex_already_held() and request_show_existing():
+                log("Existing instance raised via SHOW — exiting launcher")
+                sys.exit(0)
+        except Exception as e:
+            log(f"SHOW probe failed: {e}")
+
     if want_tray and not want_show_gui:
         if not check_singleton(operation_mode, allow_steal=False):
             log("Tray launch skipped — another instance already running (GUI kept)")

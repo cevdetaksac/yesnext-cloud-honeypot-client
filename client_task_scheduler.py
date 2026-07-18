@@ -728,7 +728,41 @@ def refresh_watchdog_and_memory_restart(log_func=None) -> bool:
     return ok_all
 
 
-def perform_comprehensive_task_management(log_func=None, app_state=None):
+def _task_refresh_marker_path() -> str:
+    return os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+        "YesNext",
+        "CloudHoneypotClient",
+        "tasks_refresh_version.txt",
+    )
+
+
+def _should_refresh_task_schedules() -> bool:
+    """Only re-create schtasks XML when client VERSION changes (not every GUI start)."""
+    try:
+        from client_constants import VERSION
+        marker = _task_refresh_marker_path()
+        if os.path.isfile(marker):
+            with open(marker, "r", encoding="utf-8") as fh:
+                if fh.read().strip() == str(VERSION):
+                    return False
+        return True
+    except Exception:
+        return True
+
+
+def _mark_task_schedules_refreshed() -> None:
+    try:
+        from client_constants import VERSION
+        path = _task_refresh_marker_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(VERSION))
+    except Exception:
+        pass
+
+
+def perform_comprehensive_task_management(log_func=None, app_state=None, *, light: bool = False):
     """
     Comprehensive Task Scheduler management for application startup
     
@@ -736,6 +770,8 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
     1. Check and install missing tasks (requires admin for installation)
     2. Verify and activate existing tasks (works without admin)
     3. Update application state with task information
+
+    light=True: skip schedule XML refresh + skip per-task enable loop (fast GUI path).
     """
     if log_func is None: log_func = print
     try:
@@ -744,10 +780,13 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
         # Step 1: Check and install missing tasks
         result = ensure_tasks_installed(log_func=log_func, force=False)
 
-        # Keep schedules in sync with this build (15m silent update, 2m watchdog, MR path)
-        if is_admin():
+        # Keep schedules in sync with this build — ONLY when VERSION changed
+        if is_admin() and not light and _should_refresh_task_schedules():
             refresh_silent_updater_schedule(log_func=log_func)
             refresh_watchdog_and_memory_restart(log_func=log_func)
+            _mark_task_schedules_refreshed()
+        elif is_admin() and not light:
+            log_func("[OK] Task schedules already match this version (skip refresh)")
         
         if result.get('success'):
             log_func("✅ All Task Scheduler tasks are registered")
@@ -778,6 +817,11 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
                 log_func("✅ All Task Scheduler tasks are registered")
         
         # Step 2: Verify and enable existing tasks (works without admin)
+        # Skip on light/GUI path — disable→enable loop is multi-second schtasks spam
+        if light:
+            log_func("🎯 Task management (light) complete — activation deferred")
+            return result
+
         log_func("🔧 Checking task activation status...")
         task_names = [
             TASK_NAME_BACKGROUND,

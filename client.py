@@ -161,11 +161,24 @@ class CloudHoneypotClient:
         self.security_manager = SecurityManager()
         self.update_manager = UpdateManager()
         
-        # Initialize security system
+        # Initialize security system (defer heavy exe hash on GUI fast path)
         try:
-            log("Initializing security systems...")
-            self.security_manager.initialize()
-            log("Security systems initialized successfully")
+            _argv0 = " ".join(sys.argv).lower()
+            _defer_sec = any(
+                x in _argv0
+                for x in ("--show-gui", "--mode=gui", "--mode=frontend", "--mode=tray")
+            )
+            if _defer_sec:
+                def _bg_sec():
+                    try:
+                        self.security_manager.initialize()
+                    except Exception as e:
+                        log(f"Security initialization warning: {e}")
+                threading.Thread(target=_bg_sec, daemon=True, name="SecurityInit").start()
+            else:
+                log("Initializing security systems...")
+                self.security_manager.initialize()
+                log("Security systems initialized successfully")
         except Exception as e:
             log(f"Security initialization warning: {e}")
         
@@ -386,7 +399,7 @@ class CloudHoneypotClient:
             if not self.daemon_is_active:
                 try:
                     from client_daemon_ipc import ping
-                    self.daemon_is_active = bool(ping(timeout=0.8))
+                    self.daemon_is_active = bool(ping(timeout=0.25))
                 except Exception:
                     pass
             if self.daemon_is_active and not (
@@ -420,39 +433,59 @@ class CloudHoneypotClient:
         }
         self._last_api_ok = False
         
-        # Check initial RDP state and report to API
-        # RDP modülünü kullanarak başlangıç durumunu kontrol et
+        # Check initial RDP state (registry only — no netstat at startup)
         self.rdp_manager.check_initial_rdp_state()
         
         # Registry'ye current mode'u kaydet (Task Scheduler için)
         self._update_registry_mode()
         
-        # Comprehensive Task Scheduler management
-        from client_task_scheduler import perform_comprehensive_task_management
-        task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
+        # Task Scheduler + lifecycle: NEVER block first paint.
+        # GUI/frontend → background light check; daemon → full sync OK (no window).
+        _argv = " ".join(sys.argv).lower()
+        _gui_fast = any(
+            x in _argv
+            for x in ("--show-gui", "--mode=gui", "--mode=frontend", "--mode=tray", "/show-gui")
+        ) or not ("--mode=daemon" in _argv or "--daemon" in _argv)
 
-        # Lifecycle: flush queued crash/restart events + mark startup
-        try:
-            from client_lifecycle import report_now, flush_queue_to_api
-            report_now(
-                "client_startup",
-                "app_init",
-                {
-                    "mode": getattr(self, "_startup_mode", None) or "unknown",
-                    "tasks_ok": bool((task_result or {}).get("success", True)),
-                },
-                severity="info",
-                api_client=getattr(self, "api_client", None),
-                token=(self.state.get("token") or ""),
-                log_func=log,
-            )
-            flush_queue_to_api(
-                api_client=getattr(self, "api_client", None),
-                token=(self.state.get("token") or ""),
-                log_func=log,
-            )
-        except Exception as e:
-            log(f"[LIFECYCLE] startup report error: {e}")
+        def _bg_tasks_and_lifecycle():
+            try:
+                from client_task_scheduler import perform_comprehensive_task_management
+                perform_comprehensive_task_management(
+                    log_func=log,
+                    app_state=self.state,
+                    light=bool(_gui_fast),
+                )
+            except Exception as e:
+                log(f"Task Scheduler management error (bg): {e}")
+            try:
+                from client_lifecycle import report_now, flush_queue_to_api
+                report_now(
+                    "client_startup",
+                    "app_init",
+                    {
+                        "mode": getattr(self, "_startup_mode", None) or "unknown",
+                        "tasks_ok": True,
+                    },
+                    severity="info",
+                    api_client=getattr(self, "api_client", None),
+                    token=(self.state.get("token") or ""),
+                    log_func=log,
+                )
+                flush_queue_to_api(
+                    api_client=getattr(self, "api_client", None),
+                    token=(self.state.get("token") or ""),
+                    log_func=log,
+                )
+            except Exception as e:
+                log(f"[LIFECYCLE] startup report error: {e}")
+
+        if _gui_fast:
+            threading.Thread(
+                target=_bg_tasks_and_lifecycle, daemon=True, name="StartupTasks"
+            ).start()
+            log("[STARTUP] Task/lifecycle deferred (fast GUI path)")
+        else:
+            _bg_tasks_and_lifecycle()
         
         # Memory management — restart every 8 hours if threshold exceeded
         if MEMORY_RESTART_AVAILABLE:
@@ -2498,7 +2531,7 @@ class CloudHoneypotClient:
         if not getattr(self, "frontend_only", False) and not getattr(self, "daemon_is_active", False):
             try:
                 from client_daemon_ipc import ping
-                if ping(timeout=0.5):
+                if ping(timeout=0.2):
                     self.frontend_only = True
                     self.daemon_is_active = True
                     log("[IPC] Daemon PING in build_gui — frontend_only (skip motor stacks)")
@@ -2542,7 +2575,18 @@ class CloudHoneypotClient:
         # Token'ı yükle
         token = self.token_manager.load_token(self.root, self.t)
         self.state["token"] = token
-        self.state["public_ip"] = ClientHelpers.get_public_ip()
+        # Never block UI on ipify — use cache only, refresh async
+        try:
+            self.state["public_ip"] = ClientHelpers.get_public_ip(allow_network=False) or ""
+            def _async_ip():
+                try:
+                    ip = ClientHelpers.get_public_ip(force_refresh=True, allow_network=True)
+                    self.state["public_ip"] = ip
+                except Exception:
+                    pass
+            threading.Thread(target=_async_ip, daemon=True, name="PublicIP").start()
+        except Exception:
+            self.state["public_ip"] = ""
 
         # row_controls — ModernGUI populates this
         self.row_controls = {}
@@ -2569,7 +2613,7 @@ class CloudHoneypotClient:
         if self.alert_pipeline and self.gui:
             self.alert_pipeline.gui_toast_func = self.gui.show_toast
 
-        # Attack count polling
+        # Attack count polling (async only — never block paint)
         self.poll_attack_count()
         if token:
             self.refresh_attack_count(async_thread=True)
@@ -2582,19 +2626,26 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"auto-update silent error: {e}")
 
-        # Initialize tray system
+        # Tray AFTER first paint opportunity — schedule so deiconify is not blocked
         if TRY_TRAY:
-            self.initialize_tray_manager()
-            # Wire tray notifications to alert pipeline (v4.0)
-            if self.alert_pipeline and hasattr(self, 'tray_manager') and self.tray_manager:
-                self.alert_pipeline.tray_notify_func = self.tray_manager.notify
+            def _start_tray_soon():
+                try:
+                    self.initialize_tray_manager()
+                    if self.alert_pipeline and hasattr(self, 'tray_manager') and self.tray_manager:
+                        self.alert_pipeline.tray_notify_func = self.tray_manager.notify
+                    try:
+                        self.update_tray_icon()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log(f"Tray start error: {e}")
+            try:
+                self.root.after(50, _start_tray_soon)
+            except Exception:
+                _start_tray_soon()
 
-        # Önceki oturumdan kalan servisleri geri yükle
+        # Önceki oturumdan kalan servisleri geri yükle (bg)
         self._restore_saved_services()
-        try:
-            self.update_tray_icon()
-        except Exception as e:
-            log(f"Exception: {e}")
 
         # show_cb is used by single-instance control server to bring window to front
         def _show_window():
@@ -2897,22 +2948,39 @@ if __name__ == "__main__":
             
             # Build GUI in both cases
             log("Building main GUI...")
+            t0 = time.time()
             app.build_gui(minimized=tray_mode)  # Pass tray_mode as minimized flag
-            log("GUI build completed successfully")
+            log(f"GUI build completed successfully in {time.time() - t0:.2f}s")
             
-            # Check RDP protection status and update GUI accordingly
+            # Show window ASAP — RDP/sync in background (was blocking paint)
+            if not tray_mode:
+                if hasattr(app, "root") and app.root:
+                    app._tray_mode.clear()
+                    try:
+                        app.root.deiconify()
+                        app.root.lift()
+                        app.root.focus_force()
+                    except Exception:
+                        pass
+
+            def _post_show_sync():
+                try:
+                    is_protected, current_port = app.rdp_manager.get_rdp_protection_status()
+                    if is_protected:
+                        log(f"🛡️ RDP koruması aktif (port: {current_port})")
+                    app.sync_gui_with_service_state()
+                    app.update_tray_icon()
+                except Exception as e:
+                    log(f"post-show sync: {e}")
             try:
-                is_protected, current_port = app.rdp_manager.get_rdp_protection_status()
-                if is_protected:
-                    log(f"🛡️ RDP koruması aktif (port: {current_port}) - GUI güncelleniyor")
+                if hasattr(app, "root") and app.root:
+                    app.root.after(100, lambda: threading.Thread(
+                        target=_post_show_sync, daemon=True, name="PostShowSync"
+                    ).start())
                 else:
-                    log(f"🔓 RDP koruması pasif (port: {current_port}) - GUI varsayılan durumda")
-                
-                # GUI buton durumunu senkronize et
-                app.sync_gui_with_service_state()
-                app.update_tray_icon()
-            except Exception as e:
-                log(f"❌ RDP durum kontrolü hatası: {e}")
+                    threading.Thread(target=_post_show_sync, daemon=True).start()
+            except Exception:
+                pass
             
             # Start API synchronization in background after GUI is ready
             app.start_delayed_api_sync()

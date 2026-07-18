@@ -476,7 +476,8 @@ class ServiceController:
         return ServiceController.restart('TermService', log_func)
 
     @staticmethod
-    def get_rdp_port(log_func=None) -> Optional[int]:
+    def get_rdp_port(log_func=None, *, probe_listen: bool = False) -> Optional[int]:
+        """Read RDP port from registry. Netstat probe is optional (slow — skip at startup)."""
         if log_func is None:
             log_func = print
             
@@ -489,21 +490,18 @@ class ServiceController:
             val, typ = _wr.QueryValueEx(key, "PortNumber")
             _wr.CloseKey(key)
             if isinstance(val, int):
-                # Port değerini ve Terminal Servis durumunu logla
-                log_func(f"Regedit RDP Port değeri: {val}")
-                svc_status = ServiceController._sc_query_code("TermService")
-                log_func(f"Terminal Servis durumu: {svc_status}")
-                
-                # Port dinleme durumunu kontrol et
-                try:
-                    netstat = SystemUtils.run_cmd(["netstat", "-an"], timeout=5, log_func=log_func)
-                    if netstat and netstat.stdout:
-                        for line in netstat.stdout.splitlines():
-                            if f":{val}" in line:
-                                log_func(f"RDP Port {val} durumu: {line.strip()}")
-                except Exception as e:
-                    log_func(f"RDP Port {val} netstat kontrolü hatası: {e}")
-                
+                if probe_listen:
+                    log_func(f"Regedit RDP Port değeri: {val}")
+                    svc_status = ServiceController._sc_query_code("TermService")
+                    log_func(f"Terminal Servis durumu: {svc_status}")
+                    try:
+                        netstat = SystemUtils.run_cmd(["netstat", "-an"], timeout=5, log_func=log_func)
+                        if netstat and netstat.stdout:
+                            for line in netstat.stdout.splitlines():
+                                if f":{val}" in line:
+                                    log_func(f"RDP Port {val} durumu: {line.strip()}")
+                    except Exception as e:
+                        log_func(f"RDP Port {val} netstat kontrolü hatası: {e}")
                 return val
         except Exception as e:
             log_func(f"get_rdp_port error: {e}")

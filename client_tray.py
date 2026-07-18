@@ -464,20 +464,8 @@ class TrayManager:
                     log(f"tray link account error: {e}")
 
             from client_constants import SERVER_NAME
-            from client_utils import is_account_linked, refresh_account_link_status
-            # Prefer API truth when tray menu is built (short timeout inside)
-            try:
-                tok = ""
-                if hasattr(self.app_instance, "get_token"):
-                    tok = self.app_instance.get_token() or ""
-                tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
-                if tok:
-                    refresh_account_link_status(
-                        tok,
-                        api_client=getattr(self.app_instance, "api_client", None),
-                    )
-            except Exception:
-                pass
+            from client_utils import is_account_linked
+            # Do NOT call refresh_account_link_status here — it blocks tray icon (~API timeout)
             host_label = f"{SERVER_NAME}"[:40]
             account_item = (
                 TrayItem(self.t('btn_account_linked'), lambda: _link_account())

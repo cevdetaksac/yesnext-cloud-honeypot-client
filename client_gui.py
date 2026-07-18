@@ -160,19 +160,21 @@ class ModernGUI:
             root.withdraw()
         else:
             if not self.app._tray_mode.is_set():
-                # PIN set → ask before showing; fail → stay in tray
-                show_ok = True
+                # Paint first — PIN after (was blocking build for many seconds)
+                root.deiconify()
+                def _startup_pin_gate():
+                    try:
+                        from client_gui_lock import GuiLock, require_gui_unlock
+                        if GuiLock.instance().has_pin():
+                            if not require_gui_unlock(self.app, reason="show"):
+                                self.app._tray_mode.set()
+                                root.withdraw()
+                    except Exception as e:
+                        log(f"[GUI] startup PIN gate: {e}")
                 try:
-                    from client_gui_lock import GuiLock, require_gui_unlock
-                    if GuiLock.instance().has_pin():
-                        show_ok = require_gui_unlock(self.app, reason="show")
-                except Exception as e:
-                    log(f"[GUI] startup PIN gate: {e}")
-                if show_ok:
-                    root.deiconify()
-                else:
-                    self.app._tray_mode.set()
-                    root.withdraw()
+                    root.after(150, _startup_pin_gate)
+                except Exception:
+                    _startup_pin_gate()
 
     def _create_sidebar_nav_item(
         self, parent, page_id: str, icon: str, label: str,
@@ -884,19 +886,23 @@ class ModernGUI:
         # Referans dict — refresh'te güncellenir
         self._dash_cards: Dict[str, dict] = {}
 
-        # ── İlk değerleri hesapla ── #
+        # ── İlk değerleri hesapla (sync API yok — çat diye açılış) ── #
         token = self.app.state.get("token", "")
-        total_attacks = self.app.fetch_attack_count_sync(token) if token else 0
+        total_attacks = getattr(self.app, "_last_attack_count", None)
         if total_attacks is None:
             total_attacks = 0
-        # Cache for re-use (info section, dashboard refresh)
-        self.app._last_attack_count = total_attacks
         active_count = len(self.app.service_manager.running_services)
         session_attacks = 0
         try:
             session_attacks = self.app.service_manager.session_stats.get("total_credentials", 0)
         except Exception:
             pass
+        # Async fill — do not block dashboard paint
+        if token:
+            try:
+                self.app.refresh_attack_count(async_thread=True)
+            except Exception:
+                pass
 
         # ── Kartları oluştur (Tab 1 — Anlık Durum) ── #
         cards_data = [

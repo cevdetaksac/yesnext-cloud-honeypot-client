@@ -131,14 +131,10 @@ class ClientHelpers:
         return sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
 
     @staticmethod
-    def get_public_ip(force_refresh: bool = False) -> str:
-        """Get public IP address with caching for performance
-        
-        Args:
-            force_refresh: If True, bypass cache and fetch fresh IP
-            
-        Returns:
-            Public IP address string
+    def get_public_ip(force_refresh: bool = False, *, allow_network: bool = True) -> str:
+        """Get public IP address with caching for performance.
+
+        allow_network=False: never block (GUI startup) — return cache or "".
         """
         global _ip_cache
         current_time = time.time()
@@ -147,6 +143,9 @@ class ClientHelpers:
         if not force_refresh and _ip_cache['ip'] and \
            (current_time - _ip_cache['last_check']) < _ip_cache['cache_duration']:
             return _ip_cache['ip']
+
+        if not allow_network:
+            return _ip_cache['ip'] if _ip_cache['ip'] else ""
         
         # Fetch new IP
         try:

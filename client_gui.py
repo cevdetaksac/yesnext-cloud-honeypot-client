@@ -201,6 +201,9 @@ class ModernGUI:
             root.after(30, lambda: self._ensure_page_built("status"))
             root.after(120, self._lazy_load_status_data)
             root.after(400, self._start_refresh_loop_once)
+            # Prewarm other tabs while idle — so nav clicks are instant
+            root.after(900, lambda: self._prewarm_page("services"))
+            root.after(1600, lambda: self._prewarm_page("threat"))
         except Exception:
             self._ensure_page_built("status")
             self._lazy_load_status_data()
@@ -215,8 +218,52 @@ class ModernGUI:
         except Exception:
             pass
 
+    def _prewarm_page(self, page_id: str):
+        """Build page widgets in idle time without switching away from current tab."""
+        if self._pages_built.get(page_id) or getattr(self, "_pages_building", {}).get(page_id):
+            return
+        # Only prewarm if user is still on status (don't jank mid-interaction)
+        if self._active_page not in ("status", page_id):
+            # Retry later
+            try:
+                if self.root:
+                    self.root.after(800, lambda p=page_id: self._prewarm_page(p))
+            except Exception:
+                pass
+            return
+        self._schedule_page_build(page_id)
+
+    def _schedule_page_build(self, page_id: str):
+        """Non-blocking page build on Tk idle."""
+        if self._pages_built.get(page_id):
+            return
+        if not hasattr(self, "_pages_building"):
+            self._pages_building = {}
+        if self._pages_building.get(page_id):
+            return
+        self._pages_building[page_id] = True
+
+        def _do():
+            try:
+                self._ensure_page_built(page_id)
+            finally:
+                self._pages_building[page_id] = False
+                if page_id == self._active_page and page_id == "threat":
+                    try:
+                        self.root.after(30, self._lazy_load_threat_data)
+                    except Exception:
+                        self._lazy_load_threat_data()
+
+        try:
+            if self.root:
+                self.root.after(0, _do)
+            else:
+                _do()
+        except Exception:
+            _do()
+
     def _ensure_page_built(self, page_id: str) -> bool:
-        """Build page widgets on first visit (skeleton only — data loads separately)."""
+        """Build page widgets (skeleton only — data loads separately)."""
         if self._pages_built.get(page_id):
             return False
         page = self._pages.get(page_id)
@@ -263,15 +310,19 @@ class ModernGUI:
     def _lazy_load_threat_data(self):
         if self._page_data_loaded.get("threat"):
             return
+        if not self._pages_built.get("threat"):
+            return
         self._page_data_loaded["threat"] = True
         try:
-            self._refresh_security_intel()
+            # Heavy scans staggered — never all at once on tab click
             if self.root:
-                self.root.after(200, self._refresh_active_sessions)
-                self.root.after(400, self._refresh_user_accounts)
+                self.root.after(50, self._refresh_security_intel)
+                self.root.after(300, self._refresh_active_sessions)
+                self.root.after(600, self._refresh_user_accounts)
                 if hasattr(self, "_refresh_remote_desktop_status"):
-                    self.root.after(500, self._refresh_remote_desktop_status)
+                    self.root.after(800, self._refresh_remote_desktop_status)
             else:
+                self._refresh_security_intel()
                 self._refresh_active_sessions()
                 self._refresh_user_accounts()
                 if hasattr(self, "_refresh_remote_desktop_status"):
@@ -286,12 +337,10 @@ class ModernGUI:
         self._schedule_dashboard_refresh()
 
     def _show_page(self, page_id: str):
-        """Sidebar navigasyon — lazy build + lazy data on first visit."""
+        """Instant tab switch — never sync-build on click (prewarm / idle build)."""
         self._active_page = page_id
-        # Build widgets if needed (first click)
-        if not self._pages_built.get(page_id):
-            self._ensure_page_built(page_id)
 
+        # Switch visibility first (feels instant)
         for pid, frame in self._pages.items():
             if pid == page_id:
                 frame.pack(fill="both", expand=True, padx=16, pady=16)
@@ -300,7 +349,12 @@ class ModernGUI:
         for pid, nav in self._nav_buttons.items():
             self._set_nav_item_style(nav, pid == page_id)
 
-        # Load page data step-by-step after paint
+        # If widgets missing, schedule build — do NOT block this click
+        if not self._pages_built.get(page_id):
+            self._schedule_page_build(page_id)
+            return
+
+        # Data once (no heavy refresh every revisit)
         if page_id == "status" and not self._page_data_loaded.get("status"):
             try:
                 self.root.after(50, self._lazy_load_status_data)
@@ -311,12 +365,6 @@ class ModernGUI:
                 self.root.after(50, self._lazy_load_threat_data)
             except Exception:
                 self._lazy_load_threat_data()
-        elif page_id == "threat":
-            # Already built — light refresh when revisiting
-            try:
-                self.root.after(80, self._refresh_security_intel)
-            except Exception:
-                pass
 
     def _create_sidebar_nav_item(
         self, parent, page_id: str, icon: str, label: str,
@@ -1065,7 +1113,7 @@ class ModernGUI:
     #  TAB 2: TEHDİT MERKEZİ
     # ═══════════════════════════════════════════════════════════════
     def _build_threat_center(self, parent):
-        """Tab 2 — Tehdit Merkezi: Threat kartlar + güvenlik istihbaratı + feed + response."""
+        """Tab 2 — light core first; heavy panels scheduled in idle chunks."""
         # ── Threat Detection Kartları ── #
         threat_sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
         threat_sec.pack(fill="x", pady=(0, 12))
@@ -1097,35 +1145,55 @@ class ModernGUI:
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
 
-        # ── Live Threat Feed ── #
+        # ── Live Threat Feed + quick actions (still light) ── #
         self._build_threat_feed(threat_sec)
-
-        # ── Quick Response Buttons ── #
         self._build_response_buttons(threat_sec)
 
-        # ── System Security Overview (v4.0.2) ── #
-        self._build_security_overview(parent)
+        # Heavy panels in idle slices so tab switch / prewarm doesn't freeze UI
+        def _chunk1():
+            try:
+                self._build_security_overview(parent)
+                self._build_user_accounts_panel(parent)
+            except Exception as e:
+                log(f"[GUI] threat chunk1: {e}")
+            try:
+                if self.root:
+                    self.root.after(20, _chunk2)
+                else:
+                    _chunk2()
+            except Exception:
+                _chunk2()
 
-        # ── User Accounts (v4.0.2) ── #
-        self._build_user_accounts_panel(parent)
+        def _chunk2():
+            try:
+                self._build_network_shares_panel(parent)
+                self._build_suspicious_services_panel(parent)
+                self._build_command_history(parent)
+            except Exception as e:
+                log(f"[GUI] threat chunk2: {e}")
+            try:
+                if self.root:
+                    self.root.after(20, _chunk3)
+                else:
+                    _chunk3()
+            except Exception:
+                _chunk3()
 
-        # ── Network Shares (v4.0.2) ── #
-        self._build_network_shares_panel(parent)
+        def _chunk3():
+            try:
+                self._build_active_sessions(parent)
+                self._build_remote_desktop_panel(parent)
+                self._build_trend_panel(parent)
+            except Exception as e:
+                log(f"[GUI] threat chunk3: {e}")
 
-        # ── Suspicious Services (v4.0.2) ── #
-        self._build_suspicious_services_panel(parent)
-
-        # ── Command History ── #
-        self._build_command_history(parent)
-
-        # ── Active Sessions ── #
-        self._build_active_sessions(parent)
-
-        # ── Remote Desktop status (dashboard-controlled screen mirror) ── #
-        self._build_remote_desktop_panel(parent)
-
-        # ── Trend Mini-Charts ── #
-        self._build_trend_panel(parent)
+        try:
+            if self.root:
+                self.root.after(10, _chunk1)
+            else:
+                _chunk1()
+        except Exception:
+            _chunk1()
 
     # ═══════════════════════════════════════════════════════════════
     #  SECURITY INTELLIGENCE PANELS (v4.0.2)

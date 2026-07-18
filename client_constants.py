@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.7"  # Lazy page build + staggered data load for snappy first paint
+VERSION = "4.5.8"  # Instant tab switch: prewarm pages, no sync build/refresh on click
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

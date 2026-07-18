@@ -3046,6 +3046,7 @@ class ModernGUI:
 
             streaming = bool(st.get("streaming"))
             ready = bool(st.get("ready", True)) and not st.get("error")
+            transport = (st.get("transport") or "idle").lower()
             stats = st.get("stats") or {}
             fps = st.get("fps", 0)
             frames = stats.get("frames_sent", 0)
@@ -3055,11 +3056,18 @@ class ModernGUI:
             cw, ch = cap.get("w") or 0, cap.get("h") or 0
 
             if streaming:
-                badge = self.t("rd_badge_streaming")
-                color = COLORS.get("orange", "#f59e0b")
-                detail = self.t("rd_detail_streaming").format(
-                    fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
-                )
+                if transport == "websocket" or st.get("websocket"):
+                    badge = self.t("rd_badge_ws")
+                    color = COLORS.get("green", "#10b981")
+                    detail = self.t("rd_detail_streaming_ws").format(
+                        fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
+                    )
+                else:
+                    badge = self.t("rd_badge_http")
+                    color = COLORS.get("orange", "#f59e0b")
+                    detail = self.t("rd_detail_streaming_http").format(
+                        fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
+                    )
             elif ready:
                 badge = self.t("rd_badge_ready")
                 color = COLORS.get("green", "#10b981")

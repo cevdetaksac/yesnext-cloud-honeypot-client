@@ -397,8 +397,8 @@ class RemoteCommandExecutor:
     def _cmd_remote_stream_start(self, params: dict) -> dict:
         rd = self._get_remote_desktop()
         result = rd.start(
-            fps=float(params.get("fps", 2.0) or 2.0),
-            quality=int(params.get("quality", 45) or 45),
+            fps=float(params.get("fps", 6.0) or 6.0),
+            quality=int(params.get("quality", 35) or 35),
             max_width=int(params.get("max_width", 1280) or 1280),
         )
         self._notify_remote_desktop_ui("started")

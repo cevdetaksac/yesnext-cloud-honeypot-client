@@ -670,6 +670,28 @@ class HoneypotAPIClient:
             self.log(f"[API] remote frame upload error: {e}")
             return False
 
+    def fetch_remote_inputs(self, token: str, limit: int = 80) -> list:
+        """GET /api/remote/inputs — HTTP fallback input queue when WebSocket is down."""
+        try:
+            resp = self.api_request(
+                "GET", "remote/inputs",
+                token=token,
+                params={"limit": int(limit)},
+                timeout=5,
+                verbose_logging=False,
+            )
+            if isinstance(resp, list):
+                return resp
+            if isinstance(resp, dict):
+                for key in ("inputs", "events", "items", "data"):
+                    val = resp.get(key)
+                    if isinstance(val, list):
+                        return val
+            return []
+        except Exception as e:
+            self.log(f"[API] remote inputs poll error: {e}")
+            return []
+
     def clear_client_data(self, token: str, scopes: list,
                           reason: str = "user_requested_cleanup") -> Optional[Dict]:
         """POST /api/agent/clear-data — Dashboard/sunucu verilerini temizle.

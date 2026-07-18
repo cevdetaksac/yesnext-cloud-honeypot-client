@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.14"  # Remote desktop status panel in threat UI + cleanup dashboard prompt
+VERSION = "4.4.15"  # Remote desktop: WebSocket primary + HTTP fallback, 5–10 fps
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

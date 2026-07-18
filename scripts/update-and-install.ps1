@@ -1,11 +1,11 @@
-# Cloud Honeypot — safe update/install orchestrator
+# Cloud Honeypot - safe update/install orchestrator
 # Runs elevated (UAC). Survives killing honeypot-client.exe because it is a separate powershell.exe.
 #
 # Flow:
 #   1) Disable/end scheduled tasks (no respawn)
 #   2) Wait for caller PID to exit (graceful QUIT)
 #   3) Force-kill any remaining honeypot-client.exe (SeDebug)
-#   4) Verify processes are gone (abort install if not — avoid corrupting onefile exe)
+#   4) Verify processes are gone (abort install if not - avoid corrupting onefile exe)
 #   5) Run NSIS installer and WAIT
 #   6) Re-create tasks / launch GUI
 #
@@ -199,7 +199,7 @@ function Wait-CallerExit([int]$PidToWait, [int]$TimeoutSec) {
         }
         Start-Sleep -Milliseconds 400
     }
-    Write-UpLog "Caller PID $PidToWait still running after grace — will force-kill."
+    Write-UpLog "Caller PID $PidToWait still running after grace - will force-kill."
 }
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ if (-not (Wait-ProcessesGone -TimeoutSec 8)) {
 }
 
 # Extra settle time so Windows releases file locks on Program Files exe
-Write-UpLog "Processes gone — settling 3s before installer..."
+Write-UpLog "Processes gone - settling 3s before installer..."
 Start-Sleep -Seconds 3
 
 $argList = @()
@@ -280,7 +280,7 @@ if (-not (Test-Path -LiteralPath $exe)) {
 $size = (Get-Item -LiteralPath $exe).Length
 Write-UpLog "Installed exe OK ($size bytes): $exe"
 if ($size -lt 1000000) {
-    Write-UpLog "ERROR: Installed exe suspiciously small — abort launch"
+    Write-UpLog "ERROR: Installed exe suspiciously small - abort launch"
     Clear-UpdateLock
     exit 6
 }
@@ -303,7 +303,7 @@ if ($ShowGuiAfter -or -not $Silent) {
         Write-UpLog "WARN: GUI launch failed: $($_.Exception.Message)"
     }
 } else {
-    Write-UpLog "Silent mode — starting daemon..."
+    Write-UpLog "Silent mode - starting daemon..."
     try {
         Start-Process -FilePath $exe -ArgumentList "--mode=daemon","--silent" -WorkingDirectory $InstallDir -WindowStyle Hidden
     } catch {

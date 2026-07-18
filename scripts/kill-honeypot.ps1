@@ -3,8 +3,10 @@
 # Requires: elevated (admin) for SeDebugPrivilege
 #
 # Usage:
-#   kill-honeypot.ps1           — respects update_in_progress.lock (interactive download)
-#   kill-honeypot.ps1 -Force    — kill even during download (installer after download done)
+#   kill-honeypot.ps1           - respects update_in_progress.lock (interactive download)
+#   kill-honeypot.ps1 -Force    - kill even during download (installer after download done)
+# NOTE: Keep this file ASCII-only. Windows PowerShell may mis-parse UTF-8 em-dashes
+# and break installer PRE-KILL (Unexpected token ')' ).
 
 param(
     [switch]$Force
@@ -25,14 +27,14 @@ function Test-UpdateLockBlocksKill {
             if ($ageSec -gt 7200) { continue }
             $reason = ""
             try { $reason = (Get-Content $lock -TotalCount 1 -ErrorAction SilentlyContinue) } catch {}
-            # interactive / silent download in progress — never kill mid-download
+            # interactive / silent download in progress - never kill mid-download
             if ($reason -match "download|interactive|silent") {
-                Write-Host "[KILL] Abort — update lock present ($reason, age=${ageSec}s). Use -Force only after download."
+                Write-Host ("[KILL] Abort - update lock present (reason={0}, age={1}s). Use -Force only after download." -f $reason, [int]$ageSec)
                 return $true
             }
             # any fresh lock without install reason still blocks casual kills
             if ($reason -notmatch "install|preparing") {
-                Write-Host "[KILL] Abort — update_in_progress.lock present (age=${ageSec}s)"
+                Write-Host ("[KILL] Abort - update_in_progress.lock present (age={0}s)" -f [int]$ageSec)
                 return $true
             }
         } catch {}
@@ -155,17 +157,17 @@ public class HpKill {
     Get-CimInstance Win32_Process -Filter "Name='honeypot-client.exe'" -ErrorAction SilentlyContinue |
         ForEach-Object { if ($pids -notcontains $_.ProcessId) { $pids += $_.ProcessId } }
 
-    foreach ($pid in $pids) {
+    foreach ($procId in $pids) {
         try {
             # PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | SYNCHRONIZE = 0x0015; with SeDebug use ALL_ACCESS
-            $h = [HpKill]::OpenProcess(0x1F0FFF, $false, [int]$pid)
+            $h = [HpKill]::OpenProcess(0x1F0FFF, $false, [int]$procId)
             if ($h -ne [IntPtr]::Zero) {
                 [void][HpKill]::TerminateProcess($h, 1)
                 [void][HpKill]::CloseHandle($h)
             }
         } catch {}
-        try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
-        try { & taskkill.exe /F /T /PID $pid 2>$null | Out-Null } catch {}
+        try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+        try { & taskkill.exe /F /T /PID $procId 2>$null | Out-Null } catch {}
     }
     try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
 }

@@ -360,6 +360,31 @@ class RemoteCommandExecutor:
 
         return {"success": False, "error": f"No handler for: {cmd_type}"}
 
+    def get_remote_desktop_status(self) -> dict:
+        """UI / diagnostics — lazy-init streamer status without starting stream."""
+        try:
+            rd = self._get_remote_desktop()
+            st = rd.get_status()
+            st["ready"] = True
+            st["controlled_by"] = "dashboard"
+            return st
+        except Exception as e:
+            return {
+                "ready": False,
+                "streaming": False,
+                "error": str(e),
+                "controlled_by": "dashboard",
+            }
+
+    def stop_remote_desktop_local(self, reason: str = "local_ui") -> dict:
+        """Emergency stop from tray UI (if stream active)."""
+        try:
+            if not self._remote_desktop:
+                return {"success": True, "message": "not streaming"}
+            return self._remote_desktop.stop(reason=reason)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def _get_remote_desktop(self):
         if self._remote_desktop is None:
             from client_remote_desktop import RemoteDesktopStreamer
@@ -371,15 +396,33 @@ class RemoteCommandExecutor:
 
     def _cmd_remote_stream_start(self, params: dict) -> dict:
         rd = self._get_remote_desktop()
-        return rd.start(
+        result = rd.start(
             fps=float(params.get("fps", 2.0) or 2.0),
             quality=int(params.get("quality", 45) or 45),
             max_width=int(params.get("max_width", 1280) or 1280),
         )
+        self._notify_remote_desktop_ui("started")
+        return result
 
     def _cmd_remote_stream_stop(self, params: dict) -> dict:
         rd = self._get_remote_desktop()
-        return rd.stop(reason="command")
+        result = rd.stop(reason="command")
+        self._notify_remote_desktop_ui("stopped")
+        return result
+
+    def _notify_remote_desktop_ui(self, event: str) -> None:
+        """Best-effort tray toast + GUI refresh hook."""
+        try:
+            cb = getattr(self, "on_remote_desktop_event", None)
+            if callable(cb):
+                cb(event)
+        except Exception:
+            pass
+        try:
+            # Tray balloon if wired via alert pipeline later
+            log(f"[REMOTE-DESKTOP] UI event: {event}")
+        except Exception:
+            pass
 
     def _cmd_remote_input(self, params: dict) -> dict:
         rd = self._get_remote_desktop()

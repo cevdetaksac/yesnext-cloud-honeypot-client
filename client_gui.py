@@ -236,6 +236,8 @@ class ModernGUI:
         if page_id == "threat":
             self._refresh_security_intel()
             self._refresh_active_sessions()
+            if hasattr(self, "_refresh_remote_desktop_status"):
+                self._refresh_remote_desktop_status()
 
     # ═══════════════════════════════════════════════════════════════
     #  BİRLEŞİK ÜST BAR  (Kimlik + Dashboard + Menü — tek satır)
@@ -537,6 +539,9 @@ class ModernGUI:
 
         # ── Active Sessions ── #
         self._build_active_sessions(parent)
+
+        # ── Remote Desktop status (dashboard-controlled screen mirror) ── #
+        self._build_remote_desktop_panel(parent)
 
         # ── Trend Mini-Charts ── #
         self._build_trend_panel(parent)
@@ -2959,6 +2964,152 @@ class ModernGUI:
         # Başlangıçta otomatik yükle
         self._refresh_active_sessions()
 
+    # ─── Remote Desktop Status Panel ─── #
+    def _build_remote_desktop_panel(self, parent):
+        """Dashboard-controlled screen mirror status (ready / streaming / idle)."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+
+        ctk.CTkLabel(
+            hdr, text=self.t("section_remote_desktop"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        self._rd_badge = ctk.CTkLabel(
+            hdr, text=self.t("rd_badge_ready"),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS.get("green", "#10b981"),
+        )
+        self._rd_badge.pack(side="left", padx=(10, 0))
+
+        btn_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        btn_row.pack(side="right")
+
+        ctk.CTkButton(
+            btn_row, text=self.t("rd_btn_stop"), width=70, height=22,
+            font=ctk.CTkFont(size=10),
+            fg_color=COLORS.get("red", "#f43f5e"),
+            hover_color=COLORS.get("red_hover", "#fb7185"),
+            command=self._stop_remote_desktop_local,
+        ).pack(side="right", padx=(6, 0))
+
+        ctk.CTkButton(
+            btn_row, text="🔄", width=28, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS.get("bg", "#1a1b2e"),
+            border_width=1, border_color=COLORS["border"],
+            hover_color="#2a2b3e",
+            command=self._refresh_remote_desktop_status,
+        ).pack(side="right")
+
+        self._rd_info = ctk.CTkLabel(
+            sec,
+            text=self.t("rd_hint"),
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"],
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        )
+        self._rd_info.pack(fill="x", padx=16, pady=(4, 12))
+
+        # Wire event callback + first paint
+        try:
+            rc = getattr(self.app, "remote_commands", None)
+            if rc is not None:
+                rc.on_remote_desktop_event = lambda ev: self._gui_safe(
+                    lambda: self._on_remote_desktop_event(ev)
+                )
+        except Exception:
+            pass
+        self._refresh_remote_desktop_status()
+
+    def _refresh_remote_desktop_status(self):
+        """Update remote-desktop badge + details from CommandExecutor."""
+        def _do():
+            st = {
+                "ready": False,
+                "streaming": False,
+            }
+            try:
+                rc = getattr(self.app, "remote_commands", None)
+                if rc and hasattr(rc, "get_remote_desktop_status"):
+                    st = rc.get_remote_desktop_status() or st
+                elif rc is None:
+                    st = {"ready": False, "streaming": False, "error": "remote_commands_off"}
+            except Exception as e:
+                st = {"ready": False, "streaming": False, "error": str(e)}
+
+            streaming = bool(st.get("streaming"))
+            ready = bool(st.get("ready", True)) and not st.get("error")
+            stats = st.get("stats") or {}
+            fps = st.get("fps", 0)
+            frames = stats.get("frames_sent", 0)
+            failed = stats.get("frames_failed", 0)
+            inputs = stats.get("inputs_applied", 0)
+            cap = st.get("capture") or {}
+            cw, ch = cap.get("w") or 0, cap.get("h") or 0
+
+            if streaming:
+                badge = self.t("rd_badge_streaming")
+                color = COLORS.get("orange", "#f59e0b")
+                detail = self.t("rd_detail_streaming").format(
+                    fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
+                )
+            elif ready:
+                badge = self.t("rd_badge_ready")
+                color = COLORS.get("green", "#10b981")
+                detail = self.t("rd_detail_ready")
+            else:
+                badge = self.t("rd_badge_unavailable")
+                color = COLORS.get("red", "#f43f5e")
+                detail = self.t("rd_detail_unavailable").format(
+                    error=st.get("error") or "—",
+                )
+
+            def _paint():
+                try:
+                    if hasattr(self, "_rd_badge"):
+                        self._rd_badge.configure(text=badge, text_color=color)
+                    if hasattr(self, "_rd_info"):
+                        self._rd_info.configure(text=detail)
+                except Exception:
+                    pass
+
+            self._gui_safe(_paint)
+
+        threading.Thread(target=_do, daemon=True, name="RDStatusRefresh").start()
+
+    def _stop_remote_desktop_local(self):
+        """Local emergency stop if dashboard left the stream running."""
+        rc = getattr(self.app, "remote_commands", None)
+        if not rc or not hasattr(rc, "stop_remote_desktop_local"):
+            messagebox.showinfo(self.t("section_remote_desktop"), self.t("rd_detail_unavailable").format(error="n/a"))
+            return
+        result = rc.stop_remote_desktop_local(reason="local_ui")
+        self._refresh_remote_desktop_status()
+        if result.get("success"):
+            messagebox.showinfo(self.t("section_remote_desktop"), self.t("rd_stopped_local"))
+        else:
+            messagebox.showerror(
+                self.t("section_remote_desktop"),
+                result.get("error") or self.t("rd_stop_fail"),
+            )
+
+    def _on_remote_desktop_event(self, event: str):
+        self._refresh_remote_desktop_status()
+        try:
+            if event == "started":
+                self.show_toast(self.t("section_remote_desktop"), self.t("rd_toast_started"), severity="warning")
+            elif event == "stopped":
+                self.show_toast(self.t("section_remote_desktop"), self.t("rd_toast_stopped"), severity="info")
+        except Exception:
+            pass
+
     def _refresh_active_sessions(self):
         """Fetch and display active sessions via 'query user' + 'query session'."""
         import subprocess
@@ -3125,6 +3276,8 @@ class ModernGUI:
             self._security_tick = 0
             self._refresh_security_intel()
             self._refresh_active_sessions()
+            if hasattr(self, "_refresh_remote_desktop_status"):
+                self._refresh_remote_desktop_status()
 
         try:
             if self.root and self.root.winfo_exists():

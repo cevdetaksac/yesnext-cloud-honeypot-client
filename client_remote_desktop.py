@@ -457,17 +457,32 @@ class RemoteDesktopStreamer:
         if img is None or self._is_mostly_black(img):
             try:
                 from PIL import ImageGrab
-                alt = ImageGrab.grab(all_screens=False)
-                if alt is not None and (
-                    img is None
-                    or self._mean_brightness(alt) > self._mean_brightness(img)
-                ):
-                    img = alt
-                    method = "imagegrab"
+                w0, h0 = self._get_screen_size()
+                candidates = []
+                if w0 > 0 and h0 > 0:
+                    try:
+                        candidates.append(("imagegrab-bbox", ImageGrab.grab(bbox=(0, 0, w0, h0))))
+                    except Exception as e:
+                        log(f"[REMOTE-DESKTOP] imagegrab-bbox failed: {e}")
+                try:
+                    candidates.append(("imagegrab", ImageGrab.grab(all_screens=False)))
+                except Exception as e:
+                    log(f"[REMOTE-DESKTOP] ImageGrab failed: {e}")
+                try:
+                    candidates.append(("imagegrab-all", ImageGrab.grab(all_screens=True)))
+                except Exception as e:
+                    log(f"[REMOTE-DESKTOP] imagegrab-all failed: {e}")
+                for label, alt in candidates:
+                    if alt is None:
+                        continue
+                    if img is None or self._mean_brightness(alt) > self._mean_brightness(img):
+                        img = alt
+                        method = label
             except Exception as e:
-                log(f"[REMOTE-DESKTOP] ImageGrab failed: {e}")
+                log(f"[REMOTE-DESKTOP] ImageGrab variants failed: {e}")
 
         if img is None:
+            log("[REMOTE-DESKTOP] all in-process capture methods returned None")
             return None, 0, 0
 
         if self._is_mostly_black(img):
@@ -478,9 +493,7 @@ class RemoteDesktopStreamer:
                 sid, csid = self._session_ids()
                 log(f"[REMOTE-DESKTOP] ⚠ Nearly-black frame "
                     f"(mean={self._mean_brightness(img):.1f}) "
-                    f"session={sid}/{csid} method={method} — "
-                    "Dashboard will look black. Run client in interactive user session.")
-            # Still send — better than silence — but mark method
+                    f"session={sid}/{csid} method={method}")
             method = method + "+black"
 
         self._capture_method = method
@@ -540,6 +553,7 @@ class RemoteDesktopStreamer:
 
         hdc = user32.GetDC(0)
         if not hdc:
+            log("[REMOTE-DESKTOP] GDI GetDC(0) failed")
             return None
         memdc = gdi32.CreateCompatibleDC(hdc)
         bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
@@ -547,11 +561,30 @@ class RemoteDesktopStreamer:
         # SRCCOPY = 0x00CC0020
         ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc, left, top, 0x00CC0020)
         if not ok:
+            log(f"[REMOTE-DESKTOP] GDI BitBlt failed {width}x{height}")
             gdi32.SelectObject(memdc, old)
             gdi32.DeleteObject(bmp)
             gdi32.DeleteDC(memdc)
             user32.ReleaseDC(0, hdc)
-            return None
+            # Fallback: desktop window DC
+            hwnd = user32.GetDesktopWindow()
+            hdc2 = user32.GetWindowDC(hwnd) if hwnd else None
+            if not hdc2:
+                return None
+            memdc = gdi32.CreateCompatibleDC(hdc2)
+            bmp = gdi32.CreateCompatibleBitmap(hdc2, width, height)
+            old = gdi32.SelectObject(memdc, bmp)
+            ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc2, left, top, 0x00CC0020)
+            if not ok:
+                gdi32.SelectObject(memdc, old)
+                gdi32.DeleteObject(bmp)
+                gdi32.DeleteDC(memdc)
+                user32.ReleaseDC(hwnd, hdc2)
+                return None
+            hdc = hdc2
+            release_hwnd = hwnd
+        else:
+            release_hwnd = 0
 
         class BITMAPINFOHEADER(ctypes.Structure):
             _fields_ = [
@@ -582,9 +615,11 @@ class RemoteDesktopStreamer:
         gdi32.SelectObject(memdc, old)
         gdi32.DeleteObject(bmp)
         gdi32.DeleteDC(memdc)
-        user32.ReleaseDC(0, hdc)
+        user32.ReleaseDC(release_hwnd, hdc)
 
         img = Image.frombuffer("RGB", (width, height), bytes(buf), "raw", "BGRX", 0, 1)
+        br = self._mean_brightness(img.copy())
+        log(f"[REMOTE-DESKTOP] GDI capture {width}x{height} brightness={br:.1f}")
         return img.copy()
 
     @staticmethod
@@ -614,9 +649,10 @@ class RemoteDesktopStreamer:
             return None, None
 
     def _grab_via_user_helper(self) -> Tuple[Optional[bytes], int, int]:
-        """Session 0 / wrong-session: capture once via CreateProcessAsUser in active console.
+        """ONLY Session 0: CreateProcessAsUser into an Active session.
 
-        Spawns: honeypot-client.exe --rd-capture-once <temp.jpg>
+        If already in session>0 (RDP #2 etc.), skip — WTSQueryUserToken → err 1314
+        and targeting console≠RDP is wrong.
         """
         import os
         import sys
@@ -624,10 +660,14 @@ class RemoteDesktopStreamer:
         import subprocess
 
         sid, csid = self._session_ids()
-        target = csid if csid not in (None, 0xFFFFFFFF) else None
-        if target is None or target == 0:
-            # Try to find any active RDP/console session via query
-            target = self._find_active_session_id()
+        if sid is not None and sid > 0:
+            log(f"[REMOTE-DESKTOP] skip token-helper — already in interactive "
+                f"session={sid} (console={csid}); use in-process capture")
+            return None, 0, 0
+
+        target = self._find_active_session_id()
+        if not target:
+            target = csid if csid not in (None, 0, 0xFFFFFFFF) else None
         if not target:
             log("[REMOTE-DESKTOP] No interactive session for helper capture")
             return None, 0, 0
@@ -642,14 +682,10 @@ class RemoteDesktopStreamer:
             pass
 
         exe = sys.executable
-        if getattr(sys, "frozen", False):
-            exe = sys.executable
         cmd = f'"{exe}" --rd-capture-once "{out_path}"'
 
-        # Prefer CreateProcessAsUser when we are SYSTEM/session 0
         launched = self._launch_in_session(int(target), cmd)
         if not launched:
-            # Fallback: same-user subprocess (works if we already have desktop)
             try:
                 subprocess.run(
                     [exe, "--rd-capture-once", out_path],
@@ -661,7 +697,6 @@ class RemoteDesktopStreamer:
                 log(f"[REMOTE-DESKTOP] helper subprocess failed: {e}")
                 return None, 0, 0
 
-        # Wait for file
         deadline = time.time() + PROBE_TIMEOUT_SEC + 2
         while time.time() < deadline:
             if os.path.isfile(out_path) and os.path.getsize(out_path) >= MIN_JPEG_BYTES:
@@ -676,7 +711,6 @@ class RemoteDesktopStreamer:
                 data = fh.read()
             if len(data) < MIN_JPEG_BYTES or data[:2] != b"\xff\xd8":
                 return None, 0, 0
-            # Decode size
             try:
                 from PIL import Image
                 import io as _io

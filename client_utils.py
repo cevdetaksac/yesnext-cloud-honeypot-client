@@ -1364,8 +1364,108 @@ class InstallerUpdateManager:
 
 # ===================== UPDATE UI HELPERS ===================== #
 
-def prepare_client_for_installer() -> None:
-    """Installer öncesi watchdog/self-protect yeniden başlatmayı engelle + QUIT gönder."""
+def _update_lock_path() -> str:
+    """Interactive download lock — silent updater must not kill mid-download."""
+    base = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "YesNext",
+        "CloudHoneypotClient",
+    )
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(base, "update_in_progress.lock")
+
+
+def acquire_update_lock(reason: str = "interactive") -> bool:
+    """Mark that an interactive update download is in progress."""
+    try:
+        path = _update_lock_path()
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"{reason}\n{os.getpid()}\n{time.time()}\n")
+        return True
+    except OSError:
+        return False
+
+
+def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
+    """True if interactive download lock exists and is not stale."""
+    try:
+        path = _update_lock_path()
+        if not os.path.isfile(path):
+            return False
+        age = time.time() - os.path.getmtime(path)
+        if age > max_age_sec:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def pause_competing_updaters() -> None:
+    """Disable SilentUpdater / weekly Updater only — do NOT kill running client."""
+    import subprocess
+
+    for task in ("CloudHoneypot-SilentUpdater", "CloudHoneypot-Updater"):
+        try:
+            subprocess.run(
+                ["schtasks", "/end", "/tn", task],
+                capture_output=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            subprocess.run(
+                ["schtasks", "/change", "/tn", task, "/disable"],
+                capture_output=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+
+def resume_competing_updaters() -> None:
+    """Re-enable SilentUpdater / weekly Updater after interactive download ends without install."""
+    import subprocess
+
+    for task in ("CloudHoneypot-SilentUpdater", "CloudHoneypot-Updater"):
+        try:
+            subprocess.run(
+                ["schtasks", "/change", "/tn", task, "/enable"],
+                capture_output=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+
+def release_update_lock(*, resume_updaters: bool = True) -> None:
+    """Clear interactive update lock."""
+    try:
+        path = _update_lock_path()
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+    if resume_updaters:
+        try:
+            resume_competing_updaters()
+        except Exception:
+            pass
+
+
+def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
+    """Installer öncesi watchdog/self-protect yeniden başlatmayı engelle.
+
+    kill_processes=False: sadece görevleri durdur/devre dışı bırak (indirme sırasında kullanma).
+    kill_processes=True: QUIT + kill-honeypot (yalnızca installer başlatılırken).
+    """
     import socket
     import subprocess
 
@@ -1409,6 +1509,9 @@ def prepare_client_for_installer() -> None:
             )
         except Exception:
             pass
+
+    if not kill_processes:
+        return
 
     # Graceful QUIT via control socket (process exits itself → DACL bypass)
     try:

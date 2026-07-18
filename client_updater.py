@@ -68,15 +68,18 @@ def show_completion_dialog(installer_path: str, version: str):
         button_frame.grid(row=2, column=0, columnspan=2, pady=(5, 0), sticky="ew")
         
         def run_installer():
-            """Installer'ı çalıştır"""
+            """Installer'ı çalıştır — önce başlat, sonra süreçleri kapat."""
             try:
-                from client_utils import prepare_client_for_installer
-                prepare_client_for_installer()
+                from client_utils import prepare_client_for_installer, release_update_lock
 
+                # Installer önce açılsın; QUIT/kill sonrası Start-Process kaçmasın
                 cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
                 subprocess.run(cmd, shell=True, check=False,
                               creationflags=subprocess.CREATE_NO_WINDOW)
-                
+
+                release_update_lock(resume_updaters=False)
+                prepare_client_for_installer(kill_processes=True)
+
                 messagebox.showinfo(
                     "Installer Başlatıldı",
                     "Installer başlatıldı.\n\n"
@@ -89,6 +92,8 @@ def show_completion_dialog(installer_path: str, version: str):
         def open_downloads():
             """Downloads klasörünü aç"""
             try:
+                from client_utils import release_update_lock
+                release_update_lock()
                 os.startfile(os.path.dirname(installer_path))
                 messagebox.showinfo(
                     "Klasör Açıldı", 
@@ -117,6 +122,11 @@ def show_completion_dialog(installer_path: str, version: str):
         
         def close_dialog():
             """Dialog'u kapat"""
+            try:
+                from client_utils import release_update_lock
+                release_update_lock()
+            except Exception:
+                pass
             dialog.destroy()
         
         # Ana installer butonu
@@ -191,7 +201,13 @@ def check_updates_and_prompt(app_instance) -> bool:
     """Check for updates with immediate progress UI; installer starts only on user action."""
     import threading
     import tkinter.messagebox as messagebox
-    from client_utils import create_update_manager, UpdateProgressDialog, prepare_client_for_installer
+    from client_utils import (
+        create_update_manager,
+        UpdateProgressDialog,
+        acquire_update_lock,
+        release_update_lock,
+        pause_competing_updaters,
+    )
 
     root = getattr(app_instance, "root", None)
     gui_safe = getattr(app_instance, "_gui_safe", lambda fn: fn())
@@ -208,6 +224,9 @@ def check_updates_and_prompt(app_instance) -> bool:
         progress_dialog.close_dialog()
 
     def _start_download(latest_ver: str, update_info: dict):
+        # SilentUpdater / kill-honeypot indirme ortasında süreçleri öldürmesin
+        acquire_update_lock("interactive-download")
+        pause_competing_updaters()
         progress_dialog.update_progress(10, f"v{latest_ver} indiriliyor...")
 
         def _download_worker():
@@ -229,6 +248,7 @@ def check_updates_and_prompt(app_instance) -> bool:
                         log("[UPDATER] İndirme tamamlandı — kullanıcı onayı bekleniyor")
                         show_completion_dialog(installer_path, latest_ver)
                     else:
+                        release_update_lock()
                         messagebox.showerror(
                             "Güncelleme",
                             "Installer indirilemedi. Lütfen daha sonra tekrar deneyin.",
@@ -237,6 +257,7 @@ def check_updates_and_prompt(app_instance) -> bool:
                 gui_safe(_on_download_done)
             except Exception as exc:
                 log(f"[UPDATER] İndirme hatası: {exc}")
+                release_update_lock()
                 gui_safe(lambda: (_close_progress(), messagebox.showerror("Güncelleme", str(exc))))
 
         threading.Thread(target=_download_worker, daemon=True, name="UpdateDownload").start()
@@ -278,13 +299,17 @@ def check_updates_and_prompt(app_instance) -> bool:
 def check_updates_and_apply_silent() -> bool:
     """Silent update with installer-based system - SERVER SAFE VERSION"""
     try:
-        from client_utils import create_update_manager
+        from client_utils import create_update_manager, is_update_in_progress
         import tempfile
         import subprocess
         import shutil
         import time
         
         log("[SILENT UPDATE] Starting server-safe silent update process...")
+
+        if is_update_in_progress():
+            log("[SILENT UPDATE] Skipped — interactive update download in progress")
+            return False
         
         # Update manager oluştur
         update_mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
@@ -427,6 +452,13 @@ def update_watchdog_loop():
             # 3600 seconds = 1 hour
             for _ in range(360):
                 time.sleep(10)
+            try:
+                from client_utils import is_update_in_progress
+                if is_update_in_progress():
+                    log("[UPDATE WATCHDOG] Skipped — interactive update in progress")
+                    continue
+            except Exception:
+                pass
             check_updates_and_apply_silent()
         except Exception as e:
             log(f"update_watchdog_loop error: {e}")

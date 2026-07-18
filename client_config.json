@@ -1,7 +1,7 @@
 {
   "application": {
     "name": "Cloud Honeypot Client",
-    "version": "4.4.39",
+    "version": "4.4.40",
     "author": "YesNext Technology"
   },
   "language": {
@@ -109,6 +109,16 @@
   },
   "security": {
     "command_signing": true
+  },
+  "gui_lock": {
+    "enabled": true
+  },
+  "logon_challenge": {
+    "enabled": false,
+    "auto_logoff": true
+  },
+  "self_protection": {
+    "enabled": true
   },
   "notifications": {
     "webhook_url": "",

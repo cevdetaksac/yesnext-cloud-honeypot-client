@@ -147,12 +147,21 @@ class TrayManager:
             update_window_icon(self.app_instance.root, is_active)
     
     def show_window(self):
-        """Show main window from tray (must run on Tk main thread)."""
+        """Show main window from tray (must run on Tk main thread). PIN-gated."""
         def _do_show():
             try:
                 root = getattr(self.app_instance, 'root', None)
                 if not root or not root.winfo_exists():
                     return
+
+                # PIN unlock required before revealing GUI
+                try:
+                    from client_gui_lock import require_gui_unlock
+                    if not require_gui_unlock(self.app_instance, reason="show"):
+                        log("[TRAY] Show blocked — PIN required")
+                        return
+                except Exception as e:
+                    log(f"[TRAY] PIN gate error: {e}")
 
                 self.app_instance._tray_mode.clear()
                 root.deiconify()
@@ -211,6 +220,11 @@ class TrayManager:
                 if root and root.winfo_exists():
                     self.app_instance._tray_mode.set()
                     root.withdraw()
+                    try:
+                        from client_gui_lock import GuiLock
+                        GuiLock.instance().lock_session()
+                    except Exception:
+                        pass
             except Exception as e:
                 log(f"Minimize error: {e}")
 
@@ -223,7 +237,22 @@ class TrayManager:
             log(f"Minimize schedule error: {e}")
                 
     def exit_app(self):
-        """Exit application from tray"""
+        """Exit application from tray — PIN required; stops watchdog (intentional)."""
+        # PIN gate — attacker cannot quit without PIN
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app_instance, reason="exit"):
+                log("[EXIT] Blocked — PIN required to quit")
+                try:
+                    import tkinter.messagebox as messagebox
+                    messagebox.showwarning(self.t("warn"), self.t("pin_exit_denied"))
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            log(f"[EXIT] PIN gate error: {e}")
+            return
+
         # ServiceManager üzerinden aktif servis kontrolü
         active_services_exist = False
         try:

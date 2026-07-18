@@ -76,6 +76,7 @@ class ProcessProtection:
         self.threat_engine = threat_engine
         self.alert_pipeline = alert_pipeline
         self.api_client = api_client
+        self._graceful_shutdown = False
         # Derive api_url from api_client if not provided
         if not api_url and api_client and hasattr(api_client, 'base_url'):
             self.api_url = api_client.base_url
@@ -117,7 +118,13 @@ class ProcessProtection:
             "task_exists": self._check_task_exists(),
             "dacl_protected": self._setup_done,
             "last_breath_armed": self._setup_done,
+            "graceful_shutdown": bool(getattr(self, "_graceful_shutdown", False)),
         }
+
+    def mark_graceful_shutdown(self):
+        """PIN-unlock quit / update / installer — last breath should not treat as kill-during-attack."""
+        self._graceful_shutdown = True
+        log("[SELF-PROTECT] Graceful shutdown marked (update/PIN exit)")
 
     # ── Katman 1: Task Scheduler ──────────────────────────────────
 
@@ -277,6 +284,20 @@ class ProcessProtection:
             → Zamanlanmış görev client'ı yeniden başlatacak
         """
         try:
+            # Intentional exit (PIN quit / updater QUIT) — soft notify only
+            if getattr(self, "_graceful_shutdown", False):
+                self._send_last_breath_alert(
+                    alert_type="CLIENT_GRACEFUL_STOP",
+                    details={
+                        "signal": signum,
+                        "message": (
+                            "Client graceful stop (PIN unlock exit or update). "
+                            "Watchdog intentionally stopped."
+                        ),
+                    },
+                )
+                return
+
             threat_context = self._get_active_threat_context()
 
             if threat_context and threat_context.get("suspicious_ip"):
@@ -336,7 +357,7 @@ class ProcessProtection:
             if recent:
                 top = max(recent, key=lambda t: t.get("threat_score", 0))
                 return {
-                    "suspicious_ip": top.get("source_ip"),
+                    "suspicious_ip": top.get("ip") or top.get("source_ip"),
                     "threat_score": top.get("threat_score"),
                     "threat_type": top.get("threat_type"),
                     "username": top.get("username"),

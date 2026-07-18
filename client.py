@@ -81,6 +81,7 @@ from client_alerts import AlertPipeline
 from client_auto_response import AutoResponse
 from client_remote_commands import RemoteCommandExecutor
 from client_silent_hours import SilentHoursGuard
+from client_logon_challenge import LogonChallengeGuard
 
 # Import Faz 3 modules (v4.0)
 from client_ransomware_shield import RansomwareShield
@@ -236,6 +237,7 @@ class CloudHoneypotClient:
         self.auto_response = None
         self.remote_commands = None
         self.silent_hours_guard = None
+        self.logon_challenge_guard = None
         if ENABLE_THREAT_DETECTION:
             try:
                 self.auto_response = AutoResponse(
@@ -251,18 +253,38 @@ class CloudHoneypotClient:
                     auto_response=self.auto_response,
                     alert_pipeline=self.alert_pipeline,
                 )
+                self.logon_challenge_guard = LogonChallengeGuard(
+                    auto_response=self.auto_response,
+                    alert_pipeline=self.alert_pipeline,
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    threat_engine=self.threat_engine,
+                    event_watcher=self.event_watcher,
+                )
+                # Local default: challenge off until dashboard enables it
+                try:
+                    from client_utils import get_from_config
+                    lc_en = bool(get_from_config("logon_challenge.enabled", False))
+                    self.logon_challenge_guard.update_config({
+                        "enabled": lc_en,
+                        "auto_logoff": bool(get_from_config("logon_challenge.auto_logoff", True)),
+                    })
+                except Exception:
+                    pass
                 # Wire auto_response into alert pipeline for auto-blocking
                 if self.alert_pipeline:
                     self.alert_pipeline.auto_response = self.auto_response
-                # Wire silent hours guard into threat engine
+                # Wire silent hours + logon challenge into threat engine
                 if self.threat_engine:
                     self.threat_engine.silent_hours_guard = self.silent_hours_guard
-                log("✅ Faz 2 modules initialized (AutoResponse, RemoteCmd, SilentHours)")
+                    self.threat_engine.logon_challenge_guard = self.logon_challenge_guard
+                log("✅ Faz 2 modules initialized (AutoResponse, RemoteCmd, SilentHours, LogonChallenge)")
             except Exception as e:
                 log(f"⚠️ Faz 2 init failed: {e}")
                 self.auto_response = None
                 self.remote_commands = None
                 self.silent_hours_guard = None
+                self.logon_challenge_guard = None
 
         # Data cleanup / maintenance (local + firewall + server sync)
         try:
@@ -735,6 +757,18 @@ class CloudHoneypotClient:
                 sh_cfg = config.get("silent_hours")
                 if sh_cfg and self.silent_hours_guard:
                     self.silent_hours_guard.update_config(sh_cfg)
+
+                # Logon challenge (email "This is me")
+                lc_cfg = config.get("logon_challenge")
+                if lc_cfg and getattr(self, "logon_challenge_guard", None):
+                    self.logon_challenge_guard.update_config(lc_cfg)
+                if getattr(self, "logon_challenge_guard", None):
+                    try:
+                        n = self.logon_challenge_guard.sync_approvals_from_api()
+                        if n:
+                            log(f"[CONFIG-SYNC] Logon challenge approvals: {n}")
+                    except Exception:
+                        pass
 
                 # Auto-block thresholds / limits
                 if self.auto_response and hasattr(self.auto_response, "apply_threat_config"):
@@ -1844,6 +1878,11 @@ class CloudHoneypotClient:
         """Merkezi temiz çıkış — tüm kaynakları serbest bırakır"""
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
+            if getattr(self, "process_protection", None):
+                try:
+                    self.process_protection.mark_graceful_shutdown()
+                except Exception:
+                    pass
             if hasattr(self, 'monitoring_manager'): self.monitoring_manager.stop_heartbeat_system()
             # Stop threat detection pipeline (v4.0)
             if getattr(self, 'event_watcher', None):

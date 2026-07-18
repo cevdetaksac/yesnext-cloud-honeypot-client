@@ -620,6 +620,31 @@ class HoneypotAPIClient:
             self.log(f"[API] self-protection event report error: {e}")
             return False
 
+    def report_logon_challenge(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/logon-challenge — Email onaylı logon challenge."""
+        try:
+            payload = {"token": token, **(data or {})}
+            resp = self.api_request("POST", "alerts/logon-challenge", data=payload)
+            if isinstance(resp, dict):
+                return True
+            # Endpoint henüz yoksa urgent zaten ayrı gidiyor — soft-fail
+            return False
+        except Exception as e:
+            self.log(f"[API] logon-challenge report error: {e}")
+            return False
+
+    def fetch_logon_challenge_status(self, token: str) -> Optional[Dict]:
+        """GET /api/agent/logon-challenges — onaylanan IP / challenge listesi."""
+        try:
+            resp = self.api_request(
+                "GET", "agent/logon-challenges",
+                token=token,
+            )
+            return resp if isinstance(resp, dict) else None
+        except Exception as e:
+            self.log(f"[API] logon-challenges fetch error: {e}")
+            return None
+
     # ───────── Faz 4  ─  Threat Summary + Notification Preferences ─────────
     def fetch_threat_summary(self, token: str, period: str = "24h") -> Optional[Dict]:
         """GET /api/threats/summary — Tehdit özeti çek"""

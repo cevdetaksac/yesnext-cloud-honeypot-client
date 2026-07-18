@@ -160,7 +160,19 @@ class ModernGUI:
             root.withdraw()
         else:
             if not self.app._tray_mode.is_set():
-                root.deiconify()
+                # PIN set → ask before showing; fail → stay in tray
+                show_ok = True
+                try:
+                    from client_gui_lock import GuiLock, require_gui_unlock
+                    if GuiLock.instance().has_pin():
+                        show_ok = require_gui_unlock(self.app, reason="show")
+                except Exception as e:
+                    log(f"[GUI] startup PIN gate: {e}")
+                if show_ok:
+                    root.deiconify()
+                else:
+                    self.app._tray_mode.set()
+                    root.withdraw()
 
     def _create_sidebar_nav_item(
         self, parent, page_id: str, icon: str, label: str,
@@ -2501,6 +2513,12 @@ class ModernGUI:
 
     def _ip_table_block(self, ip: str):
         """IP tablosundan hızlı engelle — firewall + ThreatEngine senkron."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
         auto_response = getattr(self.app, 'auto_response', None)
         threat_engine = getattr(self.app, 'threat_engine', None)
         if not auto_response:
@@ -2532,6 +2550,12 @@ class ModernGUI:
 
     def _ip_table_unblock(self, ip: str):
         """IP tablosundan engeli kaldır — firewall + ThreatEngine senkron."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
         auto_response = getattr(self.app, 'auto_response', None)
         threat_engine = getattr(self.app, 'threat_engine', None)
 
@@ -2548,6 +2572,12 @@ class ModernGUI:
 
     def _ip_table_whitelist(self, ip: str):
         """IP tablosundan güvenli listeye ekle — engeli kaldır + whitelist senkron."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
         threat_engine = getattr(self.app, 'threat_engine', None)
         auto_response = getattr(self.app, 'auto_response', None)
 
@@ -2571,6 +2601,12 @@ class ModernGUI:
 
     def _ip_table_remove_whitelist(self, ip: str):
         """IP'yi güvenli listeden çıkar."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
         threat_engine = getattr(self.app, 'threat_engine', None)
         auto_response = getattr(self.app, 'auto_response', None)
 
@@ -4323,6 +4359,14 @@ class ModernGUI:
     # ─── Servis Toggle ─── #
     def _toggle_service(self, port, service, btn, card, status_lbl, status_dot):
         """Tek bir servisi başlat/durdur — iş mantığı client.py'de."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception as e:
+            log(f"[GUI] PIN service gate: {e}")
+            return
+
         svc_upper = str(service).upper()
         is_rdp = svc_upper == "RDP"
 
@@ -4425,6 +4469,15 @@ class ModernGUI:
 
     def _show_popup_menu(self, anchor_widget, menu_type: str):
         """CTkToplevel popup menü — dark mode uyumlu."""
+        if menu_type == "settings":
+            try:
+                from client_gui_lock import require_gui_unlock
+                if not require_gui_unlock(self.app, reason="settings"):
+                    return
+            except Exception as e:
+                log(f"[GUI] PIN settings gate: {e}")
+                return
+
         # Zaten açıksa kapat (toggle davranışı)
         if getattr(self, "_active_popup", None) is not None:
             self._close_popup()
@@ -4471,6 +4524,9 @@ class ModernGUI:
             items += [
                 (f"📋  {self.t('menu_copy_token')}", _run_and_close(
                     lambda: self._copy_token_with_hint(self.app.state.get("token", "")))),
+                (None, None),  # separator
+                (f"🔐  {self.t('menu_pin_set')}", _run_and_close(self._pin_set_or_change)),
+                (f"🔓  {self.t('menu_pin_clear')}", _run_and_close(self._pin_clear)),
                 (None, None),  # separator
                 (f"🇹🇷  {self.t('menu_lang_tr')}", _run_and_close(lambda: self._set_lang("tr"))),
                 (f"🇬🇧  {self.t('menu_lang_en')}", _run_and_close(lambda: self._set_lang("en"))),
@@ -4551,6 +4607,62 @@ class ModernGUI:
             log("[GUI] GUI rebuilt successfully (hot-reload)")
         except Exception as e:
             log(f"[GUI] Rebuild error: {e}")
+
+    def _pin_set_or_change(self):
+        """PIN oluştur veya değiştir."""
+        from client_gui_lock import GuiLock, prompt_pin_dialog, require_gui_unlock
+        lock = GuiLock.instance()
+        if lock.has_pin():
+            if not require_gui_unlock(self.app, reason="settings"):
+                return
+            old = prompt_pin_dialog(
+                self.root, self.t("pin_title"), self.t("pin_unlock_prompt"), confirm=False,
+            )
+            if not old:
+                return
+            ok, err = lock.verify_pin(old, unlock_on_success=False)
+            if not ok:
+                messagebox.showerror(self.t("pin_title"), self.t("pin_wrong"))
+                return
+            new = prompt_pin_dialog(
+                self.root, self.t("pin_set_title"), self.t("pin_set_prompt"), confirm=True,
+            )
+            if not new:
+                return
+            ok, err = lock.set_pin(new)
+            if ok:
+                messagebox.showinfo(self.t("pin_title"), self.t("pin_saved"))
+            else:
+                messagebox.showerror(self.t("pin_title"), f"{self.t('pin_wrong')} ({err})")
+        else:
+            new = prompt_pin_dialog(
+                self.root, self.t("pin_set_title"), self.t("pin_set_prompt"), confirm=True,
+            )
+            if not new:
+                return
+            ok, err = lock.set_pin(new)
+            if ok:
+                messagebox.showinfo(self.t("pin_title"), self.t("pin_saved"))
+            else:
+                messagebox.showerror(self.t("pin_title"), str(err))
+
+    def _pin_clear(self):
+        """PIN kaldır (mevcut PIN gerekli)."""
+        from client_gui_lock import GuiLock, prompt_pin_dialog
+        lock = GuiLock.instance()
+        if not lock.has_pin():
+            messagebox.showinfo(self.t("pin_title"), self.t("pin_not_set"))
+            return
+        pin = prompt_pin_dialog(
+            self.root, self.t("pin_title"), self.t("pin_unlock_prompt"), confirm=False,
+        )
+        if not pin:
+            return
+        ok, err = lock.clear_pin(pin)
+        if ok:
+            messagebox.showinfo(self.t("pin_title"), self.t("pin_cleared"))
+        else:
+            messagebox.showerror(self.t("pin_title"), self.t("pin_wrong"))
 
     def _set_lang(self, code: str):
         try:

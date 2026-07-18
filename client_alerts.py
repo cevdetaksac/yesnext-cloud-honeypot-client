@@ -38,13 +38,15 @@ from client_helpers import log
 
 # ── Constants ─────────────────────────────────────────────────────
 
-# Rate limiting: same threat_type + source_ip → max 1 urgent / 5 min (V4)
+# Rate limiting: same threat_type + source_ip
+# Kritik/başarılı logon: kısa cooldown — anında API, reconnect spam engeli
 ALERT_COOLDOWN = {
-    "critical": 300,     # 5 min
+    "critical": 300,     # 5 min (non-urgent path fallback)
     "high":     300,     # 5 min
     "warning":  900,     # 15 min
     "info":     3600,    # 1 hour
 }
+URGENT_DEDUP_SECONDS = 15  # force_urgent / successful logon
 
 # Batch buffer flush intervals (seconds)
 BATCH_INTERVALS = {
@@ -79,6 +81,25 @@ _THREAT_CATEGORY = {
     "honeypot_connection": "honeypot_connection",
     "ransomware_canary_triggered": "suspicious_process",
     "vss_shadow_deleted": "suspicious_process",
+}
+
+# Successful logon + kritik olaylar → her zaman anında /api/alerts/urgent
+_URGENT_IMMEDIATE_TYPES = {
+    "successful_logon",
+    "successful_logon_rdp",
+    "successful_logon_network",
+    "sql_successful_logon",
+    "rdp_connection_succeeded",
+    "rdp_session_logon",
+    "explicit_credential_logon",
+    "rdp_logon",
+    "audit_log_cleared",
+    "xp_cmdshell_executed",
+    "honeypot_credential",
+    "new_user_created",
+    "user_added_to_admin_group",
+    "failed_then_success",
+    "brute_force_then_access",
 }
 
 # Local threat log config
@@ -183,14 +204,22 @@ class AlertPipeline:
         """
         Main entry point — routes alert based on severity.
         Called by ThreatEngine when threshold is exceeded.
+        Successful logons and other kritik olaylar always go urgent.
         """
         self._stats["alerts_received"] += 1
         severity = alert.get("severity", "info")
+        threat_type = str(alert.get("threat_type", "") or "")
+        corr = str(alert.get("correlation_rule", "") or "")
+        force_urgent = bool(alert.get("force_urgent")) or (
+            threat_type in _URGENT_IMMEDIATE_TYPES
+            or corr in _URGENT_IMMEDIATE_TYPES
+            or severity in ("critical", "high")
+        )
 
-        # Deduplication check
-        dedup_key = f"{alert.get('source_ip', '')}:{alert.get('threat_type', '')}"
+        # Deduplication — urgent/logon: kısa cooldown (anında API)
+        dedup_key = f"{alert.get('source_ip', '')}:{threat_type or corr}"
         now = time.time()
-        cooldown = ALERT_COOLDOWN.get(severity, 300)
+        cooldown = URGENT_DEDUP_SECONDS if force_urgent else ALERT_COOLDOWN.get(severity, 300)
         last_time = self._dedup.get(dedup_key, 0)
         if now - last_time < cooldown:
             self._stats["alerts_deduplicated"] += 1
@@ -202,6 +231,9 @@ class AlertPipeline:
         # Enrich alert with machine info
         alert["machine_name"] = self.machine_name
         alert["client_token"] = self.token_getter()
+        if force_urgent and severity not in ("critical", "high"):
+            alert["severity"] = "high"
+            severity = "high"
 
         # Always log locally
         self._log_threat(alert)
@@ -211,8 +243,8 @@ class AlertPipeline:
         if actions and self.auto_response:
             self._execute_auto_response(actions, alert)
 
-        # Route based on severity
-        if severity in ("critical", "high"):
+        # Route — kritik / başarılı logon → anında API
+        if force_urgent:
             self._send_urgent(alert)
             self._notify_gui(alert)
             self._notify_tray(alert)

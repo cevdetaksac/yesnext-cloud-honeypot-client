@@ -30,6 +30,7 @@ from client_helpers import log
 
 THREAT_SCORES: Dict[str, int] = {
     # Authentication
+    "successful_logon":                75,   # Interactive / generic 4624 — always alert
     "successful_logon_rdp":             85,
     "successful_logon_network":         70,
     "successful_logon_sql":             80,
@@ -141,6 +142,16 @@ LOGON_EVENT_TYPES: Set[str] = {
     "successful_logon", "successful_logon_rdp", "successful_logon_network",
     "sql_successful_logon", "rdp_connection_succeeded", "rdp_session_logon",
     "explicit_credential_logon",
+}
+
+# These must always reach API immediately (POST /api/alerts/urgent)
+URGENT_IMMEDIATE_TYPES: Set[str] = LOGON_EVENT_TYPES | {
+    "audit_log_cleared",
+    "xp_cmdshell_executed",
+    "honeypot_credential",
+    "new_user_created",
+    "user_added_to_admin_group",
+    "failed_then_success",
 }
 
 # Events that qualify as "failed logon"
@@ -323,6 +334,9 @@ class ThreatEngine:
         self._rdp_grace: Dict[str, float] = {}
         self._RDP_GRACE_WINDOW = 300  # 5 dakika grace süresi
 
+        # Urgent alert dedup: "ip:event_type" → last emit (başarılı logon spam engeli)
+        self._urgent_dedup: Dict[str, float] = {}
+
         # Stats
         self._stats = {
             "events_scored": 0,
@@ -425,22 +439,44 @@ class ThreatEngine:
                     or event_type == "honeypot_credential"):
                 self._check_block_rules(ip_key, ctx, event)
 
+            # 2c. Silent hours + logon challenge (successful logons)
+            if event_type in LOGON_EVENT_TYPES:
+                sh = getattr(self, "silent_hours_guard", None)
+                if sh:
+                    try:
+                        sh.check(event)
+                    except Exception as e:
+                        log(f"[THREAT] silent_hours check error: {e}")
+                lc = getattr(self, "logon_challenge_guard", None)
+                if lc:
+                    try:
+                        lc.handle_successful_logon(event)
+                    except Exception as e:
+                        log(f"[THREAT] logon_challenge error: {e}")
+
             # 3. Correlation rules
             correlation_match = self._check_correlations(ip_key, ctx, event)
 
-            # 4. Alert decision
+            # 4. Alert decision — successful logons always emit (urgent path)
+            force_urgent = event_type in URGENT_IMMEDIATE_TYPES
             if correlation_match:
+                corr_sev = correlation_match["severity"]
+                if force_urgent and corr_sev not in ("critical", "high"):
+                    corr_sev = "high"
                 self._emit_alert(
                     event=event,
                     ctx=ctx,
                     score=correlation_match["score"],
-                    severity=correlation_match["severity"],
+                    severity=corr_sev,
                     rule_name=correlation_match["name"],
                     description=correlation_match["description"],
                     auto_response=correlation_match.get("auto_response", []),
+                    force_urgent=force_urgent or corr_sev in ("critical", "high"),
                 )
-            elif score >= SEVERITY_THRESHOLDS["warning"]:
-                severity = self._score_to_severity(ctx.threat_score)
+            elif force_urgent or score >= SEVERITY_THRESHOLDS["warning"]:
+                severity = self._score_to_severity(max(score, ctx.threat_score))
+                if force_urgent and severity not in ("critical", "high"):
+                    severity = "high"
                 # Honeypot credential veya critical skor → anında IP blokla
                 standalone_auto_response = []
                 if event_type == "honeypot_credential" or severity == "critical":
@@ -453,6 +489,7 @@ class ThreatEngine:
                     rule_name="",
                     description=f"{event_type} detected from {ip_key}",
                     auto_response=standalone_auto_response,
+                    force_urgent=force_urgent or severity in ("critical", "high"),
                 )
 
             # Update stats
@@ -802,15 +839,30 @@ class ThreatEngine:
 
     def _emit_alert(self, event: dict, ctx: IPContext, score: float,
                     severity: str, rule_name: str, description: str,
-                    auto_response: List[str]):
+                    auto_response: List[str], force_urgent: bool = False):
         """Build alert dict and forward to alert pipeline callback."""
 
         # Rate limiting — don't spam for same IP/type
+        # Successful logon / kritik olaylar: ayrı kısa cooldown (diğer alert'ler engellemesin)
         now = time.time()
-        cooldowns = {"critical": 60, "high": 300, "warning": 900, "info": 3600}
-        cooldown = cooldowns.get(severity, 300)
-        if now - ctx.last_alert_time < cooldown:
-            return
+        etype = event.get("event_type", "")
+        if force_urgent:
+            udeup_key = f"{ctx.ip}:{etype}"
+            last_u = self._urgent_dedup.get(udeup_key, 0)
+            if now - last_u < 15:
+                return
+            self._urgent_dedup[udeup_key] = now
+            # Cap map size
+            if len(self._urgent_dedup) > 5000:
+                cutoff = now - 3600
+                self._urgent_dedup = {
+                    k: v for k, v in self._urgent_dedup.items() if v >= cutoff
+                }
+        else:
+            cooldowns = {"critical": 60, "high": 300, "warning": 900, "info": 3600}
+            cooldown = cooldowns.get(severity, 300)
+            if now - ctx.last_alert_time < cooldown:
+                return
 
         ctx.last_alert_time = now
         ctx.alerts_sent += 1
@@ -833,6 +885,7 @@ class ThreatEngine:
             "correlation_rule": rule_name,
             "recommended_action": self._recommend_action(severity, rule_name),
             "auto_response": auto_response,
+            "force_urgent": bool(force_urgent),
             "ip_context": {
                 "failed_attempts": ctx.failed_attempts,
                 "successful_logins": ctx.successful_logins,

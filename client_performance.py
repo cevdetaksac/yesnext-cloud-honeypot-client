@@ -428,6 +428,9 @@ class FalsePositiveTuner:
                 if self._ip_max_scores.get(ip, 0) > FP_SCORE_ADJUSTMENTS.get("rdp_session_reconnect", 0.5)
                 and count < AUTO_WHITELIST_MIN_EVENTS
             ]
+            for ip in stale_ips:
+                self._ip_event_counts.pop(ip, None)
+                self._ip_max_scores.pop(ip, None)
             # Limit tracked IPs to 5000
             if len(self._ip_event_counts) > 5000:
                 # Keep only the most active IPs
@@ -442,6 +445,8 @@ class FalsePositiveTuner:
                     del self._ip_event_counts[ip]
                     self._ip_max_scores.pop(ip, None)
                 log(f"🔰 FP tuner: pruned {len(remove)} tracked IPs (was >5000)")
+            elif stale_ips:
+                log(f"🔰 FP tuner: removed {len(stale_ips)} stale tracked IPs")
 
     def start(self, interval: int = 3600):
         """Periodic stale-entry cleanup loop."""

@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import socket
+import threading
 import requests
 import tkinter as tk
 from typing import Dict, Optional
@@ -221,3 +222,52 @@ class ClientHelpers:
         except Exception as e:
             log(f"is_daemon_running error: {e}")
             return False
+
+
+# ===================== BOUNDED BACKGROUND TASKS ===================== #
+# Prevents thread explosion from fire-and-forget API reports / retries.
+
+_bg_pool = None
+_bg_sem = None
+_bg_lock = threading.Lock()
+_BG_MAX_WORKERS = 8
+_BG_MAX_PENDING = 64
+
+
+def submit_background(fn, *args, **kwargs) -> bool:
+    """Run fn in a bounded thread pool. Returns False if queue saturated (task dropped)."""
+    import threading as _threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    global _bg_pool, _bg_sem
+    with _bg_lock:
+        if _bg_pool is None:
+            _bg_pool = ThreadPoolExecutor(
+                max_workers=_BG_MAX_WORKERS, thread_name_prefix="HP-BG"
+            )
+            _bg_sem = _threading.Semaphore(_BG_MAX_PENDING)
+
+    if not _bg_sem.acquire(blocking=False):
+        try:
+            log("[BG] background queue full — dropping task")
+        except Exception:
+            pass
+        return False
+
+    def _wrap():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            try:
+                log(f"[BG] background task error: {e}")
+            except Exception:
+                pass
+        finally:
+            _bg_sem.release()
+
+    try:
+        _bg_pool.submit(_wrap)
+        return True
+    except Exception:
+        _bg_sem.release()
+        return False

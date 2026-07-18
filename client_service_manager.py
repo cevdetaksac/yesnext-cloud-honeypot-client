@@ -112,7 +112,7 @@ class ServiceManager:
         # Reconciliation pause flag (RDP transition sırasında)
         self.reconciliation_paused = False
 
-        # Session-level statistics (local — never reset until process restarts)
+        # Session-level statistics (unique_ips capped for months-long uptime)
         self.session_stats = {
             "total_credentials": 0,
             "per_service": {},        # {"SSH": 3, "FTP": 1, ...}
@@ -120,8 +120,10 @@ class ServiceManager:
             "last_attacker_ip": None,
             "last_service": None,
             "unique_ips": set(),
+            "unique_ips_overflow": 0,  # count of IPs dropped after cap
         }
         self._stats_lock = threading.Lock()
+        self._unique_ips_max = 5000
 
         # Shutdown signal
         self._stop_evt = threading.Event()
@@ -133,8 +135,12 @@ class ServiceManager:
 
     def start(self):
         """3 daemon thread'i başlat — non-blocking."""
+        if any(t.is_alive() for t in self._threads):
+            log("[ServiceManager] Zaten çalışıyor — start atlandı")
+            return
         if self._stop_evt.is_set():
             self._stop_evt.clear()
+        self._threads.clear()
 
         threads_spec = [
             ("SvcMgr-BatchReporter", self._batch_reporter_loop),
@@ -303,7 +309,15 @@ class ServiceManager:
             s["last_attack_ts"] = time.time()
             s["last_attacker_ip"] = attacker_ip
             s["last_service"] = svc_upper
-            s["unique_ips"].add(attacker_ip)
+            ips = s["unique_ips"]
+            if attacker_ip not in ips:
+                if len(ips) >= self._unique_ips_max:
+                    # Drop arbitrary half to keep set bounded under scan floods
+                    drop = list(ips)[: len(ips) // 2]
+                    for old in drop:
+                        ips.discard(old)
+                    s["unique_ips_overflow"] = int(s.get("unique_ips_overflow") or 0) + len(drop)
+                ips.add(attacker_ip)
 
         # Feed ThreatEngine — honeypot credential'ları threat skorlamasına girer
         if self._threat_engine:
@@ -317,8 +331,22 @@ class ServiceManager:
                     "port": port,
                     "timestamp": time.time(),
                 })
-            except Exception:
-                pass  # ThreatEngine hatası credential akışını engellemesin
+            except Exception as e:
+                log(f"[ServiceManager] ThreatEngine feed error: {e}")
+
+    def trim_unique_ips(self, max_ips: int = 5000) -> int:
+        """MemoryGuard hook — keep unique_ips set bounded."""
+        with self._stats_lock:
+            ips = self.session_stats.get("unique_ips") or set()
+            if len(ips) <= max_ips:
+                return 0
+            drop = list(ips)[: len(ips) - max_ips]
+            for old in drop:
+                ips.discard(old)
+            self.session_stats["unique_ips_overflow"] = int(
+                self.session_stats.get("unique_ips_overflow") or 0
+            ) + len(drop)
+            return len(drop)
 
     # ==================== BATCH REPORTER THREAD ==================== #
 

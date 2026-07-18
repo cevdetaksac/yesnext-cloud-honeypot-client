@@ -578,6 +578,25 @@ class CloudHoneypotClient:
                             "fp_tuner",
                             lambda: self.fp_tuner.cleanup_stale(1800)
                         )
+                    try:
+                        from client_honeypots import cleanup_honeypot_rate_limiter
+                        self.memory_guard.register_cleanup(
+                            "honeypot_rate_limiter",
+                            cleanup_honeypot_rate_limiter,
+                        )
+                    except Exception:
+                        pass
+                    if getattr(self, 'auto_response', None):
+                        self.memory_guard.register_cleanup(
+                            "auto_response_blocks",
+                            lambda: self.auto_response.trim_blocks(500),
+                        )
+                    sm = getattr(self, 'service_manager', None)
+                    if sm is not None:
+                        self.memory_guard.register_cleanup(
+                            "session_unique_ips",
+                            lambda: sm.trim_unique_ips(5000),
+                        )
                     self.memory_guard.start()
             except Exception as e:
                 log(f"⚠️ MemoryGuard start failed: {e}")

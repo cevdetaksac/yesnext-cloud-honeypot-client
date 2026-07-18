@@ -236,6 +236,7 @@ class AutoResponse:
                     unblock_at=unblock_at,
                     auto_unblock=duration_hours > 0,
                 )
+                self._trim_blocks_locked()
 
             self._block_timestamps.append(now)
             self._stats["blocks_applied"] += 1
@@ -250,6 +251,29 @@ class AutoResponse:
             self._stats["errors"] += 1
             log(f"[AUTO-RESPONSE] ❌ Failed to block: {ip}")
             return False
+
+    def _trim_blocks_locked(self, max_blocks: int = 500) -> int:
+        """Cap in-memory block dict (call with _lock held). Prefer oldest permanent."""
+        if len(self._blocks) <= max_blocks:
+            return 0
+        items = sorted(
+            self._blocks.values(),
+            key=lambda b: (0 if not b.auto_unblock else 1, b.blocked_at),
+        )
+        drop_n = len(self._blocks) - max_blocks
+        removed = 0
+        for rec in items[:drop_n]:
+            self._blocks.pop(rec.ip, None)
+            removed += 1
+        if removed:
+            log(f"[AUTO-RESPONSE] 🧹 trimmed {removed} in-memory blocks "
+                f"(cap={max_blocks})")
+        return removed
+
+    def trim_blocks(self, max_blocks: int = 500) -> int:
+        """MemoryGuard / cleanup hook."""
+        with self._lock:
+            return self._trim_blocks_locked(max_blocks)
 
     def unblock_ip(self, ip: str) -> bool:
         """Remove firewall block for an IP (all known rule-name variants)."""
@@ -602,7 +626,8 @@ class AutoResponse:
             except Exception as e:
                 log(f"[AUTO-RESPONSE] API report error: {e}")
 
-        threading.Thread(target=_send, daemon=True).start()
+        from client_helpers import submit_background
+        submit_background(_send)
 
     def _report_unblock_to_api(self, ip: str):
         """Report unblock — prefer agent/block-removed (cloud ACK)."""
@@ -638,7 +663,8 @@ class AutoResponse:
             except Exception as e:
                 log(f"[AUTO-RESPONSE] API unblock report error: {e}")
 
-        threading.Thread(target=_send, daemon=True).start()
+        from client_helpers import submit_background
+        submit_background(_send)
 
     def _report_block_applied(self, ip: str, rule_name: str):
         """Report block-applied to API (same endpoint as FirewallAgent).
@@ -673,7 +699,8 @@ class AutoResponse:
             except Exception as e:
                 log(f"[AUTO-RESPONSE] block-applied error: {e}")
 
-        threading.Thread(target=_send, daemon=True).start()
+        from client_helpers import submit_background
+        submit_background(_send)
 
     # ── System Command Runner ─────────────────────────────────────
 

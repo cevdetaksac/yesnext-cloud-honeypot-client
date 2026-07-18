@@ -937,17 +937,21 @@ class ThreatEngine:
             for ip in stale_ips:
                 del self._ip_pool[ip]
 
-            # Cap pool size — evict LRU if over 10k entries
+            # Cap pool size — evict LRU if over 10k (including blocked under hard pressure)
             if len(self._ip_pool) > 10000:
                 sorted_ips = sorted(
                     self._ip_pool.items(),
                     key=lambda x: x[1].last_seen
                 )
                 evict_count = len(self._ip_pool) - 8000  # shrink to 8k
-                for ip, ctx in sorted_ips[:evict_count]:
-                    if ip != "local" and not ctx.is_blocked:
-                        del self._ip_pool[ip]
-                evicted = min(evict_count, len(sorted_ips))
+                evicted = 0
+                for ip, ctx in sorted_ips:
+                    if evicted >= evict_count:
+                        break
+                    if ip == "local":
+                        continue
+                    del self._ip_pool[ip]
+                    evicted += 1
                 log(f"[THREAT] 🧹 LRU evicted {evicted} IP contexts (pool was >10k)")
 
             # Cleanup _rule_blocked_ips — remove entries no longer in pool

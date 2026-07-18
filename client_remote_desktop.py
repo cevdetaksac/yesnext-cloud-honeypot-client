@@ -526,7 +526,7 @@ class RemoteDesktopStreamer:
         return jpeg, self._capture_w, self._capture_h
 
     def _grab_gdi(self):
-        """BitBlt full virtual screen → PIL Image (RGB)."""
+        """BitBlt full virtual screen → PIL Image (RGB). Always frees GDI objects."""
         import ctypes
         from ctypes import wintypes
         from PIL import Image
@@ -538,7 +538,6 @@ class RemoteDesktopStreamer:
         SM_YVIRTUALSCREEN = 77
         SM_CXVIRTUALSCREEN = 78
         SM_CYVIRTUALSCREEN = 79
-        # Primary monitor only (matches ImageGrab all_screens=False)
         left = 0
         top = 0
         width = int(user32.GetSystemMetrics(0))
@@ -551,76 +550,100 @@ class RemoteDesktopStreamer:
         if width <= 0 or height <= 0:
             return None
 
-        hdc = user32.GetDC(0)
-        if not hdc:
-            log("[REMOTE-DESKTOP] GDI GetDC(0) failed")
-            return None
-        memdc = gdi32.CreateCompatibleDC(hdc)
-        bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
-        old = gdi32.SelectObject(memdc, bmp)
-        # SRCCOPY = 0x00CC0020
-        ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc, left, top, 0x00CC0020)
-        if not ok:
-            log(f"[REMOTE-DESKTOP] GDI BitBlt failed {width}x{height}")
-            gdi32.SelectObject(memdc, old)
-            gdi32.DeleteObject(bmp)
-            gdi32.DeleteDC(memdc)
-            user32.ReleaseDC(0, hdc)
-            # Fallback: desktop window DC
-            hwnd = user32.GetDesktopWindow()
-            hdc2 = user32.GetWindowDC(hwnd) if hwnd else None
-            if not hdc2:
+        hdc = None
+        memdc = None
+        bmp = None
+        old = None
+        release_hwnd = 0
+
+        try:
+            hdc = user32.GetDC(0)
+            if not hdc:
+                log("[REMOTE-DESKTOP] GDI GetDC(0) failed")
                 return None
-            memdc = gdi32.CreateCompatibleDC(hdc2)
-            bmp = gdi32.CreateCompatibleBitmap(hdc2, width, height)
+            memdc = gdi32.CreateCompatibleDC(hdc)
+            bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
             old = gdi32.SelectObject(memdc, bmp)
-            ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc2, left, top, 0x00CC0020)
+            ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc, left, top, 0x00CC0020)
             if not ok:
-                gdi32.SelectObject(memdc, old)
-                gdi32.DeleteObject(bmp)
-                gdi32.DeleteDC(memdc)
-                user32.ReleaseDC(hwnd, hdc2)
-                return None
-            hdc = hdc2
-            release_hwnd = hwnd
-        else:
-            release_hwnd = 0
+                log(f"[REMOTE-DESKTOP] GDI BitBlt failed {width}x{height}")
+                # Release primary and try desktop window DC
+                if old:
+                    gdi32.SelectObject(memdc, old)
+                if bmp:
+                    gdi32.DeleteObject(bmp)
+                if memdc:
+                    gdi32.DeleteDC(memdc)
+                user32.ReleaseDC(0, hdc)
+                hdc = memdc = bmp = old = None
 
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_ = [
-                ("biSize", wintypes.DWORD),
-                ("biWidth", wintypes.LONG),
-                ("biHeight", wintypes.LONG),
-                ("biPlanes", wintypes.WORD),
-                ("biBitCount", wintypes.WORD),
-                ("biCompression", wintypes.DWORD),
-                ("biSizeImage", wintypes.DWORD),
-                ("biXPelsPerMeter", wintypes.LONG),
-                ("biYPelsPerMeter", wintypes.LONG),
-                ("biClrUsed", wintypes.DWORD),
-                ("biClrImportant", wintypes.DWORD),
-            ]
+                hwnd = user32.GetDesktopWindow()
+                hdc = user32.GetWindowDC(hwnd) if hwnd else None
+                if not hdc:
+                    return None
+                release_hwnd = hwnd
+                memdc = gdi32.CreateCompatibleDC(hdc)
+                bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
+                old = gdi32.SelectObject(memdc, bmp)
+                ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc, left, top, 0x00CC0020)
+                if not ok:
+                    return None
 
-        bi = BITMAPINFOHEADER()
-        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bi.biWidth = width
-        bi.biHeight = -height  # top-down
-        bi.biPlanes = 1
-        bi.biBitCount = 32
-        bi.biCompression = 0
-        buf_size = width * height * 4
-        buf = (ctypes.c_char * buf_size)()
-        gdi32.GetDIBits(memdc, bmp, 0, height, buf, ctypes.byref(bi), 0)
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
 
-        gdi32.SelectObject(memdc, old)
-        gdi32.DeleteObject(bmp)
-        gdi32.DeleteDC(memdc)
-        user32.ReleaseDC(release_hwnd, hdc)
+            bi = BITMAPINFOHEADER()
+            bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bi.biWidth = width
+            bi.biHeight = -height  # top-down
+            bi.biPlanes = 1
+            bi.biBitCount = 32
+            bi.biCompression = 0
+            buf_size = width * height * 4
+            buf = (ctypes.c_char * buf_size)()
+            gdi32.GetDIBits(memdc, bmp, 0, height, buf, ctypes.byref(bi), 0)
 
-        img = Image.frombuffer("RGB", (width, height), bytes(buf), "raw", "BGRX", 0, 1)
-        br = self._mean_brightness(img.copy())
-        log(f"[REMOTE-DESKTOP] GDI capture {width}x{height} brightness={br:.1f}")
-        return img.copy()
+            img = Image.frombuffer("RGB", (width, height), bytes(buf), "raw", "BGRX", 0, 1)
+            # Avoid double-copy; brightness check on a tiny resize only when probing
+            now = time.time()
+            if now - getattr(self, "_gdi_log_ts", 0) > 30:
+                self._gdi_log_ts = now
+                br = self._mean_brightness(img)
+                log(f"[REMOTE-DESKTOP] GDI capture {width}x{height} brightness={br:.1f}")
+            return img.copy()
+        finally:
+            try:
+                if old is not None and memdc:
+                    gdi32.SelectObject(memdc, old)
+            except Exception:
+                pass
+            try:
+                if bmp:
+                    gdi32.DeleteObject(bmp)
+            except Exception:
+                pass
+            try:
+                if memdc:
+                    gdi32.DeleteDC(memdc)
+            except Exception:
+                pass
+            try:
+                if hdc:
+                    user32.ReleaseDC(release_hwnd, hdc)
+            except Exception:
+                pass
 
     @staticmethod
     def _mean_brightness(img) -> float:

@@ -54,6 +54,8 @@ BATCH_INTERVALS = {
 
 # Max alerts to buffer before force-flush (V4)
 BATCH_MAX_SIZE = 500
+BATCH_HARD_CAP = 1000                 # Never exceed — drop oldest if API down
+DEDUP_MAX_ENTRIES = 20000             # Hard cap for unique IP×threat floods
 BATCH_FLUSH_SECONDS = 120
 URGENT_RETRY_DELAY = 30
 URGENT_MAX_RETRIES = 3
@@ -194,6 +196,8 @@ class AlertPipeline:
             self._stats["alerts_deduplicated"] += 1
             return
         self._dedup[dedup_key] = now
+        if len(self._dedup) > DEDUP_MAX_ENTRIES:
+            self._cleanup_dedup()
 
         # Enrich alert with machine info
         alert["machine_name"] = self.machine_name
@@ -342,12 +346,15 @@ class AlertPipeline:
             }
 
             # Retry queue: up to 3 attempts, 30s apart; handle actions_requested
-            threading.Thread(
-                target=self._send_urgent_with_retry,
-                args=(payload,),
-                daemon=True,
-                name="UrgentAlertRetry",
-            ).start()
+            from client_helpers import submit_background
+            if not submit_background(self._send_urgent_with_retry, payload):
+                # Saturated — try once inline without multi-retry sleep storm
+                try:
+                    self.api_client.api_request(
+                        "POST", "alerts/urgent", data=payload, timeout=10
+                    )
+                except Exception:
+                    pass
             self._send_webhook(alert)
 
         except Exception as e:
@@ -401,6 +408,12 @@ class AlertPipeline:
     def _buffer_for_batch(self, alert: dict):
         """Add alert to batch buffer for periodic sending."""
         with self._batch_lock:
+            if len(self._batch_buffer) >= BATCH_HARD_CAP:
+                # API down / flush failing — drop oldest, keep newest
+                drop = len(self._batch_buffer) - BATCH_MAX_SIZE
+                del self._batch_buffer[:drop]
+                log(f"[ALERTS] 🧹 batch hard-cap: dropped {drop} oldest "
+                    f"(retained {len(self._batch_buffer)})")
             self._batch_buffer.append(alert)
             # Force flush if buffer is full
             if len(self._batch_buffer) >= BATCH_MAX_SIZE:
@@ -414,22 +427,28 @@ class AlertPipeline:
                 time.sleep(BATCH_FLUSH_SECONDS)
                 self._flush_batch()
                 flush_count += 1
-                if flush_count % 15 == 0:  # ~30 min at 120s
-                    self._cleanup_dedup()
+                # Every flush: light dedup trim; deep every ~30 min
+                self._cleanup_dedup(deep=(flush_count % 15 == 0))
             except Exception as e:
                 log(f"[ALERTS] Batch flush error: {e}")
 
-    def _cleanup_dedup(self):
-        """Remove stale dedup entries to prevent unbounded memory growth."""
+    def _cleanup_dedup(self, deep: bool = True):
+        """Remove stale dedup entries; hard-cap size under unique-IP floods."""
         now = time.time()
         max_cooldown = max(ALERT_COOLDOWN.values())  # 3600s
         stale_keys = [
             k for k, ts in self._dedup.items()
-            if now - ts > max_cooldown * 2
+            if now - ts > max_cooldown * (2 if deep else 1)
         ]
-        if stale_keys:
-            for k in stale_keys:
+        for k in stale_keys:
+            del self._dedup[k]
+        if len(self._dedup) > DEDUP_MAX_ENTRIES:
+            ranked = sorted(self._dedup.items(), key=lambda kv: kv[1])
+            drop_n = len(self._dedup) - (DEDUP_MAX_ENTRIES // 2)
+            for k, _ in ranked[:drop_n]:
                 del self._dedup[k]
+            stale_keys = list(stale_keys) + [f"hardcap:{drop_n}"]
+        if stale_keys:
             log(f"[ALERTS] 🧹 Cleaned {len(stale_keys)} stale dedup entries "
                 f"(remaining: {len(self._dedup)})")
 
@@ -528,9 +547,17 @@ class AlertPipeline:
                 self._stats["alerts_sent_batch"] += len(events)
                 log(f"[ALERTS] ✅ batch flushed ({len(events)} events)")
             else:
+                # Cap retained buffer even on soft failure
+                if len(self._batch_buffer) > BATCH_HARD_CAP:
+                    drop = len(self._batch_buffer) - BATCH_MAX_SIZE
+                    del self._batch_buffer[:drop]
                 log(f"[ALERTS] ⚠️ batch flush kept buffer — response: {response}")
         except Exception as e:
             self._stats["errors"] += 1
+            if len(self._batch_buffer) > BATCH_HARD_CAP:
+                drop = len(self._batch_buffer) - BATCH_MAX_SIZE
+                del self._batch_buffer[:drop]
+                log(f"[ALERTS] 🧹 retained buffer trimmed by {drop} after flush error")
             log(f"[ALERTS] ❌ batch flush failed, buffer retained ({len(events_to_send)}): {e}")
 
     # ── Webhook (Slack / Teams / custom) ───────────────────────────

@@ -53,13 +53,19 @@ from client_helpers import log, is_port_in_use
 
 # ===================== RATE LIMITER ===================== #
 
+# Hard caps for months-long uptime under internet scan floods
+_RATE_BUCKET_MAX_KEYS = 10000
+_HONEYPOT_MAX_HANDLERS = 48  # per service — reject when saturated
+
+
 class _RateLimiter:
-    """IP+service bazlı rate limiter — dakikada max N rapor"""
+    """IP+service bazlı rate limiter — dakikada max N rapor; idle key eviction."""
 
     def __init__(self, max_per_min: int = MAX_ATTEMPTS_PER_IP_PER_MIN):
         self._max = max_per_min
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def allow(self, key: str) -> bool:
         now = time.time()
@@ -67,12 +73,52 @@ class _RateLimiter:
             bucket = self._buckets[key]
             # Eski girişleri temizle (60s pencere)
             bucket[:] = [t for t in bucket if now - t < 60]
+            if not bucket and key in self._buckets:
+                # Keep key only if we will append below; prune empties in sweep
+                pass
             if len(bucket) >= self._max:
                 return False
             bucket.append(now)
+            if now - self._last_sweep > 30 or len(self._buckets) > _RATE_BUCKET_MAX_KEYS:
+                self._sweep_locked(now)
             return True
 
+    def _sweep_locked(self, now: float) -> None:
+        """Drop idle keys; hard-cap total keys (call with lock held)."""
+        self._last_sweep = now
+        dead = [
+            k for k, ts in self._buckets.items()
+            if not ts or all(now - t >= 60 for t in ts)
+        ]
+        for k in dead:
+            del self._buckets[k]
+        if len(self._buckets) > _RATE_BUCKET_MAX_KEYS:
+            ranked = sorted(
+                self._buckets.items(),
+                key=lambda kv: max(kv[1]) if kv[1] else 0.0,
+            )
+            drop_n = len(self._buckets) - (_RATE_BUCKET_MAX_KEYS // 2)
+            for k, _ in ranked[:drop_n]:
+                del self._buckets[k]
+
+    def cleanup(self) -> int:
+        """MemoryGuard hook — return number of keys removed."""
+        with self._lock:
+            before = len(self._buckets)
+            self._sweep_locked(time.time())
+            return before - len(self._buckets)
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._buckets)
+
+
 _rate_limiter = _RateLimiter()
+
+
+def cleanup_honeypot_rate_limiter() -> int:
+    """Export for MemoryGuard."""
+    return _rate_limiter.cleanup()
 
 
 # ===================== BASE HONEYPOT ===================== #
@@ -104,6 +150,9 @@ class BaseHoneypot(ABC, threading.Thread):
         self._restart_count = 0
         self.running = False
         self.error: Optional[str] = None
+        # Bound concurrent client handlers (scan floods must not spawn unlimited threads)
+        self._handler_sem = threading.Semaphore(_HONEYPOT_MAX_HANDLERS)
+        self._handlers_rejected = 0
 
     # ---------- public API ----------
 
@@ -180,7 +229,18 @@ class BaseHoneypot(ABC, threading.Thread):
                 log(f"[{self.service_name}] Accept hatası")
                 continue
 
-            # Her bağlantı kendi thread'inde işlenir
+            # Her bağlantı kendi thread'inde işlenir — concurrency capped
+            if not self._handler_sem.acquire(blocking=False):
+                self._handlers_rejected += 1
+                if self._handlers_rejected % 100 == 1:
+                    log(f"[{self.service_name}] handler saturated "
+                        f"(>{_HONEYPOT_MAX_HANDLERS}) — dropping {addr[0]}")
+                try:
+                    client_sock.close()
+                except OSError:
+                    pass
+                continue
+
             t = threading.Thread(
                 target=self._safe_handle,
                 args=(client_sock, addr),
@@ -201,6 +261,10 @@ class BaseHoneypot(ABC, threading.Thread):
             try:
                 client_sock.close()
             except OSError:
+                pass
+            try:
+                self._handler_sem.release()
+            except Exception:
                 pass
 
     # ---------- abstract ----------

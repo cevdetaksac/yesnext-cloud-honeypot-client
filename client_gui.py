@@ -201,9 +201,10 @@ class ModernGUI:
             root.after(30, lambda: self._ensure_page_built("status"))
             root.after(120, self._lazy_load_status_data)
             root.after(400, self._start_refresh_loop_once)
-            # Prewarm other tabs while idle — so nav clicks are instant
-            root.after(900, lambda: self._prewarm_page("services"))
-            root.after(1600, lambda: self._prewarm_page("threat"))
+            # Prewarm delayed — early prewarm competed with Status paint and started IPC timers
+            root.after(8000, lambda: self._prewarm_page("services"))
+            root.after(12000, lambda: self._prewarm_page("threat"))
+            log("[PERF] GUI shell ready; status@30ms data@120ms prewarm@8s/12s")
         except Exception:
             self._ensure_page_built("status")
             self._lazy_load_status_data()
@@ -275,15 +276,18 @@ class ModernGUI:
             if page_id == "status":
                 self._build_dashboard(page)
                 self._build_ip_activity_table(page)
+                self._ensure_pulse_blink()
             elif page_id == "threat":
                 self._build_threat_center(page)
             elif page_id == "services":
                 self._build_services_section(page)
+            else:
+                return False
             self._pages_built[page_id] = True
-            log(f"[GUI] Lazy-built page '{page_id}' in {time.time() - t0:.2f}s")
+            log(f"[PERF] page_build '{page_id}' {(time.time() - t0) * 1000:.0f}ms")
             return True
         except Exception as e:
-            log(f"[GUI] Lazy build failed for {page_id}: {e}")
+            log(f"[PERF] page_build '{page_id}' FAILED {(time.time() - t0) * 1000:.0f}ms: {e}")
             self._pages_built[page_id] = True  # avoid tight retry loop
             return False
 
@@ -338,6 +342,7 @@ class ModernGUI:
 
     def _show_page(self, page_id: str):
         """Instant tab switch — never sync-build on click (prewarm / idle build)."""
+        t0 = time.time()
         self._active_page = page_id
 
         # Switch visibility first (feels instant)
@@ -352,6 +357,7 @@ class ModernGUI:
         # If widgets missing, schedule build — do NOT block this click
         if not self._pages_built.get(page_id):
             self._schedule_page_build(page_id)
+            log(f"[PERF] nav '{page_id}' switch {(time.time() - t0) * 1000:.0f}ms (build scheduled)")
             return
 
         # Data once (no heavy refresh every revisit)
@@ -365,6 +371,7 @@ class ModernGUI:
                 self.root.after(50, self._lazy_load_threat_data)
             except Exception:
                 self._lazy_load_threat_data()
+        log(f"[PERF] nav '{page_id}' switch {(time.time() - t0) * 1000:.0f}ms")
 
     def _create_sidebar_nav_item(
         self, parent, page_id: str, icon: str, label: str,
@@ -987,6 +994,7 @@ class ModernGUI:
         """Koruma durumu badge'ini güncelle.
 
         active: bool (eski API) veya 'full'|'monitoring'|'inactive' mode str.
+        Never triggers IPC — uses cache via get_protection_mode().
         """
         try:
             mode = active
@@ -1012,6 +1020,14 @@ class ModernGUI:
                 )
         except Exception:
             pass
+
+    def _ensure_pulse_blink(self):
+        """Start header pulse once (no IPC — uses cached protection mode)."""
+        if getattr(self, "_pulse_started", False):
+            return
+        self._pulse_started = True
+        self._start_pulse_blink()
+        log("[PERF] pulse blink started (cache-only)")
 
     # ═══════════════════════════════════════════════════════════════
     #  DASHBOARD İSTATİSTİK KARTLARI
@@ -2586,6 +2602,26 @@ class ModernGUI:
             self._ip_table_rows = list(rows)
             filtered = self._filter_ip_rows(rows)
 
+            # Skip full destroy/rebuild when visible data unchanged
+            fp = tuple(
+                (
+                    r.get("ip"),
+                    r.get("status"),
+                    r.get("attempts"),
+                    r.get("service"),
+                    r.get("last_seen"),
+                )
+                for r in filtered[:80]
+            )
+            if (
+                fp == getattr(self, "_ip_table_fp", None)
+                and getattr(self, "_ip_table_frame", None)
+                and self._ip_table_frame.winfo_children()
+            ):
+                return
+            self._ip_table_fp = fp
+
+            t0 = time.time()
             for w in self._ip_table_frame.winfo_children():
                 w.destroy()
 
@@ -2600,7 +2636,9 @@ class ModernGUI:
 
             from datetime import datetime
 
-            for i, r in enumerate(filtered):
+            # Cap visible rows to keep Status tab snappy
+            visible = filtered[:60]
+            for i, r in enumerate(visible):
                 bg = COLORS["bg"] if i % 2 == 0 else COLORS["card"]
                 row_frame = ctk.CTkFrame(
                     self._ip_table_frame, fg_color=bg,
@@ -2718,6 +2756,10 @@ class ModernGUI:
                         text_color=COLORS["text_bright"], corner_radius=3,
                         command=lambda _ip=ip: self._ip_table_whitelist(_ip),
                     ).pack(side="left", padx=2)
+
+            ms = (time.time() - t0) * 1000
+            if ms > 50:
+                log(f"[PERF] ip_table_render {ms:.0f}ms rows={len(visible)}")
 
         except Exception as e:
             log(f"[GUI] IP table render error: {e}")
@@ -4132,6 +4174,7 @@ class ModernGUI:
 
     def _refresh_dashboard(self):
         """Dashboard kartlarının anlık değerlerini güncelle."""
+        t0 = time.time()
         try:
             if not hasattr(self, '_dash_cards') or not self._dash_cards:
                 return
@@ -4296,12 +4339,16 @@ class ModernGUI:
                 except Exception:
                     pass
 
-            # Header badge senkronizasyonu (bait yokken de EventLog izleme aktif olabilir)
+            # Header badge — cache only (IPC poller updates cache off-UI)
             try:
                 mode = self.app.get_protection_mode()
             except Exception:
                 mode = "full" if active_count > 0 else "inactive"
             self.update_header_status(mode)
+
+            ms = (time.time() - t0) * 1000
+            if ms > 80:
+                log(f"[PERF] dashboard_refresh {ms:.0f}ms page={self._active_page}")
 
         except Exception:
             pass
@@ -4311,7 +4358,7 @@ class ModernGUI:
     # callback'lerini bozuyor. Tab isimleri artık sabit.
 
     def _start_pulse_blink(self):
-        """Header pulse dot'u 800ms aralıkla yanıp söndürür."""
+        """Header pulse dot'u 800ms aralıkla yanıp söndürür (cache only — no IPC)."""
         def _blink():
             try:
                 if not self.root or not self.root.winfo_exists():
@@ -4467,14 +4514,13 @@ class ModernGUI:
             is_active = str(service).upper() in running_names
             self._build_service_card(sec, str(port), str(service), is_active)
 
-        # İlk açılışta header durumunu doğru set et (threat izleme bait'ten bağımsız)
+        # İlk açılışta header durumunu cache'ten set et (IPC yok)
         try:
             self.update_header_status(self.app.get_protection_mode())
         except Exception:
             self.update_header_status("full" if running_names else "inactive")
 
-        # Hızlı blink timer başlat (800ms)
-        self._start_pulse_blink()
+        self._ensure_pulse_blink()
 
         # Alt padding
         ctk.CTkFrame(sec, height=8, fg_color="transparent").pack()

@@ -219,12 +219,37 @@ class CloudHoneypotClient:
             rdp_manager=self.rdp_manager,
             token_getter=lambda: self.state.get("token", ""),
         )
+
+        # Early daemon detect BEFORE motor stack (GUI must stay light)
+        self.daemon_is_active = False
+        self.frontend_only = False
+        self._is_daemon_motor = False
+        self._protection_mode_cache = "inactive"
+        self._protection_mode_ts = 0.0
+        self._protection_poller_started = False
+        _argv_join = " ".join(sys.argv)
+        _is_daemon_argv = "--mode=daemon" in _argv_join or "--daemon" in _argv_join
+        if not _is_daemon_argv:
+            try:
+                from client_daemon_ipc import ping
+                _t_ping = time.time()
+                self.daemon_is_active = bool(ping(timeout=0.15))
+                log(
+                    f"[PERF] early_daemon_ping ok={self.daemon_is_active} "
+                    f"{(time.time() - _t_ping) * 1000:.0f}ms"
+                )
+            except Exception:
+                self.daemon_is_active = False
+            if self.daemon_is_active:
+                self.frontend_only = True
+                self._protection_mode_cache = "monitoring"
+                log("[PERF] frontend_only — skipping local threat/Faz motor construction")
         
-        # Initialize Threat Detection Pipeline (v4.0)
+        # Initialize Threat Detection Pipeline (v4.0) — daemon owns this in frontend mode
         self.alert_pipeline = None
         self.threat_engine = None
         self.event_watcher = None
-        if ENABLE_THREAT_DETECTION:
+        if ENABLE_THREAT_DETECTION and not self.frontend_only:
             try:
                 self.alert_pipeline = AlertPipeline(
                     api_client=self.api_client,
@@ -251,7 +276,7 @@ class CloudHoneypotClient:
         self.remote_commands = None
         self.silent_hours_guard = None
         self.logon_challenge_guard = None
-        if ENABLE_THREAT_DETECTION:
+        if ENABLE_THREAT_DETECTION and not self.frontend_only:
             try:
                 self.auto_response = AutoResponse(
                     api_client=self.api_client,
@@ -315,7 +340,7 @@ class CloudHoneypotClient:
         self.ransomware_shield = None
         self.health_monitor = None
         self.process_protection = None
-        if ENABLE_THREAT_DETECTION:
+        if ENABLE_THREAT_DETECTION and not self.frontend_only:
             try:
                 from client_constants import (
                     ENABLE_RANSOMWARE_SHIELD, ENABLE_SELF_PROTECTION,
@@ -353,7 +378,7 @@ class CloudHoneypotClient:
         # Initialize Faz 4 modules (v4.0) — Performance Optimizer, False Positive Tuner
         self.perf_optimizer = None
         self.fp_tuner = None
-        if ENABLE_THREAT_DETECTION:
+        if ENABLE_THREAT_DETECTION and not self.frontend_only:
             try:
                 from client_constants import (
                     ENABLE_PERFORMANCE_OPTIMIZER, ENABLE_FALSE_POSITIVE_TUNER,
@@ -390,25 +415,17 @@ class CloudHoneypotClient:
         else:
             self.heartbeat_path = ""
         
-        # Check if SYSTEM daemon motor is running (GUI becomes frontend-only)
-        self.daemon_is_active = False
-        self.frontend_only = False
-        self._is_daemon_motor = False
-        try:
-            self.daemon_is_active = ClientHelpers.is_daemon_running()
-            if not self.daemon_is_active:
-                try:
-                    from client_daemon_ipc import ping
-                    self.daemon_is_active = bool(ping(timeout=0.25))
-                except Exception:
-                    pass
-            if self.daemon_is_active and not (
-                "--mode=daemon" in " ".join(sys.argv) or "--daemon" in sys.argv
-            ):
-                self.frontend_only = True
-                log("🔄 SYSTEM daemon motor detected — GUI frontend-only (no local threat/RD stack)")
-        except Exception as e:
-            log(f"⚠️ Daemon detection failed: {e}")
+        # Late re-check only if we still think we're a local motor (GUI path)
+        if not self.frontend_only and not _is_daemon_argv:
+            try:
+                from client_daemon_ipc import ping
+                if ping(timeout=0.1):
+                    self.daemon_is_active = True
+                    self.frontend_only = True
+                    self._protection_mode_cache = "monitoring"
+                    log("[PERF] late daemon ping — switching to frontend_only")
+            except Exception as e:
+                log(f"⚠️ Daemon detection failed: {e}")
         
         # Initialize GUI elements
         self.root = None
@@ -1118,9 +1135,13 @@ class CloudHoneypotClient:
                     self._last_tray_state = current_state
                     self.update_tray_icon()
             
-            # Windows Server session check — every 5th cycle (~5 min)
+            # Windows Server session check — every 5th cycle (~5 min), off UI thread
             if self.gui_health['update_count'] % 5 == 0:
-                self.check_windows_session_state()
+                threading.Thread(
+                    target=self.check_windows_session_state,
+                    daemon=True,
+                    name="SessionCheck",
+                ).start()
             
             if self.gui_health['update_count'] > 1000: self.gui_health['update_count'] = 0
                 
@@ -1815,21 +1836,15 @@ class CloudHoneypotClient:
         return ew_ok or te_ok
 
     def get_protection_mode(self) -> str:
-        """'full' | 'monitoring' | 'inactive'"""
+        """'full' | 'monitoring' | 'inactive' — never blocks UI with IPC."""
         if getattr(self, "frontend_only", False):
-            try:
-                from client_daemon_ipc import get_status
-                st = get_status(timeout=1.5)
-                if st.get("ok"):
-                    mode = st.get("protection_mode")
-                    if mode in ("full", "monitoring", "inactive"):
-                        return mode
-                    if st.get("running_services"):
-                        return "full"
-                    return "monitoring" if st.get("daemon") else "inactive"
-            except Exception:
-                pass
+            cached = getattr(self, "_protection_mode_cache", None)
+            if cached in ("full", "monitoring", "inactive"):
+                return cached
             return "monitoring" if getattr(self, "daemon_is_active", False) else "inactive"
+        return self._compute_local_protection_mode()
+
+    def _compute_local_protection_mode(self) -> str:
         bait = False
         try:
             bait = len(self.service_manager.running_services) > 0
@@ -1841,6 +1856,71 @@ class CloudHoneypotClient:
         if monitoring:
             return "monitoring"
         return "inactive"
+
+    def _fetch_protection_mode_ipc(self, timeout: float = 0.6) -> str:
+        """Background-only: query daemon STATUS (may block up to timeout)."""
+        try:
+            from client_daemon_ipc import get_status
+            st = get_status(timeout=timeout)
+            if st.get("ok"):
+                mode = st.get("protection_mode")
+                if mode in ("full", "monitoring", "inactive"):
+                    return mode
+                if st.get("running_services"):
+                    return "full"
+                return "monitoring" if st.get("daemon") else "inactive"
+        except Exception:
+            pass
+        return "monitoring" if getattr(self, "daemon_is_active", False) else "inactive"
+
+    def refresh_protection_mode_cache(self, timeout: float = 0.6) -> str:
+        """Update cache from IPC or local motors. Safe for background threads."""
+        t0 = time.time()
+        if getattr(self, "frontend_only", False):
+            mode = self._fetch_protection_mode_ipc(timeout=timeout)
+        else:
+            mode = self._compute_local_protection_mode()
+        prev = getattr(self, "_protection_mode_cache", None)
+        self._protection_mode_cache = mode
+        self._protection_mode_ts = time.time()
+        ms = (time.time() - t0) * 1000
+        if mode != prev:
+            log(f"[PERF] protection_mode {prev}→{mode} {ms:.0f}ms")
+        elif ms > 200:
+            log(f"[PERF] protection_mode ipc_slow {ms:.0f}ms mode={mode}")
+        return mode
+
+    def start_protection_mode_poller(self, interval_sec: float = 5.0):
+        """Poll protection mode off the UI thread (IPC must never run on Tk)."""
+        if getattr(self, "_protection_poller_started", False):
+            return
+        self._protection_poller_started = True
+
+        def _loop():
+            while True:
+                try:
+                    self.refresh_protection_mode_cache(timeout=0.5)
+                    # Push header update without doing IPC on UI thread
+                    gui = getattr(self, "gui", None)
+                    if gui and getattr(self, "root", None):
+                        mode = self._protection_mode_cache
+
+                        def _ui(m=mode):
+                            try:
+                                gui.update_header_status(m)
+                            except Exception:
+                                pass
+
+                        try:
+                            self.root.after(0, _ui)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                time.sleep(interval_sec)
+
+        threading.Thread(target=_loop, daemon=True, name="ProtModePoll").start()
+        log(f"[PERF] protection_mode poller started ({interval_sec:.0f}s)")
 
     def is_protection_active(self) -> bool:
         """Tray/header: port izleme veya honeypot bait aktifse koruma var sayılır."""
@@ -2535,12 +2615,28 @@ class CloudHoneypotClient:
         if not getattr(self, "frontend_only", False) and not getattr(self, "daemon_is_active", False):
             try:
                 from client_daemon_ipc import ping
-                if ping(timeout=0.2):
+                _t = time.time()
+                if ping(timeout=0.15):
                     self.frontend_only = True
                     self.daemon_is_active = True
-                    log("[IPC] Daemon PING in build_gui — frontend_only (skip motor stacks)")
+                    self._protection_mode_cache = "monitoring"
+                    log(
+                        f"[PERF] build_gui daemon ping ok "
+                        f"{(time.time() - _t) * 1000:.0f}ms — frontend_only"
+                    )
             except Exception:
                 pass
+
+        # Protection mode: cache via background poller (never IPC on Tk thread)
+        try:
+            self.start_protection_mode_poller(interval_sec=5.0)
+            threading.Thread(
+                target=lambda: self.refresh_protection_mode_cache(timeout=0.4),
+                daemon=True,
+                name="ProtModeKick",
+            ).start()
+        except Exception as e:
+            log(f"[PERF] protection poller start: {e}")
 
         # Background services - skip if daemon is running (UI-only mode)
         ui_only = bool(

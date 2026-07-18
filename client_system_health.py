@@ -607,6 +607,7 @@ class SystemHealthMonitor:
                     "suspicion_reasons": reasons,
                     "interactive": interactive,
                 }
+                self._annotate_agent_self(entry)
                 collected[pid] = entry
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
@@ -713,6 +714,80 @@ class SystemHealthMonitor:
                     reasons.append("lolbin")
                     break
         return (len(reasons) > 0), reasons
+
+    def _annotate_agent_self(self, entry: dict) -> None:
+        """Mark our PID with HMAC proof; flag name-spoof copies as suspicious."""
+        try:
+            import os
+            import sys
+            from client_security_utils import make_agent_self_proof, normalize_exe_path
+
+            my_pid = os.getpid()
+            pid = int(entry.get("pid") or 0)
+            token = self.token_getter() or ""
+            my_exe = ""
+            try:
+                import psutil
+                my_exe = psutil.Process(my_pid).exe() or sys.executable or ""
+            except Exception:
+                my_exe = sys.executable or ""
+
+            name = (entry.get("name") or "").lower()
+            path = entry.get("path") or ""
+            is_honeypot_name = "honeypot-client" in name or name == "honeypot-client.exe"
+
+            if pid == my_pid and token:
+                proof = make_agent_self_proof(token, my_pid, my_exe or path)
+                entry["is_agent_self"] = True
+                entry["self_proof"] = proof
+                entry["suspicious"] = False
+                entry["suspicion_reasons"] = []
+                entry["path"] = (my_exe or path)[:260]
+                return
+
+            if is_honeypot_name and pid != my_pid:
+                # Same image name, different PID → possible spoof
+                my_norm = normalize_exe_path(my_exe)
+                other_norm = normalize_exe_path(path)
+                if other_norm and my_norm and other_norm == my_norm:
+                    # Second instance of same install path — still not "self" for this report
+                    entry["is_agent_self"] = False
+                else:
+                    entry["is_agent_self"] = False
+                    entry["suspicious"] = True
+                    reasons = list(entry.get("suspicion_reasons") or [])
+                    if "name_spoof_candidate" not in reasons:
+                        reasons.append("name_spoof_candidate")
+                    entry["suspicion_reasons"] = reasons
+        except Exception:
+            pass
+
+    def _build_agent_runtime(self) -> Optional[dict]:
+        """agent_runtime block for health/report snapshot."""
+        try:
+            import os
+            import sys
+            from client_security_utils import make_agent_self_proof
+
+            token = self.token_getter() or ""
+            if not token:
+                return None
+            pid = os.getpid()
+            exe_path = ""
+            try:
+                import psutil
+                exe_path = psutil.Process(pid).exe() or ""
+            except Exception:
+                exe_path = sys.executable or ""
+            if not exe_path:
+                return None
+            return {
+                "pid": pid,
+                "exe_path": exe_path,
+                "proof": make_agent_self_proof(token, pid, exe_path),
+            }
+        except Exception:
+            return None
 
     # ── Anomaly Alerting ──────────────────────────────────────────
 
@@ -915,6 +990,11 @@ class SystemHealthMonitor:
                 "client_memory_mb": self_memory_mb,
             },
         }
+
+        runtime = self._build_agent_runtime()
+        if runtime:
+            payload["snapshot"]["agent_runtime"] = runtime
+            payload["snapshot"]["self_process"] = runtime  # alias
 
         n_sess = len(payload["snapshot"].get("active_sessions") or [])
         n_proc = len(payload["snapshot"].get("top_processes") or [])

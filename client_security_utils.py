@@ -107,6 +107,21 @@ def _signing_secret(token: str) -> bytes:
     return hashlib.sha256(material.encode("utf-8")).digest()
 
 
+def make_agent_self_proof(token: str, pid: int, exe_path: str) -> str:
+    """HMAC-SHA256 self-proof for health/report (cloud helpers.make_agent_self_proof).
+
+    message = \"v1|{pid}|{exe_path_normalized}\"
+    """
+    norm = (exe_path or "").strip().lower().replace("/", "\\")
+    msg = f"v1|{int(pid)}|{norm}".encode("utf-8")
+    key = (token or "").encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def normalize_exe_path(exe_path: str) -> str:
+    return (exe_path or "").strip().lower().replace("/", "\\")
+
+
 def sign_command(token: str, command_id: str, cmd_type: str, issued_at: str) -> str:
     """HMAC signature for outbound command results (client → server)."""
     msg = f"{command_id}|{cmd_type}|{issued_at}".encode("utf-8")

@@ -2385,8 +2385,17 @@ if __name__ == "__main__":
                 log("Normal user mode - Task Scheduler will be configured later")
             
             # Check if started with --mode=tray for tray-minimized startup
-            # --show-gui overrides tray mode (used by installer finish page)
-            tray_mode = getattr(args, 'mode', None) == 'tray' and not getattr(args, 'show_gui', False)
+            # --show-gui / onboarding / missing token → always show window (register first)
+            # Onboarding flag is written by non-silent installer only — do not re-set on every shortcut launch
+            from client_utils import should_force_gui_visible
+            has_token = bool(app.get_token() or app.state.get("token"))
+            force_gui = bool(getattr(args, "show_gui", False)) or should_force_gui_visible(has_token)
+            tray_mode = (
+                getattr(args, "mode", None) == "tray"
+                and not force_gui
+            )
+            if force_gui:
+                log("Onboarding/GUI required — starting visible (not tray-minimized)")
             
             # Build GUI in both cases
             log("Building main GUI...")
@@ -2411,13 +2420,22 @@ if __name__ == "__main__":
             app.start_delayed_api_sync()
             
             # If tray mode, immediately hide to tray after GUI is built
-            if tray_mode:
+            # Never hide during onboarding / first registration
+            if tray_mode and not force_gui:
                 log("Tray mode: Minimizing to tray...")
                 if hasattr(app, 'root') and app.root:
                     app._tray_mode.set()  # Mark as intentionally in tray
                     app.root.withdraw()  # Hide the window
                     app.root.update()
                     log("Tray mode: Window hidden successfully")
+            elif force_gui and hasattr(app, "root") and app.root:
+                app._tray_mode.clear()
+                try:
+                    app.root.deiconify()
+                    app.root.lift()
+                    app.root.focus_force()
+                except Exception:
+                    pass
             
             # Run main loop
             if hasattr(app, 'root') and app.root:

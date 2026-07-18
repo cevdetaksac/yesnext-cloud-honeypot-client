@@ -720,6 +720,17 @@ class RemoteCommandExecutor:
         pid = params.get("pid")
         process_name = params.get("process_name", "")
 
+        # Self-protect: refuse ONLY our own PID (not blanket name match — spoof-safe)
+        try:
+            my_pid = os.getpid()
+            if pid is not None and int(pid) == my_pid:
+                return {
+                    "success": False,
+                    "error": f"Refusing to terminate self (PID {my_pid} = honeypot-client.exe)",
+                }
+        except Exception:
+            pass
+
         # Protect critical PIDs by resolving name
         if pid is not None:
             try:
@@ -732,8 +743,15 @@ class RemoteCommandExecutor:
                 pass
             cmd = ["taskkill", "/F", "/PID", str(pid)]
         elif process_name:
-            if process_name.lower() in PROTECTED_PROCESSES:
+            # Never blanket-protect by image name alone (spoof could hide)
+            if process_name.lower() in PROTECTED_PROCESSES and "honeypot-client" not in process_name.lower():
                 return {"success": False, "error": f"Protected process: {process_name}"}
+            if "honeypot-client" in process_name.lower():
+                # Kill by name could hit us — refuse; require explicit foreign PID
+                return {
+                    "success": False,
+                    "error": "Refusing name-based kill of honeypot-client.exe — use foreign PID only",
+                }
             cmd = ["taskkill", "/F", "/IM", process_name]
         else:
             return {"success": False, "error": "No PID or process_name specified"}
@@ -743,7 +761,6 @@ class RemoteCommandExecutor:
             creationflags=CREATE_NO_WINDOW,
         )
         ok = result.returncode == 0
-        # Health refresh deferred to poll loop (_async_health_refresh) — don't block IR
         return {
             "success": ok,
             "message": result.stdout.strip() or result.stderr.strip(),

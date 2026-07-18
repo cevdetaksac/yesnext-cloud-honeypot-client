@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 24
+!define VERSIONBUILD 25
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -363,15 +363,15 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
 
     ; Shortcuts
     !insertmacro LOG "[CONFIG] Creating shortcuts..."
-    CreateShortCut "$DESKTOP\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe"
+    CreateShortCut "$DESKTOP\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "--show-gui"
     CreateDirectory "$SMPROGRAMS\${COMPANYNAME}"
-    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe"
+    CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "--show-gui"
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
 
     ; =================================================================
     ; PHASE 4: AUTO-START (silent install only — normal install uses finish page checkbox)
     ; =================================================================
-    IfSilent 0 SkipAutoStart
+    IfSilent 0 InteractiveOnboarding
         !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
         IfFileExists "$INSTDIR\honeypot-client.exe" SilentStart SkipAutoStart
         SilentStart:
@@ -379,6 +379,14 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
             Sleep 2000
             Exec '"$INSTDIR\honeypot-client.exe" --mode=daemon --silent'
             !insertmacro LOG "[AUTO-START] Daemon started with tasks pre-created."
+        Goto SkipAutoStart
+    InteractiveOnboarding:
+        ; Force visible GUI until user registers / links account (no tray hide)
+        CreateDirectory "$COMMONPROGRAMDATA\YesNext\CloudHoneypotClient"
+        FileOpen $0 "$COMMONPROGRAMDATA\YesNext\CloudHoneypotClient\force_gui_onboarding.flag" w
+        FileWrite $0 "interactive_install$\r$\n"
+        FileClose $0
+        !insertmacro LOG "[ONBOARDING] force_gui_onboarding.flag written — GUI will stay visible"
     SkipAutoStart:
 
     !insertmacro LOG "[FINISH] Installation complete."

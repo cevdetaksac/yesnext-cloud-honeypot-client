@@ -1374,6 +1374,47 @@ class InstallerUpdateManager:
 
 # ===================== UPDATE UI HELPERS ===================== #
 
+def onboarding_flag_path() -> str:
+    base = os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+        "YesNext",
+        "CloudHoneypotClient",
+    )
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(base, "force_gui_onboarding.flag")
+
+
+def set_force_gui_onboarding(reason: str = "interactive_install") -> None:
+    """After non-silent install — keep window visible until user registers/links."""
+    try:
+        with open(onboarding_flag_path(), "w", encoding="utf-8") as fh:
+            fh.write(f"{reason}\n{time.time()}\n")
+    except OSError:
+        pass
+
+
+def clear_force_gui_onboarding() -> None:
+    try:
+        path = onboarding_flag_path()
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def should_force_gui_visible(has_token: bool = False) -> bool:
+    """True when interactive onboarding requires a visible window (not tray-only)."""
+    try:
+        if os.path.isfile(onboarding_flag_path()):
+            return True
+    except OSError:
+        pass
+    return not bool(has_token)
+
+
 def _update_lock_path() -> str:
     """Machine-wide lock — SYSTEM SilentUpdater and user GUI must share the same file.
 

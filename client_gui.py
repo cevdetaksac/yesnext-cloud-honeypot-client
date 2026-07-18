@@ -296,7 +296,17 @@ class ModernGUI:
             font=ctk.CTkFont(size=10),
             fg_color="transparent", hover_color=COLORS["accent"],
             corner_radius=4,
-            command=lambda: self._copy_to_clipboard(token),
+            command=lambda: self._copy_token_with_hint(token),
+        ).pack(side="left", padx=(0, 4))
+
+        # Hesaba bağla
+        ctk.CTkButton(
+            bar, text=self.t("btn_link_account"),
+            width=100, height=22,
+            font=ctk.CTkFont(size=10),
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=4,
+            command=lambda: self._open_link_account(token),
         ).pack(side="left", padx=(0, 4))
 
         # ════════ SAĞ TARAF ════════ #
@@ -326,7 +336,7 @@ class ModernGUI:
             font=ctk.CTkFont(size=11), width=90, height=26,
             fg_color=COLORS["accent"], hover_color=COLORS["blue"],
             text_color=COLORS["text_bright"], corner_radius=5,
-            command=lambda: webbrowser.open(_dashboard_url()),
+            command=self._open_dashboard,
         ).pack(side="right", padx=2, pady=5)
 
         # Separator
@@ -353,6 +363,86 @@ class ModernGUI:
             messagebox.showinfo(self.t("copy"), text)
         except Exception as e:
             log(f"clipboard error: {e}")
+
+    def _account_base_url(self) -> str:
+        from client_constants import API_URL
+        return API_URL.rsplit("/api", 1)[0]
+
+    def _copy_token_with_hint(self, token: str):
+        """Copy agent token + instruct user how to link on web."""
+        tok = token or self.app.state.get("token", "") or ""
+        if not tok:
+            messagebox.showwarning(self.t("warn"), self.t("err_no_token"))
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(tok)
+            self.root.update()
+        except Exception as e:
+            log(f"clipboard error: {e}")
+            return
+        messagebox.showinfo(
+            self.t("copy"),
+            self.t("token_copied_link_hint"),
+        )
+        try:
+            from client_utils import clear_force_gui_onboarding
+            clear_force_gui_onboarding()
+        except Exception:
+            pass
+        try:
+            self.show_toast(self.t("copy"), self.t("token_copied_toast"), "info")
+        except Exception:
+            pass
+
+    def _open_dashboard(self):
+        """Open web dashboard; after first open allow tray minimize."""
+        try:
+            from client_constants import API_URL
+            base = API_URL.rsplit("/api", 1)[0]
+            tok = self.app.state.get("token", "") or ""
+            url = f"{base}/dashboard?token={tok}" if tok else f"{base}/dashboard"
+            webbrowser.open(url)
+        except Exception as e:
+            log(f"open dashboard error: {e}")
+        try:
+            from client_utils import clear_force_gui_onboarding
+            if self.app.state.get("token"):
+                clear_force_gui_onboarding()
+        except Exception:
+            pass
+
+    def _open_link_account(self, token: str = ""):
+        """Copy token and open My servers / login page for Account linking."""
+        tok = token or self.app.state.get("token", "") or ""
+        if tok:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(tok)
+                self.root.update()
+            except Exception:
+                pass
+        base = self._account_base_url()
+        url = f"{base}/servers" if tok else f"{base}/?login=1"
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            log(f"open link account error: {e}")
+        msg = self.t("link_account_opened")
+        if tok:
+            msg = self.t("token_copied_link_hint")
+        messagebox.showinfo(self.t("btn_link_account"), msg)
+        try:
+            from client_utils import clear_force_gui_onboarding
+            # User saw onboarding CTA — allow tray minimize later
+            if tok:
+                clear_force_gui_onboarding()
+        except Exception:
+            pass
+        try:
+            self.show_toast(self.t("btn_link_account"), self.t("token_copied_toast"), "info")
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════════
     #  BAŞLIK BANDI
@@ -3893,6 +3983,11 @@ class ModernGUI:
         items = []
         if menu_type == "settings":
             items = [
+                (f"🔗  {self.t('btn_link_account')}", _run_and_close(
+                    lambda: self._open_link_account(self.app.state.get("token", "")))),
+                (f"📋  {self.t('menu_copy_token')}", _run_and_close(
+                    lambda: self._copy_token_with_hint(self.app.state.get("token", "")))),
+                (None, None),  # separator
                 (f"🇹🇷  {self.t('menu_lang_tr')}", _run_and_close(lambda: self._set_lang("tr"))),
                 (f"🇬🇧  {self.t('menu_lang_en')}", _run_and_close(lambda: self._set_lang("en"))),
                 (None, None),  # separator

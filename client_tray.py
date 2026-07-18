@@ -194,6 +194,19 @@ class TrayManager:
         """Minimize window to tray (Tk main thread)."""
         def _do_minimize():
             try:
+                # Onboarding / no token → keep window visible for dashboard registration
+                try:
+                    from client_utils import should_force_gui_visible
+                    tok = ""
+                    if hasattr(self.app_instance, "get_token"):
+                        tok = self.app_instance.get_token() or ""
+                    tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
+                    if should_force_gui_visible(bool(tok)):
+                        log("[TRAY] Skip minimize — onboarding / registration required")
+                        self.show_window()
+                        return
+                except Exception:
+                    pass
                 root = getattr(self.app_instance, 'root', None)
                 if root and root.winfo_exists():
                     self.app_instance._tray_mode.set()
@@ -277,8 +290,70 @@ class TrayManager:
         
         # Tray menüsünü oluştur
         try:
+            def _open_dashboard():
+                try:
+                    import webbrowser
+                    from client_constants import API_URL
+                    base = API_URL.rsplit("/api", 1)[0]
+                    tok = ""
+                    if hasattr(self.app_instance, "get_token"):
+                        tok = self.app_instance.get_token() or ""
+                    tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
+                    url = f"{base}/dashboard?token={tok}" if tok else f"{base}/dashboard"
+                    webbrowser.open(url)
+                    try:
+                        from client_utils import clear_force_gui_onboarding
+                        if tok:
+                            clear_force_gui_onboarding()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log(f"tray dashboard open error: {e}")
+
+            def _copy_token():
+                try:
+                    tok = ""
+                    if hasattr(self.app_instance, "get_token"):
+                        tok = self.app_instance.get_token() or ""
+                    tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
+                    root = getattr(self.app_instance, "root", None)
+                    if root and tok:
+                        def _clip():
+                            root.clipboard_clear()
+                            root.clipboard_append(tok)
+                            root.update()
+                        if hasattr(self.app_instance, "_gui_safe"):
+                            self.app_instance._gui_safe(_clip)
+                        else:
+                            root.after(0, _clip)
+                        self.notify(self.t("copy"), self.t("token_copied_toast"))
+                except Exception as e:
+                    log(f"tray copy token error: {e}")
+
+            def _link_account():
+                try:
+                    import webbrowser
+                    from client_constants import API_URL
+                    base = API_URL.rsplit("/api", 1)[0]
+                    tok = ""
+                    if hasattr(self.app_instance, "get_token"):
+                        tok = self.app_instance.get_token() or ""
+                    tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
+                    if tok:
+                        _copy_token()
+                    webbrowser.open(f"{base}/servers" if tok else f"{base}/?login=1")
+                    self.show_window()
+                except Exception as e:
+                    log(f"tray link account error: {e}")
+
+            from client_constants import SERVER_NAME
+            host_label = f"{SERVER_NAME}"[:40]
             menu = pystray.Menu(
                 TrayItem(self.t('tray_show'), lambda: self.show_window(), default=True),
+                TrayItem(host_label, lambda: None, enabled=False),
+                TrayItem(self.t('tray_dashboard'), lambda: _open_dashboard()),
+                TrayItem(self.t('btn_link_account'), lambda: _link_account()),
+                TrayItem(self.t('menu_copy_token'), lambda: _copy_token()),
                 TrayItem(self.t('tray_exit'), lambda: self.exit_app())
             )
             icon.menu = menu

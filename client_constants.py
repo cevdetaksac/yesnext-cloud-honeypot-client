@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.4"  # Fix TLS CA bundle for PyInstaller (_MEI cacert.pem) + durable ProgramData copy
+VERSION = "4.5.5"  # Fix stacked PIN dialogs on repeated tray clicks
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

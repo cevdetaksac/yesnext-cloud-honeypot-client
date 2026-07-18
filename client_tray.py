@@ -185,41 +185,84 @@ class TrayManager:
                 if not root or not root.winfo_exists():
                     return
 
-                # PIN unlock required before revealing GUI
-                try:
-                    from client_gui_lock import require_gui_unlock
-                    if not require_gui_unlock(self.app_instance, reason="show"):
-                        log("[TRAY] Show blocked — PIN required")
-                        return
-                except Exception as e:
-                    log(f"[TRAY] PIN gate error: {e}")
-
-                self.app_instance._tray_mode.clear()
-                root.deiconify()
-                root.update_idletasks()
-                root.lift()
-                root.attributes("-topmost", True)
-                root.after(150, lambda: root.attributes("-topmost", False))
-                root.focus_force()
-
-                # Windows: bring window to foreground (focus_force alone is often ignored)
-                if os.name == "nt":
+                # Already prompting / showing — tray re-clicks must not stack PIN dialogs
+                if getattr(self, "_show_busy", False):
                     try:
-                        hwnd = root.winfo_id()
-                        # CTk may need parent HWND on some setups
-                        parent = ctypes.windll.user32.GetParent(hwnd)
-                        target = parent if parent else hwnd
-                        ctypes.windll.user32.SetForegroundWindow(target)
+                        from client_gui_lock import GuiLock
+                        gl = GuiLock.instance()
+                        if gl._prompt_window is not None:
+                            gl._prompt_window.lift()
+                            gl._prompt_window.focus_force()
                     except Exception:
                         pass
+                    return
 
-                from client_constants import WINDOW_WIDTH, WINDOW_HEIGHT
-                sw = root.winfo_screenwidth()
-                sh = root.winfo_screenheight()
-                cx = int(sw / 2 - WINDOW_WIDTH / 2)
-                cy = int(sh / 2 - WINDOW_HEIGHT / 2)
-                root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{cx}+{cy}")
+                # Window already visible + unlocked → just focus (no PIN again)
+                try:
+                    from client_gui_lock import GuiLock
+                    gl = GuiLock.instance()
+                    visible = False
+                    try:
+                        visible = bool(root.winfo_viewable()) and str(root.state()) != "withdrawn"
+                    except Exception:
+                        visible = False
+                    if visible and (gl.is_session_unlocked() or not gl.has_pin()):
+                        self.app_instance._tray_mode.clear()
+                        root.deiconify()
+                        root.lift()
+                        root.focus_force()
+                        if os.name == "nt":
+                            try:
+                                hwnd = root.winfo_id()
+                                parent = ctypes.windll.user32.GetParent(hwnd)
+                                target = parent if parent else hwnd
+                                ctypes.windll.user32.SetForegroundWindow(target)
+                            except Exception:
+                                pass
+                        return
+                except Exception:
+                    pass
+
+                self._show_busy = True
+                try:
+                    # PIN unlock required before revealing GUI
+                    try:
+                        from client_gui_lock import require_gui_unlock
+                        if not require_gui_unlock(self.app_instance, reason="show"):
+                            log("[TRAY] Show blocked — PIN required")
+                            return
+                    except Exception as e:
+                        log(f"[TRAY] PIN gate error: {e}")
+
+                    self.app_instance._tray_mode.clear()
+                    root.deiconify()
+                    root.update_idletasks()
+                    root.lift()
+                    root.attributes("-topmost", True)
+                    root.after(150, lambda: root.attributes("-topmost", False))
+                    root.focus_force()
+
+                    # Windows: bring window to foreground (focus_force alone is often ignored)
+                    if os.name == "nt":
+                        try:
+                            hwnd = root.winfo_id()
+                            # CTk may need parent HWND on some setups
+                            parent = ctypes.windll.user32.GetParent(hwnd)
+                            target = parent if parent else hwnd
+                            ctypes.windll.user32.SetForegroundWindow(target)
+                        except Exception:
+                            pass
+
+                    from client_constants import WINDOW_WIDTH, WINDOW_HEIGHT
+                    sw = root.winfo_screenwidth()
+                    sh = root.winfo_screenheight()
+                    cx = int(sw / 2 - WINDOW_WIDTH / 2)
+                    cy = int(sh / 2 - WINDOW_HEIGHT / 2)
+                    root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{cx}+{cy}")
+                finally:
+                    self._show_busy = False
             except Exception as e:
+                self._show_busy = False
                 log(f"Show window error: {e}")
 
         try:

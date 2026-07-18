@@ -67,6 +67,8 @@ class GuiLock:
         self._fail_count = 0
         self._lockout_until = 0.0
         self._data: dict = {}
+        self._prompt_active = False
+        self._prompt_window = None
         self.reload()
 
     @classmethod
@@ -214,7 +216,27 @@ class GuiLock:
 
 
 def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) -> Optional[str]:
-    """Modal PIN entry on Tk thread. Returns PIN string or None if cancelled."""
+    """Modal PIN entry on Tk thread. Returns PIN string or None if cancelled.
+
+    Re-entrant safe: tray clicks while wait_window runs would otherwise open
+    stacked dialogs — if one is already open, focus it and return None.
+    """
+    lock = GuiLock.instance()
+    if lock._prompt_active:
+        try:
+            win = lock._prompt_window
+            if win is not None:
+                try:
+                    win.lift()
+                    win.focus_force()
+                    win.attributes("-topmost", True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        log("[GUI-LOCK] PIN dialog already open — ignoring duplicate prompt")
+        return None
+
     try:
         import customtkinter as ctk
         from client_gui_theme import COLORS
@@ -227,9 +249,15 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
     win.geometry("360x220" if not confirm else "360x280")
     win.configure(fg_color=COLORS.get("bg", "#0b1120"))
     win.transient(parent)
-    win.grab_set()
+    try:
+        win.grab_set()
+    except Exception:
+        pass
     win.attributes("-topmost", True)
     win.focus_force()
+
+    lock._prompt_active = True
+    lock._prompt_window = win
 
     ctk.CTkLabel(
         win, text=prompt,
@@ -259,6 +287,10 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
     )
     err_lbl.pack(pady=4)
 
+    def _cleanup():
+        lock._prompt_active = False
+        lock._prompt_window = None
+
     def _submit(_event=None):
         p1 = entry1.get().strip()
         if confirm and entry2 is not None:
@@ -270,10 +302,12 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
             err_lbl.configure(text=f"PIN: {_MIN_PIN_LEN}-{_MAX_PIN_LEN} digits")
             return
         result["pin"] = p1
+        _cleanup()
         win.destroy()
 
     def _cancel():
         result["pin"] = None
+        _cleanup()
         win.destroy()
 
     row = ctk.CTkFrame(win, fg_color="transparent")
@@ -291,7 +325,12 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
     if entry2 is not None:
         entry2.bind("<Return>", _submit)
 
-    win.wait_window()
+    win.protocol("WM_DELETE_WINDOW", _cancel)
+
+    try:
+        win.wait_window()
+    finally:
+        _cleanup()
     return result["pin"]
 
 

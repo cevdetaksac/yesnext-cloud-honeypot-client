@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.41"  # Fix daemon-only SHOW blocking GUI; clear update lock on install launch
+VERSION = "4.4.42"  # QUIT protect on daemon→GUI pivot; --show-gui NOGUI takeover
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

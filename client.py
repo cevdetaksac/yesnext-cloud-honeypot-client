@@ -393,6 +393,14 @@ class CloudHoneypotClient:
         
         # Tray mode tracking - thread-safe flag (prevents window from auto-showing)
         self._tray_mode = threading.Event()  # set() = in tray, clear() = visible
+        # Installer/--show-gui: ignore QUIT briefly (kill scripts race with new process)
+        self._quit_protect_until = 0.0
+        try:
+            if any(a in ("--show-gui", "/show-gui") for a in sys.argv):
+                self._quit_protect_until = time.time() + 25.0
+                log("[GUI] QUIT protect armed (25s) for --show-gui launch")
+        except Exception:
+            pass
         
         # GUI health monitoring
         self.gui_health = {
@@ -2598,6 +2606,7 @@ if __name__ == "__main__":
                 selected_language = resolve_app_language()
                 app = CloudHoneypotClient()
                 app.lang = selected_language
+                app._quit_protect_until = time.time() + 25.0
                 log(f"Application initialized with language: {selected_language}")
                 log("Building main GUI (daemon detected logon)...")
                 app.build_gui(minimized=False)

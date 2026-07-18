@@ -45,11 +45,20 @@ from client_security_utils import verify_command_signature, sign_command
 
 try:
     from client_constants import REMOTE_CMD_POLL_INTERVAL as _POLL
-    POLL_INTERVAL = int(_POLL)
+    POLL_INTERVAL = max(1, int(_POLL))
 except Exception:
-    POLL_INTERVAL = 10  # V4 default
+    POLL_INTERVAL = 1
+try:
+    from client_constants import REMOTE_CMD_IR_POLL_INTERVAL as _IR_POLL
+    IR_POLL_INTERVAL = max(1, int(_IR_POLL))
+except Exception:
+    IR_POLL_INTERVAL = 1
+try:
+    from client_constants import REMOTE_CMD_MAX_PER_MINUTE as _MAX_RPM
+    MAX_COMMANDS_PER_MINUTE = max(10, int(_MAX_RPM))
+except Exception:
+    MAX_COMMANDS_PER_MINUTE = 30
 COMMAND_EXPIRY_SECONDS = 300  # 5 minutes
-MAX_COMMANDS_PER_MINUTE = 10
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -70,11 +79,20 @@ _STREAM_COMMANDS = frozenset({
     "remote_stream_start", "remote_stream_stop", "remote_input",
 })
 
-# Maintenance — also skip rate limit; dashboard queues as critical
-_CRITICAL_FAST_POLL = frozenset({
-    "clear_firewall", "emergency_lockdown", "lift_lockdown",
+# Incident-response: always fast poll + no rate limit (breach containment)
+_IR_URGENT_COMMANDS = frozenset({
+    "kill_process", "block_process",
+    "logoff_user",
+    "block_ip", "unblock_ip",
+    "disable_account", "reset_password",
+    "stop_service", "disable_service",
+    "emergency_lockdown", "lift_lockdown",
+    "enable_lockdown", "disable_lockdown",
+    "clear_firewall",
 })
-CRITICAL_POLL_INTERVAL = 2  # ≤2s when critical cmds may be pending
+# Back-compat alias
+_CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
+CRITICAL_POLL_INTERVAL = IR_POLL_INTERVAL
 
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
@@ -162,7 +180,8 @@ class RemoteCommandExecutor:
             daemon=True,
         )
         self._poll_thread.start()
-        log("[REMOTE-CMD] 🚀 Remote command executor started (poll every 5s)")
+        log(f"[REMOTE-CMD] 🚀 Remote command executor started "
+            f"(poll={POLL_INTERVAL}s, IR={IR_POLL_INTERVAL}s)")
 
     def stop(self):
         """Stop polling and remote desktop stream."""
@@ -187,13 +206,20 @@ class RemoteCommandExecutor:
         while self._running:
             try:
                 commands = self._fetch_pending()
-                saw_critical = False
+                # IR first in the same batch (kill/logoff before diagnostics)
+                commands = self._prioritize_commands(commands)
+                saw_ir = False
+                need_health_refresh = False
                 for cmd in commands:
                     self._stats["commands_received"] += 1
                     cmd_type = cmd.get("command_type", "")
                     prio = str(cmd.get("priority", "") or "").lower()
-                    if prio == "critical" or cmd_type in _CRITICAL_FAST_POLL:
-                        saw_critical = True
+                    is_ir = (
+                        prio in ("critical", "high", "urgent")
+                        or cmd_type in _IR_URGENT_COMMANDS
+                    )
+                    if is_ir:
+                        saw_ir = True
 
                     # Validate
                     rejection = self._validate(cmd)
@@ -207,9 +233,9 @@ class RemoteCommandExecutor:
                         })
                         continue
 
-                    # Rate limit (exempt stream + critical maintenance cmds)
+                    # Rate limit — never throttle IR / stream
                     if (cmd_type not in _STREAM_COMMANDS
-                            and cmd_type not in _CRITICAL_FAST_POLL
+                            and cmd_type not in _IR_URGENT_COMMANDS
                             and not self._check_rate_limit()):
                         log("[REMOTE-CMD] ⚠️ Rate limit — skipping command")
                         self._stats["commands_rejected"] += 1
@@ -219,7 +245,7 @@ class RemoteCommandExecutor:
                     result = self._execute(cmd)
 
                     # Track
-                    if cmd_type not in _STREAM_COMMANDS and cmd_type not in _CRITICAL_FAST_POLL:
+                    if cmd_type not in _STREAM_COMMANDS and cmd_type not in _IR_URGENT_COMMANDS:
                         self._cmd_timestamps.append(time.time())
                     entry = {
                         "command_type": cmd.get("command_type", ""),
@@ -234,16 +260,23 @@ class RemoteCommandExecutor:
                         self._stats["commands_executed"] += 1
                         if cmd_type != "remote_input":
                             log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')}")
+                        if cmd_type in ("kill_process", "logoff_user", "block_process",
+                                        "stop_service", "disable_service",
+                                        "emergency_lockdown"):
+                            need_health_refresh = True
                     else:
                         self._stats["commands_failed"] += 1
                         log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')}")
 
-                    # Report
+                    # Report (async — must not delay next IR cmd)
                     self._report_result(cmd, result)
 
-                # Critical / clear_firewall: poll ≤2s so dashboard cleanup lands fast
+                if need_health_refresh:
+                    self._async_health_refresh()
+
+                # Stay on IR poll cadence after urgent work (and always ≤ default)
                 self._next_poll_sleep = (
-                    CRITICAL_POLL_INTERVAL if saw_critical else POLL_INTERVAL
+                    IR_POLL_INTERVAL if saw_ir else POLL_INTERVAL
                 )
 
             except Exception as e:
@@ -251,6 +284,37 @@ class RemoteCommandExecutor:
                 log(f"[REMOTE-CMD] Poll error: {e}")
 
             time.sleep(self._next_poll_sleep)
+
+    @staticmethod
+    def _prioritize_commands(commands: List[dict]) -> List[dict]:
+        """Run kill/logoff/block before list/snapshot in the same poll."""
+        if not commands or len(commands) < 2:
+            return commands
+
+        def _rank(cmd: dict) -> int:
+            ct = cmd.get("command_type", "")
+            prio = str(cmd.get("priority", "") or "").lower()
+            if ct in ("kill_process", "logoff_user", "emergency_lockdown"):
+                return 0
+            if ct in _IR_URGENT_COMMANDS or prio in ("critical", "high", "urgent"):
+                return 1
+            return 2
+
+        return sorted(commands, key=_rank)
+
+    def _async_health_refresh(self) -> None:
+        """Push sessions/processes after IR — never block kill/logoff path."""
+        hm = self.health_monitor
+        if not hm or not hasattr(hm, "force_report"):
+            return
+
+        def _run():
+            try:
+                hm.force_report(refresh=True)
+            except Exception as e:
+                log(f"[REMOTE-CMD] health refresh after IR failed: {e}")
+
+        threading.Thread(target=_run, name="RemoteCmd-HealthRefresh", daemon=True).start()
 
     # ── API Communication ─────────────────────────────────────────
 
@@ -591,16 +655,10 @@ class RemoteCommandExecutor:
         if session_id is not None and str(session_id).isdigit():
             result = subprocess.run(
                 ["logoff", str(session_id)],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=5,
                 creationflags=CREATE_NO_WINDOW,
             )
             ok = result.returncode == 0
-            # Push fresh sessions to dashboard
-            if self.health_monitor and hasattr(self.health_monitor, "force_report"):
-                try:
-                    self.health_monitor.force_report(refresh=True)
-                except Exception:
-                    pass
             return {
                 "success": ok,
                 "message": f"logged off session {session_id}" if ok else (result.stderr or result.stdout or "logoff failed"),
@@ -609,11 +667,6 @@ class RemoteCommandExecutor:
             return {"success": False, "error": "No username or session_id specified"}
         if self.auto_response:
             ok = self.auto_response.logoff_user(username)
-            if self.health_monitor and hasattr(self.health_monitor, "force_report"):
-                try:
-                    self.health_monitor.force_report(refresh=True)
-                except Exception:
-                    pass
             return {"success": ok, "message": f"Session for {username} terminated"}
         return self._logoff_direct(username)
 
@@ -686,15 +739,11 @@ class RemoteCommandExecutor:
             return {"success": False, "error": "No PID or process_name specified"}
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10,
+            cmd, capture_output=True, text=True, timeout=5,
             creationflags=CREATE_NO_WINDOW,
         )
         ok = result.returncode == 0
-        if ok and self.health_monitor and hasattr(self.health_monitor, "force_report"):
-            try:
-                self.health_monitor.force_report(refresh=True)
-            except Exception:
-                pass
+        # Health refresh deferred to poll loop (_async_health_refresh) — don't block IR
         return {
             "success": ok,
             "message": result.stdout.strip() or result.stderr.strip(),

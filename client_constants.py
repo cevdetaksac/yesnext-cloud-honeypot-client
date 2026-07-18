@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.20"  # clear_firewall remote cmd + HONEYPOT_BLOCK* purge + critical poll 2s
+VERSION = "4.4.21"  # IR remote cmds: 1s poll, kill/logoff priority, no rate-limit throttle
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -313,9 +313,12 @@ AUTO_RESPONSE_MAX_BLOCKS_PER_DAY = 200    # Max firewall blocks per day
 AUTO_RESPONSE_DEFAULT_BLOCK_HOURS = 24    # Default block duration (hours)
 
 # Remote Command Executor — polling & security
-REMOTE_CMD_POLL_INTERVAL = 10             # Poll commands every 10s (V4)
+# IR (kill/logoff/block): default 1s — breach response must not wait 10s
+REMOTE_CMD_POLL_INTERVAL = int(get_from_config(
+    "threat_detection.command_poll_interval", 1))
+REMOTE_CMD_IR_POLL_INTERVAL = 1           # Fast poll while IR cmds active
 REMOTE_CMD_EXPIRY_SECONDS = 300           # Commands expire after 5 minutes
-REMOTE_CMD_MAX_PER_MINUTE = 10            # Rate limit: max 10 commands/minute
+REMOTE_CMD_MAX_PER_MINUTE = 30            # Rate limit for non-IR cmds (IR exempt)
 
 # Silent Hours — defaults
 SILENT_HOURS_ENABLED = get_from_config("silent_hours.enabled", True)
@@ -420,7 +423,8 @@ __all__ = [
     # Auto-response & remote commands (v4.0 Faz 2)
     'AUTO_RESPONSE_MAX_BLOCKS_PER_HOUR', 'AUTO_RESPONSE_MAX_BLOCKS_PER_DAY',
     'AUTO_RESPONSE_DEFAULT_BLOCK_HOURS',
-    'REMOTE_CMD_POLL_INTERVAL', 'REMOTE_CMD_EXPIRY_SECONDS', 'REMOTE_CMD_MAX_PER_MINUTE',
+    'REMOTE_CMD_POLL_INTERVAL', 'REMOTE_CMD_IR_POLL_INTERVAL',
+    'REMOTE_CMD_EXPIRY_SECONDS', 'REMOTE_CMD_MAX_PER_MINUTE',
     'SILENT_HOURS_ENABLED', 'SILENT_HOURS_DEFAULT_MODE',
     'SILENT_HOURS_NIGHT_START', 'SILENT_HOURS_NIGHT_END',
     'SILENT_HOURS_WORK_START', 'SILENT_HOURS_WORK_END',

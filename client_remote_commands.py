@@ -15,8 +15,8 @@ Flow:
   4. Report result POST /api/commands/result
 
 Supported commands:
-  block_ip, unblock_ip, logoff_user, disable_account, enable_account,
-  reset_password, kill_process, stop_service, disable_service,
+  block_ip, unblock_ip, clear_firewall, logoff_user, disable_account,
+  enable_account, reset_password, kill_process, stop_service, disable_service,
   emergency_lockdown, lift_lockdown, list_sessions, list_processes,
   snapshot, collect_diagnostics
 
@@ -54,7 +54,7 @@ MAX_COMMANDS_PER_MINUTE = 10
 CREATE_NO_WINDOW = 0x08000000
 
 ALLOWED_COMMANDS: Set[str] = {
-    "block_ip", "unblock_ip",
+    "block_ip", "unblock_ip", "clear_firewall",
     "logoff_user", "disable_account", "enable_account", "reset_password",
     "kill_process", "block_process",
     "stop_service", "start_service", "restart_service", "disable_service",
@@ -69,6 +69,12 @@ ALLOWED_COMMANDS: Set[str] = {
 _STREAM_COMMANDS = frozenset({
     "remote_stream_start", "remote_stream_stop", "remote_input",
 })
+
+# Maintenance — also skip rate limit; dashboard queues as critical
+_CRITICAL_FAST_POLL = frozenset({
+    "clear_firewall", "emergency_lockdown", "lift_lockdown",
+})
+CRITICAL_POLL_INTERVAL = 2  # ≤2s when critical cmds may be pending
 
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
@@ -112,14 +118,17 @@ class RemoteCommandExecutor:
         token_getter: Optional[Callable[[], str]] = None,
         auto_response=None,
         health_monitor=None,
+        cleanup_manager=None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.auto_response = auto_response  # AutoResponse instance
         self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
+        self.cleanup_manager = cleanup_manager  # DataCleanupManager (wired after init)
 
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
+        self._next_poll_sleep = POLL_INTERVAL
 
         # Remote desktop screen mirror (lazy init)
         self._remote_desktop = None
@@ -178,8 +187,13 @@ class RemoteCommandExecutor:
         while self._running:
             try:
                 commands = self._fetch_pending()
+                saw_critical = False
                 for cmd in commands:
                     self._stats["commands_received"] += 1
+                    cmd_type = cmd.get("command_type", "")
+                    prio = str(cmd.get("priority", "") or "").lower()
+                    if prio == "critical" or cmd_type in _CRITICAL_FAST_POLL:
+                        saw_critical = True
 
                     # Validate
                     rejection = self._validate(cmd)
@@ -193,9 +207,10 @@ class RemoteCommandExecutor:
                         })
                         continue
 
-                    # Rate limit (exempt remote desktop input/stream cmds)
-                    cmd_type = cmd.get("command_type", "")
-                    if cmd_type not in _STREAM_COMMANDS and not self._check_rate_limit():
+                    # Rate limit (exempt stream + critical maintenance cmds)
+                    if (cmd_type not in _STREAM_COMMANDS
+                            and cmd_type not in _CRITICAL_FAST_POLL
+                            and not self._check_rate_limit()):
                         log("[REMOTE-CMD] ⚠️ Rate limit — skipping command")
                         self._stats["commands_rejected"] += 1
                         continue
@@ -204,7 +219,7 @@ class RemoteCommandExecutor:
                     result = self._execute(cmd)
 
                     # Track
-                    if cmd_type not in _STREAM_COMMANDS:
+                    if cmd_type not in _STREAM_COMMANDS and cmd_type not in _CRITICAL_FAST_POLL:
                         self._cmd_timestamps.append(time.time())
                     entry = {
                         "command_type": cmd.get("command_type", ""),
@@ -226,11 +241,16 @@ class RemoteCommandExecutor:
                     # Report
                     self._report_result(cmd, result)
 
+                # Critical / clear_firewall: poll ≤2s so dashboard cleanup lands fast
+                self._next_poll_sleep = (
+                    CRITICAL_POLL_INTERVAL if saw_critical else POLL_INTERVAL
+                )
+
             except Exception as e:
                 self._stats["poll_errors"] += 1
                 log(f"[REMOTE-CMD] Poll error: {e}")
 
-            time.sleep(POLL_INTERVAL)
+            time.sleep(self._next_poll_sleep)
 
     # ── API Communication ─────────────────────────────────────────
 
@@ -463,6 +483,107 @@ class RemoteCommandExecutor:
             return {"success": ok, "message": f"IP {ip} unblocked (direct)"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _cmd_clear_firewall(self, params: dict) -> dict:
+        """Dashboard maintenance: wipe honeypot block rules (HP-BLOCK / HONEYPOT_BLOCK*).
+
+        params:
+          wipe_all_honeypot_rules: bool (default True)
+          ips: optional list — also delete known name templates per IP
+          reason: audit string
+        """
+        wipe_all = params.get("wipe_all_honeypot_rules", True)
+        if wipe_all is None:
+            wipe_all = True
+        ips = params.get("ips") or []
+        if not isinstance(ips, list):
+            ips = []
+        reason = params.get("reason") or "dashboard_firewall_cleanup"
+        rules_removed = 0
+        auto_cleared = 0
+        api_synced = False
+        extras_removed = 0
+        wiped = False
+
+        # Prefer shared cleanup manager (local cache + sync-rules + clear-data blocks)
+        cm = self.cleanup_manager
+        if wipe_all and cm and hasattr(cm, "clear_firewall"):
+            try:
+                out = cm.clear_firewall(sync_dashboard=True)
+                rules_removed = int(out.get("rules_removed") or 0)
+                auto_cleared = int(out.get("auto_blocks_cleared") or 0)
+                api_synced = bool(out.get("api_synced"))
+                wiped = True
+            except Exception as e:
+                log(f"[REMOTE-CMD] clear_firewall via cleanup_manager failed: {e}")
+
+        if wipe_all and not wiped:
+            # Direct purge if manager missing / failed
+            try:
+                from client_firewall import WindowsFirewallBackend, make_logger, is_windows
+                if is_windows():
+                    backend = WindowsFirewallBackend(logger=make_logger())
+                    rules = backend.scan_existing_rules()
+                    for r in rules:
+                        name = r.get("name") or ""
+                        if not name:
+                            continue
+                        st, _, _, _ = backend._delete_rule_by_name(name)
+                        if st == "removed":
+                            rules_removed += 1
+                    if self.auto_response and hasattr(self.auto_response, "clear_all_blocks"):
+                        auto_cleared = self.auto_response.clear_all_blocks()
+                    elif self.auto_response and hasattr(self.auto_response, "_blocks"):
+                        with self.auto_response._lock:
+                            auto_cleared = len(self.auto_response._blocks)
+                            self.auto_response._blocks.clear()
+                    token = self.token_getter()
+                    if token and self.api_client and hasattr(self.api_client, "sync_firewall_rules"):
+                        api_synced = bool(self.api_client.sync_firewall_rules(token, []))
+                    if token and self.api_client and hasattr(self.api_client, "clear_client_data"):
+                        try:
+                            self.api_client.clear_client_data(
+                                token, scopes=["blocks"], reason=reason,
+                            )
+                        except Exception:
+                            pass
+            except Exception as e:
+                return {"success": False, "error": str(e), "rules_removed": rules_removed}
+
+        # Backup: delete known name templates for each IP in params
+        if ips:
+            try:
+                from client_firewall import WindowsFirewallBackend, make_logger, is_windows
+                if is_windows():
+                    backend = WindowsFirewallBackend(logger=make_logger())
+                    for ip in ips:
+                        ip = str(ip or "").strip().split("/")[0]
+                        if not ip:
+                            continue
+                        for name in WindowsFirewallBackend.rule_name_candidates("", ip):
+                            st, _, _, _ = backend._delete_rule_by_name(name)
+                            if st == "removed":
+                                extras_removed += 1
+                        if self.auto_response and hasattr(self.auto_response, "unblock_ip"):
+                            try:
+                                self.auto_response.unblock_ip(ip)
+                            except Exception:
+                                pass
+            except Exception as e:
+                log(f"[REMOTE-CMD] clear_firewall per-IP backup error: {e}")
+
+        total = rules_removed + extras_removed
+        return {
+            "success": True,
+            "status": "completed",
+            "message": f"Firewall honeypot rules cleared ({total} removed)",
+            "rules_removed": total,
+            "auto_blocks_cleared": auto_cleared,
+            "api_synced": api_synced,
+            "reason": reason,
+            "wipe_all": bool(wipe_all),
+            "ips_requested": len(ips),
+        }
 
     def _cmd_logoff_user(self, params: dict) -> dict:
         username = params.get("username", "")

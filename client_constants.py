@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.19"  # RDP session capture: skip wrong console token (err 1314), better GDI/ImageGrab
+VERSION = "4.4.20"  # clear_firewall remote cmd + HONEYPOT_BLOCK* purge + critical poll 2s
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

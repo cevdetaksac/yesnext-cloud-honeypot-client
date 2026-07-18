@@ -344,9 +344,9 @@ class WindowsFirewallBackend(FirewallBackend):
             )
         return True
     def scan_existing_rules(self) -> List[dict]:
-        """Scan all HP-BLOCK- and legacy HONEYPOT_THREAT_BLOCK_ firewall rules.
+        """Scan honeypot block rules: HP-BLOCK-*, HONEYPOT_BLOCK*, legacy.
 
-        Returns list of dicts: {name, remoteip, prefix, ip, legacy}
+        Returns list of dicts: {name, remoteip, prefix, ip?, legacy?}
         """
         rc, out, err = run_cmd([
             "netsh", "advfirewall", "firewall", "show", "rule",
@@ -376,30 +376,39 @@ class WindowsFirewallBackend(FirewallBackend):
         if current:
             rules.append(current)
 
-        # Filter only our rules
+        def _match_prefix(name: str) -> Optional[tuple]:
+            # Longer / more specific prefixes first
+            for prefix, legacy in (
+                ("HONEYPOT_BLOCK_REMOTE_", True),
+                ("HONEYPOT_REMOTE_BLOCK_", True),
+                ("HONEYPOT_THREAT_BLOCK_", True),
+                ("HONEYPOT_BLOCK_", True),
+                ("HP-BLOCK-", False),
+            ):
+                if name.startswith(prefix):
+                    return prefix, legacy
+            return None
+
         result = []
         for r in rules:
             name = r.get("name", "")
             remoteip = r.get("remoteip", "")
-            if name.startswith("HP-BLOCK-"):
-                suffix = name[len("HP-BLOCK-"):]
-                result.append({
-                    "name": name,
-                    "remoteip": remoteip,
-                    "suffix": suffix,
-                    "legacy": False,
-                })
-            elif name.startswith("HONEYPOT_THREAT_BLOCK_"):
-                suffix = name[len("HONEYPOT_THREAT_BLOCK_"):]
-                # Convert underscored IP back to dotted
-                ip = suffix.replace("_", ".")
-                result.append({
-                    "name": name,
-                    "remoteip": remoteip,
-                    "suffix": suffix,
-                    "ip": ip,
-                    "legacy": True,
-                })
+            matched = _match_prefix(name)
+            if not matched:
+                continue
+            prefix, legacy = matched
+            suffix = name[len(prefix):]
+            entry = {
+                "name": name,
+                "remoteip": remoteip,
+                "suffix": suffix,
+                "prefix": prefix,
+                "legacy": legacy,
+            }
+            if legacy and suffix:
+                # Convert underscored IP back to dotted when applicable
+                entry["ip"] = suffix.replace("_", ".")
+            result.append(entry)
         return result
 
     def migrate_legacy_rule(self, old_name: str, ip: str, remoteip: str) -> bool:

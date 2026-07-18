@@ -272,6 +272,10 @@ class CloudHoneypotClient:
             log(f"⚠️ Cleanup manager init failed: {e}")
             self.cleanup_manager = None
 
+        # Wire cleanup into remote commands (clear_firewall dashboard cmd)
+        if self.remote_commands is not None and self.cleanup_manager is not None:
+            self.remote_commands.cleanup_manager = self.cleanup_manager
+
         # Initialize Faz 3 modules (v4.0) — Ransomware Shield, System Health, Self-Protection
         self.ransomware_shield = None
         self.health_monitor = None

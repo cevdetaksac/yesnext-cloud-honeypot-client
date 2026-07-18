@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 19
+!define VERSIONBUILD 20
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 

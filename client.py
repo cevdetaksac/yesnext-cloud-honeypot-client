@@ -516,47 +516,14 @@ class CloudHoneypotClient:
             self.service_manager.start()
             log("ServiceManager başlatıldı (sync + watchdog + batch reporter)")
             
-            # Start Threat Detection Pipeline (v4.0)
-            if ENABLE_THREAT_DETECTION and self.event_watcher:
-                try:
-                    self.alert_pipeline.start()
-                    self.threat_engine.start()
-                    self.event_watcher.start()
-                    log("🛡️ Threat detection pipeline started (EventLog → Engine → Alerts)")
-                except Exception as e:
-                    log(f"⚠️ Threat detection start failed: {e}")
-
-            # Start Faz 2 modules (v4.0)
+            # Start Threat + Health (sessions/processes) — shared with daemon path
             if ENABLE_THREAT_DETECTION:
-                try:
-                    if self.remote_commands:
-                        self.remote_commands.start()
-                    if self.auto_response:
-                        self.auto_response.start()
-                    # Fetch initial threat/silent-hours config from backend
-                    self._sync_threat_config()
-                    log("🛡️ Faz 2 started (AutoResponse + RemoteCommands + SilentHours)")
-                except Exception as e:
-                    log(f"⚠️ Faz 2 start failed: {e}")
-                # Start periodic config sync
+                self._start_threat_and_health_services(source="gui")
                 threading.Thread(
                     target=self._threat_config_sync_loop,
                     name="ThreatConfigSync",
                     daemon=True,
                 ).start()
-
-            # Start Faz 3 modules (v4.0)
-            if ENABLE_THREAT_DETECTION:
-                try:
-                    if self.ransomware_shield:
-                        self.ransomware_shield.start()
-                    if self.health_monitor:
-                        self.health_monitor.start()
-                    if self.process_protection:
-                        self.process_protection.setup()
-                    log("🛡️ Faz 3 started (RansomwareShield + HealthMonitor + SelfProtection)")
-                except Exception as e:
-                    log(f"⚠️ Faz 3 start failed: {e}")
 
             # Start Faz 4 modules (v4.0)
             if ENABLE_THREAT_DETECTION:
@@ -1888,6 +1855,56 @@ class CloudHoneypotClient:
             return
         return self.update_manager.start_update_watchdog(auto_update=True)
 
+    def _start_threat_and_health_services(self, source: str = "gui") -> None:
+        """Start v4 threat pipeline + health/sessions reporter (daemon owns these when tray is UI-only)."""
+        if not ENABLE_THREAT_DETECTION:
+            return
+
+        # Threat pipeline
+        if getattr(self, "event_watcher", None):
+            try:
+                if self.alert_pipeline:
+                    self.alert_pipeline.start()
+                if self.threat_engine:
+                    self.threat_engine.start()
+                self.event_watcher.start()
+                log(f"🛡️ Threat detection pipeline started ({source})")
+            except Exception as e:
+                log(f"⚠️ Threat detection start failed ({source}): {e}")
+
+        # Remote commands + auto-response (list_sessions / list_processes / logoff)
+        try:
+            if getattr(self, "remote_commands", None):
+                if getattr(self, "health_monitor", None):
+                    self.remote_commands.health_monitor = self.health_monitor
+                self.remote_commands.start()
+            if getattr(self, "auto_response", None):
+                self.auto_response.start()
+            try:
+                self._sync_threat_config()
+            except Exception:
+                pass
+            log(f"🛡️ Faz 2 started ({source}: AutoResponse + RemoteCommands)")
+        except Exception as e:
+            log(f"⚠️ Faz 2 start failed ({source}): {e}")
+
+        # Health monitor — active_sessions + top_processes → POST /api/health/report
+        try:
+            if getattr(self, "ransomware_shield", None):
+                self.ransomware_shield.start()
+            if getattr(self, "health_monitor", None):
+                self.health_monitor.start()
+                # Push sessions/processes immediately so dashboard is not empty for ~60s
+                try:
+                    self.health_monitor.force_report(refresh=True)
+                except Exception as e:
+                    log(f"[HEALTH] initial force_report failed: {e}")
+            if getattr(self, "process_protection", None):
+                self.process_protection.setup()
+            log(f"🛡️ Faz 3 started ({source}: HealthMonitor + sessions/processes)")
+        except Exception as e:
+            log(f"⚠️ Faz 3 start failed ({source}): {e}")
+
     # ---------- Daemon ---------- #
     def run_daemon(self):
         self.state["token"] = self.token_manager.load_token()
@@ -1912,6 +1929,11 @@ class CloudHoneypotClient:
             self.start_firewall_agent()
         except Exception as e:
             log(f"firewall agent start failed (daemon): {e}")
+        # Threat + health/sessions (tray is UI-only when daemon is up — must run here)
+        try:
+            self._start_threat_and_health_services(source="daemon")
+        except Exception as e:
+            log(f"threat/health start failed (daemon): {e}")
         # Start external watchdog
         try:
             start_watchdog_if_needed(WATCHDOG_TOKEN_FILE, log)

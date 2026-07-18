@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.10"  # Fix: interactive update download killed by silent updater race
+VERSION = "4.4.11"  # Fix: daemon starts HealthMonitor (sessions/processes for dashboard)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

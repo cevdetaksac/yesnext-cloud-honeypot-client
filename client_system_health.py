@@ -834,6 +834,8 @@ class SystemHealthMonitor:
             },
         }
 
+        n_sess = len(payload["snapshot"].get("active_sessions") or [])
+        n_proc = len(payload["snapshot"].get("top_processes") or [])
         try:
             resp = self.api_client.api_request(
                 "POST", "health/report",
@@ -841,11 +843,14 @@ class SystemHealthMonitor:
             )
             if isinstance(resp, dict) and resp.get("status") in ("ok", "success", "received"):
                 self._stats["reports_sent"] += 1
+                log(f"[HEALTH] report ok — sessions={n_sess} processes={n_proc}")
                 return True
             # Accept any 2xx-style non-null response
             if resp is not None:
                 self._stats["reports_sent"] += 1
+                log(f"[HEALTH] report accepted — sessions={n_sess} processes={n_proc}")
                 return True
+            log(f"[HEALTH] report unexpected response — sessions={n_sess} processes={n_proc} resp={resp!r}")
         except Exception as e:
             log(f"[HEALTH] API report error: {e}")
         return False

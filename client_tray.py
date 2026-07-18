@@ -332,6 +332,21 @@ class TrayManager:
 
             def _link_account():
                 try:
+                    self.show_window()
+                    gui = getattr(self.app_instance, "gui", None)
+                    if gui and hasattr(gui, "_open_link_account"):
+                        tok = ""
+                        if hasattr(self.app_instance, "get_token"):
+                            tok = self.app_instance.get_token() or ""
+                        tok = tok or (getattr(self.app_instance, "state", {}) or {}).get("token", "")
+                        # Schedule on Tk thread after window shown
+                        root = getattr(self.app_instance, "root", None)
+                        if root:
+                            root.after(200, lambda: gui._open_link_account(tok))
+                        else:
+                            gui._open_link_account(tok)
+                        return
+                    # Fallback: browser
                     import webbrowser
                     from client_constants import API_URL
                     base = API_URL.rsplit("/api", 1)[0]
@@ -342,7 +357,6 @@ class TrayManager:
                     if tok:
                         _copy_token()
                     webbrowser.open(f"{base}/servers" if tok else f"{base}/?login=1")
-                    self.show_window()
                 except Exception as e:
                     log(f"tray link account error: {e}")
 

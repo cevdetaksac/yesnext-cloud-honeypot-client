@@ -843,6 +843,203 @@ def report_service_action_api(api_request_func, token: str, service: str, action
 
 # ===================== CLIENT REGISTRATION ===================== #
 
+def link_account_with_credentials(
+    email: str,
+    password: str,
+    agent_token: str,
+    *,
+    api_url: str = "",
+    log_func=None,
+) -> Dict[str, Any]:
+    """Link this agent token to a YesNext Account using email+password.
+
+    Prefer JSON: POST /api/agent/link-account
+    Fallback: form login + /account/link-server (session cookie).
+
+    Returns dict:
+      ok: bool
+      account_linked: bool
+      account: optional dict
+      error: optional str (user-facing)
+      source: 'agent_api' | 'web_fallback'
+    """
+    import requests
+    from client_constants import API_URL
+    from client_utils import apply_account_link_from_payload
+
+    def _log(msg: str):
+        if log_func:
+            try:
+                log_func(msg)
+            except Exception:
+                pass
+
+    email = (email or "").strip()
+    password = password or ""
+    tok = (agent_token or "").strip()
+    if not email or not password:
+        return {"ok": False, "account_linked": False, "error": "missing_credentials"}
+    if not tok:
+        return {"ok": False, "account_linked": False, "error": "missing_token"}
+
+    api_base = (api_url or API_URL).rstrip("/")
+    site_base = api_base.rsplit("/api", 1)[0]
+    verify = resolve_tls_verify()
+
+    # --- P0: dedicated agent JSON endpoint ---
+    for path in ("agent/link-account", "account/link-by-agent"):
+        try:
+            r = requests.post(
+                f"{api_base}/{path}",
+                json={"email": email, "password": password, "token": tok, "client_token": tok},
+                timeout=20,
+                verify=verify,
+                headers={"Accept": "application/json"},
+            )
+            if r.status_code == 404:
+                continue
+            if r.status_code == 401:
+                return {
+                    "ok": False,
+                    "account_linked": False,
+                    "error": "invalid_credentials",
+                    "source": "agent_api",
+                }
+            if 200 <= r.status_code < 300:
+                try:
+                    data = r.json() if r.content else {}
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {"account_linked": True}
+                data.setdefault("account_linked", True)
+                if isinstance(data.get("account"), dict) and not data["account"].get("email"):
+                    data["account"]["email"] = email
+                elif "account" not in data:
+                    data["account"] = {"email": email}
+                apply_account_link_from_payload(data, source="link_account")
+                _log(f"[ACCOUNT] Linked via {path}")
+                return {
+                    "ok": True,
+                    "account_linked": True,
+                    "account": data.get("account"),
+                    "source": "agent_api",
+                    "raw": data,
+                }
+            # Other errors from agent API
+            detail = ""
+            try:
+                detail = str((r.json() or {}).get("detail") or "")
+            except Exception:
+                detail = (r.text or "")[:120]
+            return {
+                "ok": False,
+                "account_linked": False,
+                "error": detail or f"http_{r.status_code}",
+                "source": "agent_api",
+            }
+        except Exception as e:
+            _log(f"[ACCOUNT] {path} failed: {e}")
+
+    # --- Fallback: web form login + link-server ---
+    try:
+        session = requests.Session()
+        login = session.post(
+            f"{site_base}/account/login",
+            data={"email": email, "password": password},
+            timeout=20,
+            verify=verify,
+            allow_redirects=True,
+        )
+        body = (login.text or "").lower()
+        if "invalid" in body and "credential" in body:
+            return {
+                "ok": False,
+                "account_linked": False,
+                "error": "invalid_credentials",
+                "source": "web_fallback",
+            }
+        if "login" in (login.url or "") and login.status_code == 200 and not session.cookies:
+            # Still on login page without session → treat as auth failure
+            if "invalid" in body or "incorrect" in body or "error" in body:
+                return {
+                    "ok": False,
+                    "account_linked": False,
+                    "error": "invalid_credentials",
+                    "source": "web_fallback",
+                }
+
+        linked_ok = False
+        last_err = ""
+        for payload in (
+            {"token": tok},
+            {"client_token": tok},
+            {"agent_token": tok},
+            {"token": tok, "email": email},
+        ):
+            try:
+                lr = session.post(
+                    f"{site_base}/account/link-server",
+                    data=payload,
+                    timeout=20,
+                    verify=verify,
+                    allow_redirects=True,
+                    headers={"Accept": "application/json, text/html"},
+                )
+                txt = (lr.text or "").lower()
+                # Success heuristics for HTML/JSON endpoints
+                if lr.status_code in (200, 302, 303):
+                    if "invalid" in txt and "token" in txt:
+                        last_err = "invalid_token"
+                        continue
+                    if "not found" in txt:
+                        last_err = "client_not_found"
+                        continue
+                    linked_ok = True
+                    break
+                last_err = f"http_{lr.status_code}"
+            except Exception as e:
+                last_err = str(e)
+
+        if not linked_ok:
+            return {
+                "ok": False,
+                "account_linked": False,
+                "error": last_err or "link_failed",
+                "source": "web_fallback",
+            }
+
+        # Confirm via account-status when possible
+        try:
+            from client_utils import refresh_account_link_status
+            st = refresh_account_link_status(tok)
+            if st is False:
+                # link may have succeeded but status lag — still mark local from email
+                pass
+        except Exception:
+            pass
+
+        apply_account_link_from_payload(
+            {"account_linked": True, "account": {"email": email}},
+            source="link_account_web",
+        )
+        _log("[ACCOUNT] Linked via web login + link-server fallback")
+        return {
+            "ok": True,
+            "account_linked": True,
+            "account": {"email": email},
+            "source": "web_fallback",
+        }
+    except Exception as e:
+        _log(f"[ACCOUNT] web fallback error: {e}")
+        return {
+            "ok": False,
+            "account_linked": False,
+            "error": str(e),
+            "source": "web_fallback",
+        }
+
+
 def register_client_api(
     api_url: str,
     server_name: str,

@@ -488,7 +488,198 @@ class ModernGUI:
             pass
 
     def _open_link_account(self, token: str = ""):
-        """Copy token and open My servers / login page for Account linking."""
+        """In-app popup: email + password → link this agent token to YesNext Account."""
+        tok = token or self.app.state.get("token", "") or ""
+        if not tok:
+            messagebox.showwarning(self.t("warn"), self.t("err_no_token"))
+            return
+        self._show_link_account_dialog(tok)
+
+    def _show_link_account_dialog(self, token: str):
+        """Modal dialog for account email/password linking."""
+        try:
+            dlg = ctk.CTkToplevel(self.root)
+        except Exception:
+            # Fallback: open web flow
+            self._open_link_account_web(token)
+            return
+
+        dlg.title(self.t("btn_link_account"))
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        try:
+            dlg.transient(self.root)
+        except Exception:
+            pass
+
+        frame = ctk.CTkFrame(dlg, fg_color=COLORS["card"], corner_radius=10)
+        frame.pack(fill="both", expand=True, padx=14, pady=14)
+
+        ctk.CTkLabel(
+            frame,
+            text=self.t("link_account_dialog_title"),
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(4, 6))
+
+        ctk.CTkLabel(
+            frame,
+            text=self.t("link_account_dialog_hint"),
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"],
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        email_var = ctk.StringVar()
+        pass_var = ctk.StringVar()
+        status_var = ctk.StringVar(value="")
+
+        # Prefill last known email from cache if any
+        try:
+            from client_utils import get_linked_account_email
+            prev = get_linked_account_email()
+            if prev:
+                email_var.set(prev)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(frame, text=self.t("link_account_email"), text_color=COLORS["text"]).pack(anchor="w")
+        email_entry = ctk.CTkEntry(frame, textvariable=email_var, width=360, height=32)
+        email_entry.pack(fill="x", pady=(2, 8))
+
+        ctk.CTkLabel(frame, text=self.t("link_account_password"), text_color=COLORS["text"]).pack(anchor="w")
+        pass_entry = ctk.CTkEntry(frame, textvariable=pass_var, show="*", width=360, height=32)
+        pass_entry.pack(fill="x", pady=(2, 8))
+
+        status_lbl = ctk.CTkLabel(
+            frame, textvariable=status_var, text_color=COLORS["orange"],
+            font=ctk.CTkFont(size=11), wraplength=360, justify="left",
+        )
+        status_lbl.pack(anchor="w", pady=(0, 8))
+
+        btn_row = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _set_busy(busy: bool):
+            state = "disabled" if busy else "normal"
+            try:
+                link_btn.configure(state=state)
+                web_btn.configure(state=state)
+                email_entry.configure(state=state)
+                pass_entry.configure(state=state)
+            except Exception:
+                pass
+
+        def _do_link():
+            email = (email_var.get() or "").strip()
+            password = pass_var.get() or ""
+            if not email or not password:
+                status_var.set(self.t("link_account_need_fields"))
+                return
+            _set_busy(True)
+            status_var.set(self.t("link_account_working"))
+
+            def _work():
+                from client_api import link_account_with_credentials
+                from client_constants import API_URL
+                result = link_account_with_credentials(
+                    email, password, token, api_url=str(API_URL), log_func=log,
+                )
+
+                def _done():
+                    _set_busy(False)
+                    if result.get("ok"):
+                        try:
+                            from client_utils import clear_force_gui_onboarding
+                            clear_force_gui_onboarding()
+                        except Exception:
+                            pass
+                        self._render_account_link_controls(token)
+                        try:
+                            dlg.destroy()
+                        except Exception:
+                            pass
+                        messagebox.showinfo(
+                            self.t("btn_account_linked"),
+                            self.t("link_account_success"),
+                        )
+                        try:
+                            self.show_toast(
+                                self.t("btn_account_linked"),
+                                self.t("link_account_success"),
+                                "info",
+                            )
+                        except Exception:
+                            pass
+                        # Confirm from API
+                        try:
+                            self._sync_account_link_from_api(force_ui=True)
+                        except Exception:
+                            pass
+                        return
+
+                    err = result.get("error") or "link_failed"
+                    if err == "invalid_credentials":
+                        status_var.set(self.t("link_account_bad_credentials"))
+                    elif err == "missing_token":
+                        status_var.set(self.t("err_no_token"))
+                    else:
+                        status_var.set(self.t("link_account_failed").format(err=err))
+
+                self._gui_safe(_done)
+
+            import threading
+            threading.Thread(target=_work, daemon=True, name="AccountLink").start()
+
+        def _open_web():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            self._open_link_account_web(token)
+
+        link_btn = ctk.CTkButton(
+            btn_row,
+            text=self.t("btn_link_account"),
+            width=150, height=32,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            command=_do_link,
+        )
+        link_btn.pack(side="left", padx=(0, 8))
+
+        web_btn = ctk.CTkButton(
+            btn_row,
+            text=self.t("link_account_open_web"),
+            width=140, height=32,
+            fg_color="transparent", border_width=1,
+            border_color=COLORS["border"], hover_color=COLORS["card_hover"],
+            command=_open_web,
+        )
+        web_btn.pack(side="left")
+
+        ctk.CTkButton(
+            frame,
+            text=self.t("update_not_now"),
+            width=100, height=28,
+            fg_color="transparent", text_color=COLORS["text_dim"],
+            command=dlg.destroy,
+        ).pack(anchor="e", pady=(10, 0))
+
+        dlg.update_idletasks()
+        w, h = 420, 340
+        try:
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+            y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+            dlg.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            dlg.geometry(f"{w}x{h}")
+
+        email_entry.focus_set()
+        dlg.bind("<Return>", lambda _e: _do_link())
+
+    def _open_link_account_web(self, token: str = ""):
+        """Legacy/fallback: copy token and open My servers in browser."""
         tok = token or self.app.state.get("token", "") or ""
         if tok:
             try:
@@ -517,7 +708,6 @@ class ModernGUI:
             self.show_toast(self.t("btn_link_account"), self.t("token_copied_toast"), "info")
         except Exception:
             pass
-        # Poll API a few times — user may finish link-server on the web
         for delay_ms in (8000, 20000, 45000):
             try:
                 self.root.after(

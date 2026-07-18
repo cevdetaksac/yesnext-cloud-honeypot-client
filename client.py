@@ -1040,6 +1040,18 @@ class CloudHoneypotClient:
                 cmd = line.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW" and self.show_cb:
                     self._gui_safe(self.show_cb)
+                elif cmd in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
+                    # Installer / updater graceful exit — bypasses DACL self-protection
+                    log("[CTRL] QUIT received — graceful exit for install/update")
+                    try:
+                        from client_utils import write_watchdog_token
+                        write_watchdog_token("stop", WATCHDOG_TOKEN_FILE)
+                    except Exception:
+                        pass
+                    threading.Thread(
+                        target=lambda: (time.sleep(0.2), self.graceful_exit(0)),
+                        daemon=True,
+                    ).start()
                         
             except Exception as e:
                 log(f"Control server loop error: {e}")

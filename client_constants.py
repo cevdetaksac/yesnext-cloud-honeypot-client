@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.5"  # API contract alignment (agent↔dashboard) + installer kill hardening
+VERSION = "4.4.6"  # Installer kill: SeDebugPrivilege + QUIT + HoneypotClientGuard
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

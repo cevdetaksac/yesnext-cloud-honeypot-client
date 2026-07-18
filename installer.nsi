@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 5
+!define VERSIONBUILD 6
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -111,11 +111,13 @@ Function DeleteAllHoneypotTasks
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-MemoryRestart" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypotClientBoot" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypotClientLogon" >nul 2>&1'
-    Sleep 500
+    nsExec::Exec 'schtasks /end /tn "HoneypotClientGuard" >nul 2>&1'
+    nsExec::Exec 'schtasks /change /tn "HoneypotClientGuard" /disable >nul 2>&1'
+    Sleep 300
 
-    DetailPrint "[TASKS] Deleting all CloudHoneypot scheduled tasks..."
-    ; PowerShell wildcard - catches ANY CloudHoneypot* task
-    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $$_.TaskName -like ''CloudHoneypot*'' } | ForEach-Object { schtasks /end /tn $$_.TaskName 2>$$null; Unregister-ScheduledTask -TaskName $$_.TaskName -Confirm:$$false -ErrorAction SilentlyContinue }"'
+    DetailPrint "[TASKS] Deleting all CloudHoneypot / HoneypotClient tasks..."
+    ; PowerShell wildcard - catches CloudHoneypot* AND HoneypotClient* (self-protect guard)
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $$_.TaskName -like ''CloudHoneypot*'' -or $$_.TaskName -like ''HoneypotClient*'' } | ForEach-Object { schtasks /end /tn $$_.TaskName 2>$$null; Unregister-ScheduledTask -TaskName $$_.TaskName -Confirm:$$false -ErrorAction SilentlyContinue }"'
     Pop $0
 
     ; Fallback: explicit deletion of every known task name (both conventions)
@@ -127,6 +129,7 @@ Function DeleteAllHoneypotTasks
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-MemoryRestart" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypotClientBoot" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypotClientLogon" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "HoneypotClientGuard" /f >nul 2>&1'
     ; Legacy names
     nsExec::Exec 'schtasks /delete /tn "Cloud Honeypot Client" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "HoneypotClientAutostart" /f >nul 2>&1'
@@ -152,9 +155,10 @@ Function un.DeleteAllHoneypotTasks
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-MemoryRestart" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypotClientBoot" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypotClientLogon" >nul 2>&1'
+    nsExec::Exec 'schtasks /end /tn "HoneypotClientGuard" >nul 2>&1'
     Sleep 500
 
-    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $$_.TaskName -like ''CloudHoneypot*'' } | ForEach-Object { schtasks /end /tn $$_.TaskName 2>$$null; Unregister-ScheduledTask -TaskName $$_.TaskName -Confirm:$$false -ErrorAction SilentlyContinue }"'
+    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $$_.TaskName -like ''CloudHoneypot*'' -or $$_.TaskName -like ''HoneypotClient*'' } | ForEach-Object { schtasks /end /tn $$_.TaskName 2>$$null; Unregister-ScheduledTask -TaskName $$_.TaskName -Confirm:$$false -ErrorAction SilentlyContinue }"'
     Pop $0
 
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-Background" /f >nul 2>&1'
@@ -165,6 +169,7 @@ Function un.DeleteAllHoneypotTasks
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypot-MemoryRestart" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypotClientBoot" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypotClientLogon" /f >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "HoneypotClientGuard" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "Cloud Honeypot Client" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "HoneypotClientAutostart" /f >nul 2>&1'
     nsExec::Exec 'schtasks /delete /tn "CloudHoneypotTray" /f >nul 2>&1'
@@ -178,46 +183,23 @@ FunctionEnd
 
 ; ===================================================================
 ; FAST PRE-KILL — runs at installer startup (before UI pages)
-; Multi-round until honeypot-client.exe is gone (watchdog race-safe)
+; Uses kill-honeypot.ps1: QUIT socket + SeDebugPrivilege + task purge
 ; ===================================================================
 Function PreInstallKillFast
-    DetailPrint "[PRE-KILL] Stopping tasks and client processes..."
-    nsExec::Exec 'cmd /c echo stop > "%TEMP%\honeypot_watchdog_token.txt"'
-    nsExec::Exec 'cmd /c echo stop > "%APPDATA%\YesNext\CloudHoneypot\watchdog_token.txt"'
-    nsExec::Exec 'cmd /c mkdir "%ProgramData%\YesNext\CloudHoneypot" 2>nul'
-    nsExec::Exec 'cmd /c echo stop > "%ProgramData%\YesNext\CloudHoneypot\watchdog_stop.flag"'
-    nsExec::Exec 'cmd /c echo stop > "%APPDATA%\YesNext\CloudHoneypotClient\watchdog.token"'
+    DetailPrint "[PRE-KILL] Extracting kill helper..."
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File "scripts\kill-honeypot.ps1"
 
-    ; End known tasks first so watchdog cannot respawn
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Watchdog" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Updater" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-SilentUpdater" >nul 2>&1'
-    nsExec::Exec 'schtasks /end /tn "CloudHoneypot-MemoryRestart" >nul 2>&1'
-
-    ; Up to 5 aggressive kill rounds (covers respawn race)
-    StrCpy $0 0
-  PreKillLoop:
-    IntOp $0 $0 + 1
-    nsExec::Exec 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name=''honeypot-client.exe''\" -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }; Get-Process -Name honeypot-client -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; taskkill /F /T /IM honeypot-client.exe 2>$$null | Out-Null"'
-    Pop $1
-    Sleep 250
-
-    nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
-    Pop $1
-    Pop $2
-    StrCmp $2 "STOPPED" PreKillDone
-    IntCmp $0 5 PreKillDone PreKillLoop PreKillDone
-
-  PreKillDone:
-    DetailPrint "[PRE-KILL] Shutdown rounds complete ($0)."
-    Sleep 150
+    DetailPrint "[PRE-KILL] Stopping tasks + DACL-protected processes..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1"'
+    Pop $0
+    DetailPrint "[PRE-KILL] kill-honeypot.ps1 exit code: $0"
+    Sleep 200
 FunctionEnd
 
 ; ===================================================================
 ; KILL HONEYPOT PROCESSES WITH VERIFICATION
-; Uses taskkill + PowerShell fallback, verifies process is dead
 ; ===================================================================
 Function KillHoneypotProcesses
     Push $0
@@ -226,21 +208,17 @@ Function KillHoneypotProcesses
     DetailPrint "[KILL] Verified shutdown sequence..."
     Call PreInstallKillFast
 
-    ; Final verification + one more force kill if needed
     nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
     Pop $0
     Pop $1
     StrCmp $1 "STOPPED" KillDone
 
-    DetailPrint "[KILL] Still running — final force kill..."
-    nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
-    Pop $0
-    Sleep 400
+    DetailPrint "[KILL] Still running — second SeDebug kill pass..."
     Call PreInstallKillFast
+    Sleep 400
 
     KillDone:
     DetailPrint "[KILL] Process shutdown complete."
-    ; Keep stop flags until files are replaced; clear TEMP only
     nsExec::Exec 'cmd /c del "%TEMP%\honeypot_watchdog_token.txt" 2>nul'
 
     Pop $1
@@ -252,7 +230,7 @@ Function un.KillHoneypotProcesses
     Push $0
     Push $1
 
-    DetailPrint "[KILL] Fast uninstall shutdown..."
+    DetailPrint "[KILL] Uninstall shutdown..."
     Call un.PreInstallKillFast
 
     nsExec::Exec 'taskkill /f /t /im "honeypot-client.exe" >nul 2>&1'
@@ -267,26 +245,34 @@ Function un.KillHoneypotProcesses
 FunctionEnd
 
 Function un.PreInstallKillFast
+    DetailPrint "[PRE-KILL] Uninstall stop sequence..."
     nsExec::Exec 'cmd /c echo stop > "%TEMP%\honeypot_watchdog_token.txt"'
     nsExec::Exec 'cmd /c echo stop > "%APPDATA%\YesNext\CloudHoneypot\watchdog_token.txt"'
     nsExec::Exec 'cmd /c mkdir "%ProgramData%\YesNext\CloudHoneypot" 2>nul'
     nsExec::Exec 'cmd /c echo stop > "%ProgramData%\YesNext\CloudHoneypot\watchdog_stop.flag"'
     nsExec::Exec 'cmd /c echo stop > "%APPDATA%\YesNext\CloudHoneypotClient\watchdog.token"'
+    nsExec::Exec 'schtasks /end /tn "HoneypotClientGuard" >nul 2>&1'
+    nsExec::Exec 'schtasks /delete /tn "HoneypotClientGuard" /f >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Watchdog" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
     nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
-    StrCpy $0 0
-  UnPreKillLoop:
-    IntOp $0 $0 + 1
-    nsExec::Exec 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process -Name honeypot-client -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; taskkill /F /T /IM honeypot-client.exe 2>$$null | Out-Null"'
-    Pop $1
-    Sleep 250
-    nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
-    Pop $1
-    Pop $2
-    StrCmp $2 "STOPPED" UnPreKillDone
-    IntCmp $0 5 UnPreKillDone UnPreKillLoop UnPreKillDone
-  UnPreKillDone:
+
+    ; Prefer installed kill helper (SeDebugPrivilege)
+    IfFileExists "$INSTDIR\scripts\kill-honeypot.ps1" 0 UnKillFallback
+        nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\kill-honeypot.ps1"'
+        Pop $0
+        Goto UnKillDone
+
+    UnKillFallback:
+        ; QUIT + WMI terminate (admin) fallback when script missing
+        nsExec::Exec 'powershell -NoProfile -ExecutionPolicy Bypass -Command "try{$$c=New-Object Net.Sockets.TcpClient;$$iar=$$c.BeginConnect(\"127.0.0.1\",58632,$$null,$$null);$$iar.AsyncWaitHandle.WaitOne(800)|Out-Null;if($$c.Connected){$$b=[Text.Encoding]::ASCII.GetBytes(\"QUIT`n\");$$c.GetStream().Write($$b,0,$$b.Length)};$$c.Close()}catch{}"'
+        Pop $0
+        Sleep 500
+        nsExec::Exec 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name=''honeypot-client.exe''\" | ForEach-Object { $$_.Terminate() }; taskkill /F /T /IM honeypot-client.exe 2>$$null"'
+        Pop $0
+        Sleep 400
+
+    UnKillDone:
     Sleep 150
 FunctionEnd
 
@@ -344,6 +330,8 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=client_lang.json "dist\client_lang.json"
     File /oname=LICENSE "dist\LICENSE"
     File /oname=README.md "dist\README.md"
+    CreateDirectory "$INSTDIR\scripts"
+    File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
     !insertmacro LOG "[FILES] Application files installed."
 
     ; =================================================================
@@ -426,6 +414,8 @@ Section "Uninstall"
     Delete "$INSTDIR\client_lang.json"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\README.md"
+    Delete "$INSTDIR\scripts\kill-honeypot.ps1"
+    RMDir "$INSTDIR\scripts"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
 

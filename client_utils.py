@@ -630,6 +630,7 @@ def watchdog_main(parent_pid: int, log_func=None):
         stop_locations = [
             os.path.join(os.environ.get('TEMP', ''), 'honeypot_watchdog_token.txt'),
             os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypot', 'watchdog_token.txt'),
+            os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient', 'watchdog.token'),
             os.path.join(os.environ.get('ProgramData', 'C:\\ProgramData'), 'YesNext', 'CloudHoneypot', 'watchdog_stop.flag'),
         ]
         for loc in stop_locations:
@@ -1364,12 +1365,14 @@ class InstallerUpdateManager:
 # ===================== UPDATE UI HELPERS ===================== #
 
 def prepare_client_for_installer() -> None:
-    """Installer öncesi watchdog yeniden başlatmayı engelle."""
+    """Installer öncesi watchdog/self-protect yeniden başlatmayı engelle + QUIT gönder."""
+    import socket
     import subprocess
 
     flag_paths = [
         os.path.join(os.environ.get("TEMP", ""), "honeypot_watchdog_token.txt"),
         os.path.join(os.environ.get("APPDATA", ""), "YesNext", "CloudHoneypot", "watchdog_token.txt"),
+        os.path.join(os.environ.get("APPDATA", ""), "YesNext", "CloudHoneypotClient", "watchdog.token"),
         os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "YesNext", "CloudHoneypot", "watchdog_stop.flag"),
     ]
     for path in flag_paths:
@@ -1388,12 +1391,43 @@ def prepare_client_for_installer() -> None:
         "CloudHoneypot-Watchdog",
         "CloudHoneypot-Updater",
         "CloudHoneypot-SilentUpdater",
+        "CloudHoneypot-MemoryRestart",
+        "HoneypotClientGuard",
     ):
         try:
             subprocess.run(
                 ["schtasks", "/end", "/tn", task],
                 capture_output=True,
                 timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            subprocess.run(
+                ["schtasks", "/change", "/tn", task, "/disable"],
+                capture_output=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+    # Graceful QUIT via control socket (process exits itself → DACL bypass)
+    try:
+        with socket.create_connection(("127.0.0.1", 58632), timeout=0.8) as sock:
+            sock.sendall(b"QUIT\n")
+    except Exception:
+        pass
+
+    # Prefer dedicated kill script when available (SeDebugPrivilege)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "kill-honeypot.ps1")
+    if os.path.isfile(script):
+        try:
+            subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", script,
+                ],
+                capture_output=True,
+                timeout=30,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except Exception:

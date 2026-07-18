@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
 from client_security_utils import auth_headers, resolve_tls_verify, use_legacy_token_query
 from urllib3.util.retry import Retry
 

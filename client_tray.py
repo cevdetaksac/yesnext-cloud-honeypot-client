@@ -113,12 +113,14 @@ class TrayManager:
         
 
     def is_protection_active(self) -> bool:
-        """Check if any honeypot service is currently active via ServiceManager"""
+        """Check if any honeypot service is currently active via ServiceManager.
+
+        Empty running set is normal on workstations when no tunnels are enabled —
+        do not log a warning (icon already shows inactive).
+        """
         try:
             if hasattr(self.app_instance, 'service_manager'):
                 running = self.app_instance.service_manager.running_services
-                if not running:
-                    log("[TRAY] ⚠️ WARNING: Honeypot servisleri başlatılamadı! Hiçbir aktif servis yok.")
                 return len(running) > 0
         except Exception as e:
             log(f"[TRAY] Protection status check error: {e}")

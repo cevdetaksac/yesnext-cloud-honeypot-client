@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.43"  # Session 0: no GUI; daemon never steals GUI; watchdog respects GUI
+VERSION = "4.4.44"  # Fix firewall HTTPAdapter, reconcile list crash, self-protect DACL
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

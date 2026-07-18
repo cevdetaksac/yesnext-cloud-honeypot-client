@@ -203,7 +203,6 @@ class ProcessProtection:
             import win32api
             import win32security
             import win32con
-            import ntsecuritycon
 
             # Get current process handle
             pid = os.getpid()
@@ -219,13 +218,13 @@ class ProcessProtection:
 
             dacl = sd.GetSecurityDescriptorDacl()
 
-            # Deny PROCESS_TERMINATE to Everyone
+            # Deny PROCESS_TERMINATE to Everyone (constant lives in win32con, not ntsecuritycon)
             everyone_sid = win32security.CreateWellKnownSid(
                 win32security.WinWorldSid, None
             )
             dacl.AddAccessDeniedAce(
                 win32security.ACL_REVISION,
-                ntsecuritycon.PROCESS_TERMINATE,
+                win32con.PROCESS_TERMINATE,
                 everyone_sid,
             )
 

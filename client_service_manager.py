@@ -431,6 +431,31 @@ class ServiceManager:
 
             self._stop_evt.wait(timeout=SERVICE_SYNC_CHECK)
 
+    @staticmethod
+    def _normalize_desired_services(payload) -> dict:
+        """Extract service status map from tunnel-status API payload.
+
+        Backend may return either:
+          {"services": {"RDP": {...}, ...}, "pending_tunnel_commands": [...], ...}
+          or a flat map mixed with non-service keys (lists, server_time, etc.).
+        """
+        if not isinstance(payload, dict):
+            return {}
+        nested = payload.get("services")
+        if isinstance(nested, dict):
+            return {
+                k: v for k, v in nested.items()
+                if isinstance(v, dict)
+            }
+        skip = {"services", "pending_tunnel_commands", "server_time"}
+        out = {}
+        for key, value in payload.items():
+            if key in skip or not isinstance(value, dict):
+                continue
+            if "status" in value or "desired" in value:
+                out[key] = value
+        return out
+
     def _do_reconcile(self):
         """Dashboard desired state vs local actual state → start/stop."""
         try:
@@ -441,10 +466,21 @@ class ServiceManager:
             if not desired:
                 return  # API hatası veya boş yanıt
 
-            for service_name, info in desired.items():
+            services = self._normalize_desired_services(desired)
+            if not services:
+                return
+
+            for service_name, info in services.items():
                 service_name = service_name.upper()
-                want_running = info.get("status") == "started"
-                port = info.get("port", HONEYPOT_SERVICES.get(service_name, {}).get("port", 0))
+                # Prefer explicit desired state; fall back to reported status
+                want = (info.get("desired") or info.get("status") or "").lower()
+                want_running = want == "started"
+                port = (
+                    info.get("new_port")
+                    or info.get("listen_port")
+                    or info.get("port")
+                    or HONEYPOT_SERVICES.get(service_name, {}).get("port", 0)
+                )
 
                 current_status = self.get_status(service_name)
                 is_running = current_status == "started"

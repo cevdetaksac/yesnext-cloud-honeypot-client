@@ -100,12 +100,16 @@ class RemoteDesktopStreamer:
         self._black_warn_ts = 0.0
         self._capture_method = "none"
         self._stream_started_at = 0.0
-        self._use_user_helper = False  # Session 0 → capture via CreateProcessAsUser helper
+        self._use_user_helper = False  # Session 0 / other session → CreateProcessAsUser helper
         self._input_desktop = None
         self._desktop_attached = False
         self._tscon_attempted = False
         self._last_good_jpeg: Optional[bytes] = None
         self._last_good_wh: Tuple[int, int] = (0, 0)
+        # Dashboard session picker (AGENT_REMOTE_SESSION_SELECT_PROMPT)
+        self._target_session_id: Optional[int] = None
+        self._target_username: str = ""
+        self._monitor_index: int = 0
 
         self._input_ts: deque = deque(maxlen=INPUT_RATE_LIMIT * 4)
         self._stats = {
@@ -125,15 +129,24 @@ class RemoteDesktopStreamer:
     # ── Public API ────────────────────────────────────────────────
 
     def start(self, fps: float = DEFAULT_FPS, quality: int = DEFAULT_QUALITY,
-              max_width: int = DEFAULT_MAX_WIDTH) -> dict:
+              max_width: int = DEFAULT_MAX_WIDTH,
+              session_id: Optional[int] = None,
+              username: Optional[str] = None,
+              monitor: int = 0) -> dict:
         """Start capture + WS (with HTTP fallback).
 
-        Honest start: probe desktop first. screen/capture 0×0 → CAPTURE_NO_DESKTOP.
+        Honest start: resolve WTS session_id, probe desktop first.
+        No interactive sessions → NO_INTERACTIVE_SESSION.
+        screen/capture 0×0 → CAPTURE_NO_DESKTOP.
         """
         with self._lock:
             self._fps = max(1.0, min(float(fps or DEFAULT_FPS), 10.0))
             self._quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
             self._max_width = max(640, min(int(max_width or DEFAULT_MAX_WIDTH), 1920))
+            try:
+                self._monitor_index = max(0, int(monitor or 0))
+            except (TypeError, ValueError):
+                self._monitor_index = 0
             self._seq = 0
             self._last_activity = time.time()
             self._stop.clear()
@@ -145,10 +158,80 @@ class RemoteDesktopStreamer:
             self._tscon_attempted = False
             self._last_good_jpeg = None
             self._last_good_wh = (0, 0)
+            self._use_user_helper = False
+
+            # ── Resolve target WTS session (dashboard picker) ──
+            sessions = self._enumerate_sessions()
+            interactive = [
+                s for s in sessions
+                if int(s.get("session_id") or 0) > 0
+                and str(s.get("protocol") or "").lower() != "services"
+            ]
+            if not interactive:
+                err = "NO_INTERACTIVE_SESSION"
+                msg = "No interactive desktop to mirror"
+                log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
+                self._running = False
+                self._transport = "idle"
+                self._target_session_id = None
+                self._target_username = ""
+                return {
+                    "success": False,
+                    "error": err,
+                    "message": msg,
+                    "data": self.get_status(),
+                }
+
+            resolved_sid: Optional[int] = None
+            if session_id is not None:
+                try:
+                    resolved_sid = int(session_id)
+                except (TypeError, ValueError):
+                    resolved_sid = None
+            if resolved_sid is not None:
+                match = next(
+                    (s for s in interactive if int(s["session_id"]) == resolved_sid),
+                    None,
+                )
+                if match is None:
+                    err = "NO_INTERACTIVE_SESSION"
+                    msg = f"Requested session_id={resolved_sid} not in interactive session list"
+                    log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
+                    return {
+                        "success": False,
+                        "error": err,
+                        "message": msg,
+                        "data": self.get_status(),
+                    }
+                self._target_session_id = resolved_sid
+                self._target_username = (
+                    (username or "").strip()
+                    or str(match.get("username") or "")
+                )
+            else:
+                picked = self._pick_default_session(interactive)
+                self._target_session_id = int(picked["session_id"])
+                self._target_username = (
+                    (username or "").strip()
+                    or str(picked.get("username") or "")
+                )
+
+            pid_sid, csid = self._session_ids()
+            # Capture other user's desktop via helper when not already in that session
+            need_helper = (
+                self._target_session_id is not None
+                and (pid_sid is None or int(pid_sid) != int(self._target_session_id))
+            )
+            log(
+                f"[REMOTE-DESKTOP] start — target_session={self._target_session_id} "
+                f"user={self._target_username!r} monitor={self._monitor_index} "
+                f"pid_session={pid_sid} console={csid} helper={need_helper}"
+            )
 
             if self._running and self._thread and self._thread.is_alive():
                 st = self.get_status()
-                if (st.get("screen") or {}).get("w", 0) > 0:
+                same_sid = st.get("session_id") == self._target_session_id
+                if same_sid and (st.get("screen") or {}).get("w", 0) > 0:
                     log(f"[REMOTE-DESKTOP] Already streaming — params updated "
                         f"(fps={self._fps} q={self._quality} w={self._max_width})")
                     return {
@@ -156,62 +239,66 @@ class RemoteDesktopStreamer:
                         "message": "stream already active; params updated",
                         "data": st,
                     }
-                # Was "streaming" but never captured — restart probe
+                # Different session or dead capture — restart
                 self._running = False
                 self._stop.set()
 
-            sid, csid = self._session_ids()
-            state = self._session_connect_state(sid)
-            log(f"[REMOTE-DESKTOP] start probe — pid_session={sid} console={csid} "
-                f"state={state}")
+            sid, csid = pid_sid, csid
+            state = self._session_connect_state(self._target_session_id)
+            log(f"[REMOTE-DESKTOP] start probe — target={self._target_session_id} "
+                f"state={state} pid_session={sid}")
 
-            # Capture thread-less probe: attach input desktop first (RDP/elevated)
-            self._attach_input_desktop()
-            if state in ("Disconnected", "Down", "Init"):
-                self._try_reconnect_session_to_console(sid)
+            jpeg, w, h = None, 0, 0
+            if need_helper:
+                jpeg, w, h = self._grab_via_user_helper()
+            else:
+                # Capture thread-less probe: attach input desktop first (RDP/elevated)
+                self._attach_input_desktop()
+                if state in ("Disconnected", "Down", "Init"):
+                    self._try_reconnect_session_to_console(self._target_session_id)
 
-            # Probe BEFORE advertising streaming=true
-            jpeg, w, h = self._grab_jpeg()
-            blackish = "+black" in (self._capture_method or "")
-            if blackish or not jpeg:
-                # One more attempt after forced console reconnect
-                if not self._tscon_attempted:
-                    self._try_reconnect_session_to_console(sid)
-                    time.sleep(0.4)
-                    self._attach_input_desktop()
-                    jpeg, w, h = self._grab_jpeg()
-                    blackish = "+black" in (self._capture_method or "")
-            if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES or blackish:
-                # Session 0 / wrong session: try one-shot capture in interactive user session
-                jpeg2, w2, h2 = self._grab_via_user_helper()
-                if jpeg2 and w2 > 0 and h2 > 0 and len(jpeg2) >= MIN_JPEG_BYTES:
-                    jpeg, w, h = jpeg2, w2, h2
-                    self._use_user_helper = True
-                    self._screen_w = self._screen_w or w2
-                    self._screen_h = self._screen_h or h2
-                    self._capture_w, self._capture_h = w2, h2
-                else:
-                    err = "CAPTURE_NO_DESKTOP"
-                    msg = (
-                        "No interactive desktop bitmap "
-                        f"(session={sid}/{csid}, size={w}x{h}, jpeg={0 if not jpeg else len(jpeg)}B). "
-                        "Run agent in console/RDP user session — Session 0 service cannot capture."
-                    )
-                    log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
-                    self._running = False
-                    self._transport = "idle"
-                    return {
-                        "success": False,
-                        "error": err,
-                        "message": msg,
-                        "data": self.get_status(),
-                    }
+                # Probe BEFORE advertising streaming=true
+                jpeg, w, h = self._grab_jpeg()
+                blackish = "+black" in (self._capture_method or "")
+                if blackish or not jpeg:
+                    # One more attempt after forced console reconnect
+                    if not self._tscon_attempted:
+                        self._try_reconnect_session_to_console(self._target_session_id)
+                        time.sleep(0.4)
+                        self._attach_input_desktop()
+                        jpeg, w, h = self._grab_jpeg()
+                        blackish = "+black" in (self._capture_method or "")
+                if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES or blackish:
+                    jpeg2, w2, h2 = self._grab_via_user_helper()
+                    if jpeg2 and w2 > 0 and h2 > 0 and len(jpeg2) >= MIN_JPEG_BYTES:
+                        jpeg, w, h = jpeg2, w2, h2
+
+            if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES:
+                err = "CAPTURE_NO_DESKTOP"
+                msg = (
+                    "No interactive desktop bitmap "
+                    f"(session={self._target_session_id}, size={w}x{h}, "
+                    f"jpeg={0 if not jpeg else len(jpeg)}B)."
+                )
+                log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
+                self._running = False
+                self._transport = "idle"
+                return {
+                    "success": False,
+                    "error": err,
+                    "message": msg,
+                    "data": self.get_status(),
+                }
+
+            if need_helper or self._use_user_helper:
+                self._use_user_helper = True
 
             self._screen_w = self._screen_w or w
             self._screen_h = self._screen_h or h
             self._capture_w, self._capture_h = w, h
             log(f"[REMOTE-DESKTOP] probe ok — screen={self._screen_w}x{self._screen_h} "
-                f"capture={w}x{h} jpeg={len(jpeg)}B method={self._capture_method}")
+                f"capture={w}x{h} jpeg={len(jpeg)}B method={self._capture_method} "
+                f"session={self._target_session_id}")
 
             self._running = True
             self._transport = "http"
@@ -255,7 +342,8 @@ class RemoteDesktopStreamer:
                 pass
 
             log(f"[REMOTE-DESKTOP] ▶ Stream started "
-                f"(fps={self._fps} q={self._quality} max_w={self._max_width} ws+http)")
+                f"(fps={self._fps} q={self._quality} max_w={self._max_width} "
+                f"session={self._target_session_id} ws+http)")
             return {
                 "success": True,
                 "message": "remote stream started (websocket preferred)",
@@ -290,6 +378,9 @@ class RemoteDesktopStreamer:
             "quality": self._quality,
             "max_width": self._max_width,
             "seq": self._seq,
+            "session_id": self._target_session_id,
+            "username": self._target_username or "",
+            "monitor": self._monitor_index,
             "capture_method": self._capture_method,
             "screen": {"w": self._screen_w, "h": self._screen_h},
             "capture": {"w": self._capture_w, "h": self._capture_h},
@@ -401,9 +492,19 @@ class RemoteDesktopStreamer:
         if not token:
             return
 
-        jpeg, w, h = self._grab_jpeg()
-        if (not jpeg or w <= 0 or h <= 0) and self._use_user_helper:
+        if self._use_user_helper:
             jpeg, w, h = self._grab_via_user_helper()
+            if not jpeg or w <= 0 or h <= 0:
+                jpeg, w, h = self._grab_jpeg()
+        else:
+            jpeg, w, h = self._grab_jpeg()
+            pid_sid, _ = self._session_ids()
+            if (
+                (not jpeg or w <= 0 or h <= 0)
+                and self._target_session_id
+                and (pid_sid is None or int(pid_sid) != int(self._target_session_id))
+            ):
+                jpeg, w, h = self._grab_via_user_helper()
         if not jpeg or w <= 0 or h <= 0:
             self._stats["frames_failed"] += 1
             return
@@ -817,7 +918,11 @@ class RemoteDesktopStreamer:
             import mss
             from PIL import Image
             with mss.mss() as sct:
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                # monitors[0]=virtual all; [1]=primary; [2+]=extra
+                idx = 1 + max(0, int(self._monitor_index or 0))
+                if idx >= len(sct.monitors):
+                    idx = 1 if len(sct.monitors) > 1 else 0
+                mon = sct.monitors[idx]
                 shot = sct.grab(mon)
                 return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         except ImportError:
@@ -837,11 +942,88 @@ class RemoteDesktopStreamer:
         except Exception:
             return None, None
 
-    def _grab_via_user_helper(self) -> Tuple[Optional[bytes], int, int]:
-        """ONLY Session 0: CreateProcessAsUser into an Active session.
+    @staticmethod
+    def _enumerate_sessions() -> list:
+        """List WTS sessions (Active + Disconnected). Mirrors health active_sessions shape."""
+        import subprocess
+        out = []
+        try:
+            r = subprocess.run(
+                ["query", "user"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=0x08000000,
+            )
+            for line in (r.stdout or "").splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[0].startswith(">"):
+                    parts[0] = parts[0][1:]
+                username = parts[0]
+                session_name = ""
+                id_idx = None
+                for i, p in enumerate(parts[1:], 1):
+                    if p.isdigit():
+                        id_idx = i
+                        break
+                if id_idx is None:
+                    continue
+                if id_idx > 1:
+                    session_name = parts[1]
+                session_id = int(parts[id_idx])
+                status_raw = parts[id_idx + 1] if len(parts) > id_idx + 1 else ""
+                status = {
+                    "active": "Active",
+                    "disc": "Disconnected",
+                    "listen": "Listen",
+                }.get(status_raw.lower(), status_raw or "Unknown")
+                sn = (session_name or "").lower()
+                if sn.startswith("rdp") or "tcp#" in sn:
+                    protocol = "RDP"
+                elif sn in ("services",):
+                    protocol = "Services"
+                else:
+                    protocol = "Console"
+                if session_id <= 0:
+                    continue
+                out.append({
+                    "username": username,
+                    "session_id": session_id,
+                    "session_name": session_name or protocol,
+                    "status": status,
+                    "protocol": protocol,
+                })
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] enumerate sessions failed: {e}")
+        return out
 
-        If already in session>0 (RDP #2 etc.), skip — WTSQueryUserToken → err 1314
-        and targeting console≠RDP is wrong.
+    @staticmethod
+    def _pick_default_session(sessions: list) -> dict:
+        """Console Active → Console → Active RDP → first."""
+        if not sessions:
+            raise ValueError("no sessions")
+
+        def _rank(s: dict) -> tuple:
+            proto = str(s.get("protocol") or "").lower()
+            status = str(s.get("status") or "").lower()
+            active = status == "active"
+            if proto == "console" and active:
+                return (0, int(s.get("session_id") or 0))
+            if proto == "console":
+                return (1, int(s.get("session_id") or 0))
+            if proto == "rdp" and active:
+                return (2, int(s.get("session_id") or 0))
+            if active:
+                return (3, int(s.get("session_id") or 0))
+            return (4, int(s.get("session_id") or 0))
+
+        return min(sessions, key=_rank)
+
+    def _grab_via_user_helper(self) -> Tuple[Optional[bytes], int, int]:
+        """Capture via CreateProcessAsUser into the target WTS session.
+
+        Used when agent runs in Session 0 or a different session than the
+        dashboard-selected session_id.
         """
         import os
         import sys
@@ -849,16 +1031,25 @@ class RemoteDesktopStreamer:
         import subprocess
 
         sid, csid = self._session_ids()
-        if sid is not None and sid > 0:
-            log(f"[REMOTE-DESKTOP] skip token-helper — already in interactive "
-                f"session={sid} (console={csid}); use in-process capture")
-            return None, 0, 0
-
-        target = self._find_active_session_id()
+        target = self._target_session_id
         if not target:
-            target = csid if csid not in (None, 0, 0xFFFFFFFF) else None
+            sessions = self._enumerate_sessions()
+            interactive = [
+                s for s in sessions
+                if int(s.get("session_id") or 0) > 0
+                and str(s.get("protocol") or "").lower() != "services"
+            ]
+            if interactive:
+                target = int(self._pick_default_session(interactive)["session_id"])
+            else:
+                target = csid if csid not in (None, 0, 0xFFFFFFFF) else None
         if not target:
             log("[REMOTE-DESKTOP] No interactive session for helper capture")
+            return None, 0, 0
+
+        # Already in the requested session — caller should use in-process grab
+        if sid is not None and sid > 0 and int(sid) == int(target):
+            log(f"[REMOTE-DESKTOP] skip token-helper — already in target session={sid}")
             return None, 0, 0
 
         out_path = os.path.join(
@@ -926,30 +1117,19 @@ class RemoteDesktopStreamer:
 
     @staticmethod
     def _find_active_session_id() -> Optional[int]:
+        """Legacy helper — prefer Console Active via enumerate."""
         try:
-            import subprocess
-            r = subprocess.run(
-                ["query", "session"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=0x08000000,
-            )
-            for line in (r.stdout or "").splitlines()[1:]:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # SESSIONNAME USERNAME ID STATE  OR  SESSIONNAME ID STATE
-                state = ""
-                sid = None
-                for p in parts:
-                    if p.isdigit() and sid is None:
-                        sid = int(p)
-                    if p.lower() in ("active", "aktif"):
-                        state = "Active"
-                if sid and state == "Active" and sid > 0:
-                    return sid
+            sessions = RemoteDesktopStreamer._enumerate_sessions()
+            interactive = [
+                s for s in sessions
+                if int(s.get("session_id") or 0) > 0
+                and str(s.get("protocol") or "").lower() != "services"
+            ]
+            if not interactive:
+                return None
+            return int(RemoteDesktopStreamer._pick_default_session(interactive)["session_id"])
         except Exception:
-            pass
-        return None
+            return None
 
     def _launch_in_session(self, session_id: int, command: str) -> bool:
         """CreateProcessAsUser in target WTS session (requires SYSTEM / SeTcbPrivilege)."""
@@ -1132,6 +1312,8 @@ class RemoteDesktopStreamer:
             "height": int(self._capture_h or 720),
             "seq": int(self._seq),
             "fps": float(self._fps),
+            "session_id": self._target_session_id,
+            "username": self._target_username or "",
         }
         self._q_put(("txt", json.dumps(meta)))
 

@@ -543,10 +543,23 @@ class RemoteCommandExecutor:
 
     def _cmd_remote_stream_start(self, params: dict) -> dict:
         rd = self._get_remote_desktop()
+        sid = params.get("session_id")
+        try:
+            sid = int(sid) if sid is not None and str(sid).strip() != "" else None
+        except (TypeError, ValueError):
+            sid = None
+        mon = params.get("monitor", 0)
+        try:
+            mon = int(mon) if mon is not None else 0
+        except (TypeError, ValueError):
+            mon = 0
         result = rd.start(
             fps=float(params.get("fps", 6.0) or 6.0),
             quality=int(params.get("quality", 35) or 35),
             max_width=int(params.get("max_width", 1280) or 1280),
+            session_id=sid,
+            username=(params.get("username") or None),
+            monitor=mon,
         )
         if result.get("success"):
             self._notify_remote_desktop_ui("started")

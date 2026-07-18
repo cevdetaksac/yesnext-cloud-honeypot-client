@@ -1670,6 +1670,13 @@ class CloudHoneypotClient:
                         
                         # Port numarası geçerli ve risk listesinde ise ekle
                         if port and (port in risky_ports or port < 1024):
+                            proc_name = None
+                            if pid and pid.isdigit():
+                                try:
+                                    import psutil
+                                    proc_name = psutil.Process(int(pid)).name()
+                                except Exception:
+                                    proc_name = None
                             items.append({
                                 "port": port,
                                 "proto": "TCP",
@@ -1677,6 +1684,7 @@ class CloudHoneypotClient:
                                 "state": state.upper(),
                                 "service": risky_ports.get(port, "Unknown"),
                                 "pid": int(pid) if (pid and pid.isdigit()) else None,
+                                "process": proc_name or "",
                             })
                     except Exception:
                         continue

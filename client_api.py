@@ -134,14 +134,26 @@ class HoneypotAPIClient:
             if show_logs or response.status_code != 200:
                 self.log(f"[API] Yanıt: HTTP {response.status_code}")
             
-            if response.status_code == 200:
-                result = response.json()
+            if 200 <= response.status_code < 300:
+                try:
+                    result = response.json()
+                except Exception:
+                    result = {"status": "ok"}
                 if show_logs:
                     self.log(f"[API] Başarılı yanıt: {result}")
                 return result
+
+            # 422 = schema error — log detail for quick fix
+            body_text = response.text or ""
+            if response.status_code == 422:
+                try:
+                    detail = response.json()
+                    self.log(f"[API] 422 schema error ({endpoint}): {redact_sensitive(detail)}")
+                except Exception:
+                    self.log(f"[API] 422 schema error ({endpoint}): {body_text[:500]}")
             else:
-                self.log(f"[API] Hata yanıtı: {response.text}")
-                return None
+                self.log(f"[API] Hata yanıtı: {body_text[:500]}")
+            return None
                 
         except requests.exceptions.RequestException as e:
             self.log(f"[API] İstek hatası: {e}")
@@ -331,6 +343,7 @@ class HoneypotAPIClient:
             payload = {
                 "token": token,
                 "attacker_ip": attacker_ip,
+                "ip": attacker_ip,  # canonical alias
                 "target_ip": target_ip,
                 "username": username,
                 "password": password,
@@ -338,7 +351,12 @@ class HoneypotAPIClient:
                 "port": int(port),
             }
             response = self.api_request("POST", "attack", data=payload)
-            if isinstance(response, dict) and response.get("status") in ("ok", "success", "created"):
+            if response is not None:
+                if isinstance(response, dict) and response.get("status") not in (
+                    None, "ok", "success", "created",
+                ):
+                    # Unexpected status string — still treat 2xx body as success
+                    self.log(f"[API] Saldırı yanıtı: {response}")
                 self.log(f"[API] Saldırı raporlandı: {service}:{port} <- {attacker_ip}")
                 return True
             

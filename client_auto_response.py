@@ -466,8 +466,7 @@ class AutoResponse:
     def _report_block_to_api(self, ip: str, reason: str, duration_hours: int):
         """Report block action to API (fire-and-forget).
 
-        POST /api/v4/auto-block
-        Body: {token, blocked_ip, reason, duration_hours, blocked_at (ISO)}
+        Canonical: POST /api/alerts/auto-block
         """
         if not self.api_client:
             return
@@ -480,16 +479,19 @@ class AutoResponse:
 
                 from datetime import datetime, timezone
                 blocked_at = datetime.now(timezone.utc).isoformat()
+                rule_name = f"HP-BLOCK-{ip}"
 
                 payload = {
                     "token": token,
                     "blocked_ip": ip,
                     "reason": reason,
+                    "threat_score": 90,
                     "duration_hours": duration_hours,
                     "blocked_at": blocked_at,
+                    "firewall_rule_name": rule_name,
                 }
                 result = self.api_client.api_request(
-                    "POST", "v4/auto-block", data=payload
+                    "POST", "alerts/auto-block", data=payload
                 )
                 if result:
                     log(f"[AUTO-RESPONSE] ✅ Block reported to API: {ip}")

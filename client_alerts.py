@@ -258,32 +258,63 @@ class AlertPipeline:
     # ── Urgent Channel (instant API) ──────────────────────────────
 
     def _send_urgent(self, alert: dict):
-        """Send alert immediately to API /api/alerts/urgent."""
+        """Send alert immediately to API /api/alerts/urgent (canonical flat payload)."""
         try:
             token = self.token_getter()
             if not token or not self.api_client:
                 log("[ALERTS] Cannot send urgent — no token or API client")
                 return
 
+            from datetime import datetime, timezone
+            import uuid as _uuid
+
+            # Canonical: auto_response_taken must be string[]
+            actions = alert.get("auto_response_taken")
+            if actions is None:
+                actions = alert.get("auto_response", [])
+            if isinstance(actions, str):
+                actions = [actions] if actions else []
+            elif not isinstance(actions, list):
+                actions = list(actions) if actions else []
+            actions = [str(a) for a in actions if a]
+
+            ts = alert.get("timestamp", time.time())
+            if isinstance(ts, (int, float)):
+                ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            else:
+                ts_iso = str(ts)
+
+            try:
+                threat_score = int(float(alert.get("threat_score", 0) or 0))
+            except (TypeError, ValueError):
+                threat_score = 0
+
+            try:
+                target_port = int(alert.get("target_port", 0) or 0)
+            except (TypeError, ValueError):
+                target_port = 0
+
             payload = {
                 "token": token,
-                "alert_id": alert.get("alert_id", ""),
-                "severity": alert.get("severity", ""),
+                "alert_id": alert.get("alert_id") or str(_uuid.uuid4()),
+                "timestamp": ts_iso,
+                "severity": alert.get("severity", "warning"),
                 "threat_type": alert.get("threat_type", ""),
                 "title": alert.get("title", ""),
                 "description": alert.get("description", ""),
                 "source_ip": alert.get("source_ip", ""),
+                "source_country": alert.get("source_country", ""),
                 "target_service": alert.get("target_service", ""),
-                "target_port": alert.get("target_port", 0),
+                "target_port": target_port,
                 "username": alert.get("username", ""),
-                "threat_score": alert.get("threat_score", 0),
-                "event_ids": alert.get("event_ids", []),
+                "password": alert.get("password", ""),
+                "threat_score": threat_score,
+                "event_ids": alert.get("event_ids", []) or [0],
                 "correlation_rule": alert.get("correlation_rule", ""),
                 "recommended_action": alert.get("recommended_action", ""),
-                "auto_response": alert.get("auto_response", []),
-                "machine_name": alert.get("machine_name", ""),
-                "timestamp": alert.get("timestamp", time.time()),
-                "ip_context": alert.get("ip_context", {}),
+                "auto_response_taken": actions,
+                "raw_events": alert.get("raw_events", []) or [],
+                "system_context": alert.get("system_context", {}) or {},
             }
 
             # Fire-and-forget in thread to avoid blocking event processing
@@ -342,7 +373,7 @@ class AlertPipeline:
             self._flush_batch_locked()
 
     def _flush_batch_locked(self):
-        """Flush batch buffer (must hold _batch_lock)."""
+        """Flush batch buffer (must hold _batch_lock) — canonical /api/events/batch."""
         if not self._batch_buffer:
             return
 
@@ -354,25 +385,39 @@ class AlertPipeline:
             log(f"[ALERTS] Cannot flush batch ({len(events_to_send)} events) — no token/API")
             return
 
+        from datetime import datetime, timezone
+        import uuid as _uuid
+
+        def _iso(ts):
+            if isinstance(ts, (int, float)):
+                return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            return str(ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+
+        events = []
+        for e in events_to_send:
+            event_ids = e.get("event_ids") or [0]
+            try:
+                event_id = int(event_ids[0]) if event_ids else 0
+            except (TypeError, ValueError, IndexError):
+                event_id = 0
+            events.append({
+                "event_id": event_id,
+                "timestamp": _iso(e.get("timestamp")),
+                "channel": e.get("channel", "Security"),
+                "source_ip": e.get("source_ip", ""),
+                "username": e.get("username", ""),
+                "threat_type": e.get("threat_type", ""),
+                "severity": e.get("severity", ""),
+                "title": e.get("title", ""),
+                "target_service": e.get("target_service", ""),
+                "threat_score": int(float(e.get("threat_score", 0) or 0)),
+            })
+
         payload = {
             "token": token,
-            "events": [
-                {
-                    "alert_id": e.get("alert_id", ""),
-                    "severity": e.get("severity", ""),
-                    "threat_type": e.get("threat_type", ""),
-                    "title": e.get("title", ""),
-                    "source_ip": e.get("source_ip", ""),
-                    "target_service": e.get("target_service", ""),
-                    "threat_score": e.get("threat_score", 0),
-                    "timestamp": e.get("timestamp", 0),
-                    "username": e.get("username", ""),
-                    "event_ids": e.get("event_ids", []),
-                }
-                for e in events_to_send
-            ],
-            "machine_name": self.machine_name,
-            "batch_timestamp": time.time(),
+            "batch_id": str(_uuid.uuid4()),
+            "events": events,
+            "summary": {"count": len(events)},
         }
 
         threading.Thread(

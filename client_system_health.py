@@ -476,14 +476,24 @@ class SystemHealthMonitor:
                 "disk_usage_percent": self._latest.get("disk_usage_percent", 0),
                 "disk_total_gb": disk_total_gb,
                 "disk_free_gb": disk_free_gb,
-                "disk_io_read_rate": round(self._latest.get("disk_io_read_rate", 0)),
-                "disk_io_write_rate": round(self._latest.get("disk_io_write_rate", 0)),
-                "net_bytes_sent_rate": round(self._latest.get("net_bytes_sent_rate", 0)),
-                "net_bytes_recv_rate": round(self._latest.get("net_bytes_recv_rate", 0)),
+                # Canonical field names (server also accepts legacy aliases)
+                "disk_io_read_bytes_sec": round(self._latest.get("disk_io_read_rate", 0)),
+                "disk_io_write_bytes_sec": round(self._latest.get("disk_io_write_rate", 0)),
+                "network_bytes_sent_sec": round(self._latest.get("net_bytes_sent_rate", 0)),
+                "network_bytes_recv_sec": round(self._latest.get("net_bytes_recv_rate", 0)),
                 "process_count": self._latest.get("process_count", 0),
-                "connection_count": self._latest.get("connection_count", 0),
+                "open_connections": self._latest.get("connection_count", 0),
                 "anomalies_detected": self._anomalies,
-                "top_cpu_processes": self._stats.get("top_cpu_processes", [])[:5],
+                "top_cpu_processes": [
+                    {
+                        "pid": p.get("pid"),
+                        "name": p.get("name"),
+                        "cpu_percent": p.get("cpu", p.get("cpu_percent", 0)),
+                        "memory_percent": p.get("memory_percent", 0),
+                    }
+                    for p in (self._stats.get("top_cpu_processes", [])[:5])
+                ],
+                "active_sessions": [],
                 "vss_shadow_count": vss_shadow_count,
                 "ransomware_shield_status": ransomware_shield_status,
                 "canary_files_intact": canary_files_intact,

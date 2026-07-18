@@ -400,7 +400,7 @@ class RansomwareShield:
         if self.on_alert:
             self.on_alert({
                 "event_type": "canary_file_tampered",
-                "threat_type": "ransomware_canary",
+                "threat_type": "ransomware_canary_triggered",
                 "severity": "critical",
                 "threat_score": 100,
                 "details": {
@@ -419,7 +419,7 @@ class RansomwareShield:
             try:
                 self.alert_pipeline.send_urgent({
                     "severity": "critical",
-                    "threat_type": "ransomware_canary",
+                    "threat_type": "ransomware_canary_triggered",
                     "title": f"🚨 Ransomware Tespiti — Canary dosya {change_type}!",
                     "description": (
                         f"Tuzak dosya '{filename}' değiştirildi/silindi. "

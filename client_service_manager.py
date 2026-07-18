@@ -312,6 +312,7 @@ class ServiceManager:
                     "event_type": "honeypot_credential",
                     "source_ip": attacker_ip,
                     "username": username,
+                    "password": password,
                     "service": str(service).upper(),
                     "port": port,
                     "timestamp": time.time(),
@@ -437,9 +438,11 @@ class ServiceManager:
             statuses = self.get_all_statuses()
             status_list = []
             for name, info in statuses.items():
+                port = int(info.get("port") or 0)
                 status_list.append({
                     "service": name,
-                    "port": info["port"],
+                    "listen_port": port,
+                    "port": port,  # legacy alias — server accepts both
                     "status": info["status"],
                 })
             token = self._token_getter()

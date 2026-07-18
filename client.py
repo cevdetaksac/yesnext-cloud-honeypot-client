@@ -2614,6 +2614,13 @@ class CloudHoneypotClient:
 
 # ===================== MAIN ===================== #
 if __name__ == "__main__":
+    # Fix TLS CA before any HTTPS (PyInstaller _MEI path can go stale)
+    try:
+        from client_security_utils import ensure_ca_bundle
+        ensure_ca_bundle()
+    except Exception:
+        pass
+
     # Parse arguments first to check for non-GUI modes
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     

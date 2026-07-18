@@ -58,7 +58,7 @@ def get_tls_verify() -> bool:
 
 
 def get_tls_ca_bundle() -> Optional[str]:
-    """Optional custom CA bundle path."""
+    """Optional custom CA bundle path from config."""
     try:
         from client_utils import get_from_config
         path = get_from_config("api.ca_bundle", "") or ""
@@ -70,11 +70,108 @@ def get_tls_ca_bundle() -> Optional[str]:
     return None
 
 
+def _stable_ca_bundle_path() -> str:
+    return os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+        "YesNext",
+        "CloudHoneypotClient",
+        "cacert.pem",
+    )
+
+
+_ENSURED_CA: Optional[str] = None
+
+
+def ensure_ca_bundle() -> Optional[str]:
+    """Return a durable CA bundle path for frozen (PyInstaller) apps.
+
+    onefile extracts certifi into %TEMP%\\_MEI* which Windows/RDP can delete while
+    the process still runs (or another instance's path gets cached). We copy the
+    first valid cacert.pem into ProgramData and point SSL env vars there.
+    """
+    global _ENSURED_CA
+    import sys
+    import shutil
+
+    if _ENSURED_CA and os.path.isfile(_ENSURED_CA):
+        return _ENSURED_CA
+
+    custom = get_tls_ca_bundle()
+    if custom:
+        _ENSURED_CA = custom
+        os.environ["SSL_CERT_FILE"] = custom
+        os.environ["REQUESTS_CA_BUNDLE"] = custom
+        return custom
+
+    stable = _stable_ca_bundle_path()
+    candidates = []
+    if os.path.isfile(stable):
+        candidates.append(stable)
+
+    mei = getattr(sys, "_MEIPASS", "") or ""
+    if mei:
+        candidates.append(os.path.join(mei, "certifi", "cacert.pem"))
+        candidates.append(os.path.join(mei, "cacert.pem"))
+
+    try:
+        import certifi
+        where = certifi.where()
+        if where:
+            candidates.append(where)
+    except Exception:
+        pass
+
+    # Next to installed exe (optional drop-in)
+    try:
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            candidates.append(os.path.join(exe_dir, "cacert.pem"))
+            candidates.append(os.path.join(exe_dir, "certifi", "cacert.pem"))
+    except Exception:
+        pass
+
+    src = next((p for p in candidates if p and os.path.isfile(p) and os.path.getsize(p) > 1000), None)
+    if not src:
+        return None
+
+    try:
+        os.makedirs(os.path.dirname(stable), exist_ok=True)
+        if os.path.abspath(src) != os.path.abspath(stable):
+            need = True
+            if os.path.isfile(stable):
+                try:
+                    need = os.path.getsize(stable) != os.path.getsize(src)
+                except OSError:
+                    need = True
+            if need:
+                shutil.copy2(src, stable)
+        if os.path.isfile(stable):
+            src = stable
+    except Exception:
+        pass
+
+    _ENSURED_CA = src
+    os.environ["SSL_CERT_FILE"] = src
+    os.environ["REQUESTS_CA_BUNDLE"] = src
+    return src
+
+
 def resolve_tls_verify():
     """Value suitable for requests `verify` parameter."""
     if not get_tls_verify():
         return False
-    return get_tls_ca_bundle() or True
+    bundle = ensure_ca_bundle()
+    if bundle:
+        return bundle
+    # Last resort: True lets requests use its default (may fail in broken onefile)
+    return True
+
+
+# Warm CA path as soon as this module loads (before first HTTPS call)
+try:
+    ensure_ca_bundle()
+except Exception:
+    pass
 
 
 def auth_headers(token: Optional[str] = None) -> Dict[str, str]:

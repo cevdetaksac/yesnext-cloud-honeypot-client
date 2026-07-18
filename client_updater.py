@@ -362,7 +362,20 @@ def check_updates_and_prompt(app_instance) -> bool:
 
     def _check_worker():
         try:
+            from client_security_utils import ensure_ca_bundle
+            try:
+                ensure_ca_bundle()
+            except Exception:
+                pass
             update_info = update_mgr.check_for_updates()
+            # One retry after CA bootstrap (stale _MEI path)
+            err0 = str(update_info.get("error") or "")
+            if err0 and ("cacert" in err0.lower() or "tls" in err0.lower() or "sertifika" in err0.lower()):
+                try:
+                    ensure_ca_bundle()
+                except Exception:
+                    pass
+                update_info = update_mgr.check_for_updates()
 
             def _on_check_done():
                 if update_info.get("error"):

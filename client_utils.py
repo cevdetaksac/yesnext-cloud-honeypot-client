@@ -1281,7 +1281,12 @@ class InstallerUpdateManager:
             
             # GitHub API'den son sürüm bilgisini al
             import requests
-            response = requests.get(self.base_url, timeout=10)
+            from client_security_utils import resolve_tls_verify, ensure_ca_bundle
+            try:
+                ensure_ca_bundle()
+            except Exception:
+                pass
+            response = requests.get(self.base_url, timeout=15, verify=resolve_tls_verify())
             if response.status_code != 200:
                 return {"error": "API erişim hatası", "current_version": self.get_current_version()}
             
@@ -1331,7 +1336,11 @@ class InstallerUpdateManager:
             
         except Exception as e:
             self.log(f"[UPDATE] Kontrol hatası: {e}")
-            return {"error": str(e), "current_version": self.get_current_version()}
+            msg = str(e)
+            low = msg.lower()
+            if "cacert" in low or "tls ca" in low or "certificate bundle" in low:
+                msg = "TLS sertifika dosyasi bulunamadi (gecici PyInstaller yolu). Uygulamayi yeniden baslatin."
+            return {"error": msg, "current_version": self.get_current_version()}
     
     def _compare_versions(self, version1: str, version2: str) -> int:
         """Sürüm karşılaştırması (-1: v1<v2, 0: v1=v2, 1: v1>v2)"""
@@ -1391,7 +1400,14 @@ class InstallerUpdateManager:
             
             self.log(f"[UPDATE] İndirme yeri: {installer_path}")
             
-            response = requests.get(download_url, stream=True, timeout=30)
+            from client_security_utils import resolve_tls_verify, ensure_ca_bundle
+            try:
+                ensure_ca_bundle()
+            except Exception:
+                pass
+            response = requests.get(
+                download_url, stream=True, timeout=60, verify=resolve_tls_verify()
+            )
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))

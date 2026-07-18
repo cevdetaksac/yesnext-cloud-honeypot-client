@@ -9,10 +9,11 @@ generalised successor of the existing pending-blocks pattern in
 client_firewall.py.
 
 Flow:
-  1. Poll GET /api/commands/pending?token=X  every 5 seconds
-  2. Validate command (type, expiry, protected targets)
-  3. Execute via AutoResponse / subprocess
-  4. Report result POST /api/commands/result
+  1. Poll GET /api/commands/pending?token=X  every ~1 second (IR/stream)
+  2. Coalesce duplicate remote_stream_start (latest wins; older → cancelled)
+  3. Validate command (type, expiry, protected targets)
+  4. Execute via AutoResponse / subprocess
+  5. Report result POST /api/commands/result
 
 Supported commands:
   block_ip, unblock_ip, clear_firewall, logoff_user, disable_account,
@@ -206,6 +207,20 @@ class RemoteCommandExecutor:
         while self._running:
             try:
                 commands = self._fetch_pending()
+                # Multiple remote_stream_start in one batch → keep latest only
+                commands, cancelled_starts = self._coalesce_stream_starts(commands)
+                for stale in cancelled_starts:
+                    self._stats["commands_received"] += 1
+                    self._stats["commands_rejected"] += 1
+                    cid = stale.get("command_id", "?")
+                    log(f"[REMOTE-CMD] ⏭ remote_stream_start cancelled (stale) id={cid}")
+                    self._report_result(stale, {
+                        "success": False,
+                        "error": "SUPERSEDED",
+                        "status": "cancelled",
+                        "message": "Superseded by a newer remote_stream_start in the same poll batch",
+                    })
+
                 # IR first in the same batch (kill/logoff before diagnostics)
                 commands = self._prioritize_commands(commands)
                 saw_ir = False
@@ -286,6 +301,49 @@ class RemoteCommandExecutor:
             time.sleep(self._next_poll_sleep)
 
     @staticmethod
+    def _coalesce_stream_starts(commands: List[dict]) -> tuple:
+        """Keep only the newest remote_stream_start; return (kept, cancelled).
+
+        Dashboard may queue multiple Start clicks. Applying all would thrash
+        capture/WS — keep the last in the batch (API typically oldest→newest).
+        """
+        if not commands:
+            return [], []
+        starts = [c for c in commands if c.get("command_type") == "remote_stream_start"]
+        if len(starts) <= 1:
+            return list(commands), []
+
+        def _start_key(cmd: dict):
+            # Prefer explicit timestamps / ids when present
+            for key in ("created_at", "created", "queued_at", "timestamp"):
+                val = cmd.get(key)
+                if val:
+                    return (1, str(val))
+            cid = cmd.get("command_id") or cmd.get("id") or ""
+            return (0, str(cid))
+
+        keep = max(starts, key=_start_key)
+        # If keys tie, fall back to last occurrence in list (newest enqueue order)
+        if sum(1 for s in starts if _start_key(s) == _start_key(keep)) > 1:
+            keep = starts[-1]
+
+        keep_id = keep.get("command_id") or keep.get("id")
+        cancelled = []
+        kept = []
+        for cmd in commands:
+            if cmd.get("command_type") != "remote_stream_start":
+                kept.append(cmd)
+                continue
+            cid = cmd.get("command_id") or cmd.get("id")
+            if keep_id and cid == keep_id:
+                kept.append(cmd)
+            elif not keep_id and cmd is keep:
+                kept.append(cmd)
+            else:
+                cancelled.append(cmd)
+        return kept, cancelled
+
+    @staticmethod
     def _prioritize_commands(commands: List[dict]) -> List[dict]:
         """Run kill/logoff/block before list/snapshot in the same poll."""
         if not commands or len(commands) < 2:
@@ -298,7 +356,12 @@ class RemoteCommandExecutor:
                 return 0
             if ct in _IR_URGENT_COMMANDS or prio in ("critical", "high", "urgent"):
                 return 1
-            return 2
+            # Stream start before generic diagnostics so remote opens quickly
+            if ct == "remote_stream_start":
+                return 1
+            if ct in _STREAM_COMMANDS:
+                return 2
+            return 3
 
         return sorted(commands, key=_rank)
 

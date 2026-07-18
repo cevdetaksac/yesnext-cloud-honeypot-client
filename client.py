@@ -981,7 +981,7 @@ class CloudHoneypotClient:
                 pass
 
     def heartbeat_loop(self):
-        """Optimized heartbeat loop with IP caching"""
+        """Heartbeat loop — reports WAN IP changes via update-ip (cache ~60s)."""
         last_ip = None
         last_gui_ip = None  # Track last GUI-updated IP to avoid redundant updates
         
@@ -989,13 +989,14 @@ class CloudHoneypotClient:
             try:
                 token = self.state.get("token")
                 if token:
-                    # IP is now cached in ClientHelpers (5 min cache)
+                    # 60s cache in ClientHelpers — laptop network switches report quickly
                     ip = ClientHelpers.get_public_ip()
                     
                     # Only update API if IP changed
                     if ip and ip != last_ip and ip != "0.0.0.0":
                         self.update_client_ip(ip)
                         last_ip = ip
+                        log(f"[IP] Public IP changed → API update-ip: {ip}")
                         
                     self.state["public_ip"] = ip
                     

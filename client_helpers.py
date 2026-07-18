@@ -13,7 +13,7 @@ Features:
 - Hash and checksum functions
 
 Performance Notes:
-- get_public_ip() now caches results for 300 seconds
+- get_public_ip() now caches results for 60 seconds
 - Use force_refresh=True to bypass cache when needed
 """
 
@@ -34,10 +34,11 @@ from client_utils import SystemUtils
 LOGGER: Optional[logging.Logger] = None
 
 # IP Cache for performance optimization
+# Short TTL so laptop Wi‑Fi / network switches report WAN IP quickly via update-ip
 _ip_cache = {
     'ip': None,
     'last_check': 0,
-    'cache_duration': 300  # 5 minutes cache (was checking every 60s)
+    'cache_duration': 60  # 1 minute (was 300s)
 }
 
 def get_windows_session_id() -> int:

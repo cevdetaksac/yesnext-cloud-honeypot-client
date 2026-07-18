@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import threading
 import time
 from collections import deque
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from urllib.parse import urlencode
 
 from client_helpers import log
@@ -38,7 +39,9 @@ INPUT_RATE_LIMIT = 60                 # allow drag moves
 INPUT_RATE_WINDOW = 1.0
 HTTP_INPUT_POLL_SEC = 0.30
 WS_RECONNECT_SEC = 3.0
-META_EVERY_N_FRAMES = 15
+META_EVERY_N_FRAMES = 5
+BLACK_MEAN_THRESHOLD = 6.0            # nearly-black capture → retry / warn
+HTTP_KEYFRAME_EVERY = 6               # also POST HTTP every N frames (dashboard cache)
 
 
 def _api_to_ws_agent_url(api_base: str, token: str) -> str:
@@ -88,6 +91,10 @@ class RemoteDesktopStreamer:
         self._ws = None
         self._ws_ok = False
         self._transport = "idle"  # idle | websocket | http
+        self._out_q: queue.Queue = queue.Queue(maxsize=8)  # WS sends from WS thread only
+        self._ws_send_lock = threading.Lock()
+        self._black_warn_ts = 0.0
+        self._capture_method = "none"
 
         self._input_ts: deque = deque(maxlen=INPUT_RATE_LIMIT * 4)
         self._stats = {
@@ -98,6 +105,8 @@ class RemoteDesktopStreamer:
             "inputs_rate_limited": 0,
             "ws_reconnects": 0,
             "http_fallbacks": 0,
+            "black_frames": 0,
+            "capture_method": "none",
         }
 
         self._ensure_dpi_aware()
@@ -126,6 +135,17 @@ class RemoteDesktopStreamer:
 
             self._running = True
             self._transport = "http"  # until WS connects
+            self._drain_out_q()
+            sid, csid = self._session_ids()
+            if sid == 0:
+                log("[REMOTE-DESKTOP] ⚠ Process in Session 0 (service) — "
+                    "screen capture is often BLACK. Prefer interactive tray session.")
+            elif csid is not None and sid != csid:
+                log(f"[REMOTE-DESKTOP] ⚠ Process session={sid} ≠ console={csid} — "
+                    "capture may be blank/black")
+            else:
+                log(f"[REMOTE-DESKTOP] Session ok (pid_session={sid} console={csid})")
+
             self._thread = threading.Thread(
                 target=self._capture_loop,
                 name="RemoteDesktopCapture",
@@ -181,6 +201,7 @@ class RemoteDesktopStreamer:
             "quality": self._quality,
             "max_width": self._max_width,
             "seq": self._seq,
+            "capture_method": self._capture_method,
             "screen": {"w": self._screen_w, "h": self._screen_h},
             "capture": {"w": self._capture_w, "h": self._capture_h},
             "stats": dict(self._stats),
@@ -284,28 +305,42 @@ class RemoteDesktopStreamer:
         jpeg, w, h = self._grab_jpeg()
         if not jpeg:
             return
+        # Validate JPEG magic — corrupt payload shows as black on dashboard
+        if len(jpeg) < 24 or jpeg[:2] != b"\xff\xd8" or jpeg[-2:] != b"\xff\xd9":
+            self._stats["frames_failed"] += 1
+            log("[REMOTE-DESKTOP] Invalid JPEG magic — skip frame")
+            return
 
         self._seq += 1
         seq = self._seq
-        ok = False
+        ws_ok = False
+        http_ok = False
 
-        if self._ws_ok and self._ws is not None:
-            ok = self._ws_send_frame(jpeg, w, h, seq)
-            if ok:
+        if self._ws_ok:
+            ws_ok = self._enqueue_ws_frame(jpeg, w, h, seq)
+            if ws_ok:
                 self._transport = "websocket"
-            else:
-                self._ws_ok = False
-                self._transport = "http"
 
-        if not ok:
-            ok = self._http_send_frame(token, jpeg, w, h, seq)
-            if ok:
+        # Always keep HTTP keyframes so dashboard last-frame cache is not empty
+        # if WS binary is dropped/mis-handled by a proxy.
+        need_http = (
+            not ws_ok
+            or seq <= 12
+            or (seq % HTTP_KEYFRAME_EVERY) == 0
+        )
+        if need_http:
+            http_ok = self._http_send_frame(token, jpeg, w, h, seq)
+            if http_ok:
                 self._stats["http_fallbacks"] += 1
-                self._transport = "http"
+                if not ws_ok:
+                    self._transport = "http"
 
-        if ok:
+        if ws_ok or http_ok:
             self._stats["frames_sent"] += 1
             self._stats["bytes_sent"] += len(jpeg)
+            if seq == 1:
+                log(f"[REMOTE-DESKTOP] first frame ok — {w}x{h} {len(jpeg)}B "
+                    f"method={self._capture_method} ws={ws_ok} http={http_ok}")
         else:
             self._stats["frames_failed"] += 1
 
@@ -322,25 +357,59 @@ class RemoteDesktopStreamer:
         ))
 
     def _grab_jpeg(self):
-        """Capture primary screen → resize → JPEG (target ≤ TARGET_FRAME_BYTES)."""
+        """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
         try:
-            from PIL import ImageGrab, Image
+            from PIL import Image
         except ImportError:
             log("[REMOTE-DESKTOP] Pillow (PIL) not available")
             return None, 0, 0
 
+        img = None
+        method = "none"
+        # Prefer GDI BitBlt (more reliable than ImageGrab under elevation / DPI)
         try:
-            img = ImageGrab.grab(all_screens=False)
+            img = self._grab_gdi()
+            if img is not None:
+                method = "gdi"
         except Exception as e:
-            log(f"[REMOTE-DESKTOP] ImageGrab failed: {e}")
+            log(f"[REMOTE-DESKTOP] GDI grab failed: {e}")
+
+        if img is None or self._is_mostly_black(img):
+            try:
+                from PIL import ImageGrab
+                alt = ImageGrab.grab(all_screens=False)
+                if alt is not None and (
+                    img is None
+                    or self._mean_brightness(alt) > self._mean_brightness(img)
+                ):
+                    img = alt
+                    method = "imagegrab"
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] ImageGrab failed: {e}")
+
+        if img is None:
             return None, 0, 0
 
+        if self._is_mostly_black(img):
+            self._stats["black_frames"] += 1
+            now = time.time()
+            if now - self._black_warn_ts > 10:
+                self._black_warn_ts = now
+                sid, csid = self._session_ids()
+                log(f"[REMOTE-DESKTOP] ⚠ Nearly-black frame "
+                    f"(mean={self._mean_brightness(img):.1f}) "
+                    f"session={sid}/{csid} method={method} — "
+                    "Dashboard will look black. Run client in interactive user session.")
+            # Still send — better than silence — but mark method
+            method = method + "+black"
+
+        self._capture_method = method
+        self._stats["capture_method"] = method
         self._screen_w, self._screen_h = img.size
 
         if img.width > self._max_width:
             ratio = self._max_width / float(img.width)
             new_size = (self._max_width, max(1, int(img.height * ratio)))
-            # BILINEAR is faster than LANCZOS at high fps
             resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else Image.BILINEAR
             img = img.resize(new_size, resample)
 
@@ -363,54 +432,135 @@ class RemoteDesktopStreamer:
             return None, 0, 0
         return jpeg, self._capture_w, self._capture_h
 
-    # ── WebSocket transport ───────────────────────────────────────
+    def _grab_gdi(self):
+        """BitBlt full virtual screen → PIL Image (RGB)."""
+        import ctypes
+        from ctypes import wintypes
+        from PIL import Image
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        SM_XVIRTUALSCREEN = 76
+        SM_YVIRTUALSCREEN = 77
+        SM_CXVIRTUALSCREEN = 78
+        SM_CYVIRTUALSCREEN = 79
+        # Primary monitor only (matches ImageGrab all_screens=False)
+        left = 0
+        top = 0
+        width = int(user32.GetSystemMetrics(0))
+        height = int(user32.GetSystemMetrics(1))
+        if width <= 0 or height <= 0:
+            left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+            top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+            width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+            height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        if width <= 0 or height <= 0:
+            return None
+
+        hdc = user32.GetDC(0)
+        if not hdc:
+            return None
+        memdc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
+        old = gdi32.SelectObject(memdc, bmp)
+        # SRCCOPY = 0x00CC0020
+        ok = gdi32.BitBlt(memdc, 0, 0, width, height, hdc, left, top, 0x00CC0020)
+        if not ok:
+            gdi32.SelectObject(memdc, old)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(memdc)
+            user32.ReleaseDC(0, hdc)
+            return None
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth = width
+        bi.biHeight = -height  # top-down
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        bi.biCompression = 0
+        buf_size = width * height * 4
+        buf = (ctypes.c_char * buf_size)()
+        gdi32.GetDIBits(memdc, bmp, 0, height, buf, ctypes.byref(bi), 0)
+
+        gdi32.SelectObject(memdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(memdc)
+        user32.ReleaseDC(0, hdc)
+
+        img = Image.frombuffer("RGB", (width, height), bytes(buf), "raw", "BGRX", 0, 1)
+        return img.copy()
+
+    @staticmethod
+    def _mean_brightness(img) -> float:
+        try:
+            small = img.resize((48, 27)).convert("L")
+            data = list(small.getdata())
+            return float(sum(data)) / max(1, len(data))
+        except Exception:
+            return 255.0
+
+    def _is_mostly_black(self, img) -> bool:
+        return self._mean_brightness(img) < BLACK_MEAN_THRESHOLD
+
+    @staticmethod
+    def _session_ids() -> Tuple[Optional[int], Optional[int]]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            console = int(ctypes.windll.kernel32.WTSGetActiveConsoleSessionId())
+            sid = wintypes.DWORD()
+            pid = ctypes.windll.kernel32.GetCurrentProcessId()
+            if ctypes.windll.kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
+                return int(sid.value), console
+            return None, console
+        except Exception:
+            return None, None
+
+    def _drain_out_q(self):
+        try:
+            while True:
+                self._out_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    # ── WebSocket transport (single-thread send+recv) ─────────────
 
     def _ws_loop(self):
-        """Keep trying WebSocket while streaming; fall back to HTTP between attempts."""
+        """Dedicated WS thread: create_connection + drain outbound queue + recv input."""
         while self._running and not self._stop.is_set():
             token = self.token_getter()
             if not token or not self.api_client:
                 self._stop.wait(WS_RECONNECT_SEC)
                 continue
             try:
-                import websocket  # websocket-client
+                import websocket
             except ImportError:
                 log("[REMOTE-DESKTOP] websocket-client missing — HTTP only")
                 self._transport = "http"
                 return
 
             api_base = getattr(self.api_client, "base_url", "") or ""
-            # base_url is typically …/api
             url = _api_to_ws_agent_url(api_base, token)
-            log(f"[REMOTE-DESKTOP] WS connecting…")
+            log(f"[REMOTE-DESKTOP] WS connecting… {url.split('?')[0]}?token=…")
 
-            connected = threading.Event()
-
-            def on_open(ws):
-                self._ws = ws
-                self._ws_ok = True
-                self._transport = "websocket"
-                connected.set()
-                try:
-                    ws.send(json.dumps({"t": "hello", "role": "agent"}))
-                    self._ws_send_meta(force=True)
-                except Exception as e:
-                    log(f"[REMOTE-DESKTOP] WS hello failed: {e}")
-                log("[REMOTE-DESKTOP] WS connected")
-
-            def on_message(ws, message):
-                self._on_ws_message(message)
-
-            def on_error(ws, error):
-                log(f"[REMOTE-DESKTOP] WS error: {error}")
-
-            def on_close(ws, status_code, msg):
-                self._ws_ok = False
-                if self._running:
-                    self._transport = "http"
-                    self._stats["ws_reconnects"] += 1
-                log(f"[REMOTE-DESKTOP] WS closed ({status_code})")
-
+            ws = None
             try:
                 verify = True
                 try:
@@ -418,90 +568,123 @@ class RemoteDesktopStreamer:
                     verify = bool(resolve_tls_verify())
                 except Exception:
                     pass
-
-                ws_app = websocket.WebSocketApp(
-                    url,
-                    on_open=on_open,
-                    on_message=on_message,
-                    on_error=on_error,
-                    on_close=on_close,
-                )
-                # run_forever blocks until close
-                run_kwargs = {
-                    "ping_interval": 20,
-                    "ping_timeout": 10,
-                }
+                sslopt = None
                 if not verify:
                     import ssl
-                    run_kwargs["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
-                t = threading.Thread(
-                    target=lambda: ws_app.run_forever(**run_kwargs),
-                    name="RemoteDesktopWSRun",
-                    daemon=True,
-                )
-                t.start()
-                # Wait until stopped or connection dies
-                while self._running and not self._stop.is_set() and t.is_alive():
-                    self._stop.wait(0.5)
-                try:
-                    ws_app.close()
-                except Exception:
-                    pass
-                t.join(timeout=2)
-            except Exception as e:
-                log(f"[REMOTE-DESKTOP] WS loop error: {e}")
-                self._ws_ok = False
-                self._transport = "http"
+                    sslopt = {"cert_reqs": ssl.CERT_NONE}
 
-            self._ws = None
+                ws = websocket.create_connection(
+                    url,
+                    timeout=12,
+                    sslopt=sslopt,
+                    enable_multithread=True,
+                )
+                self._ws = ws
+                self._ws_ok = True
+                self._transport = "websocket"
+                ws.send(json.dumps({"t": "hello", "role": "agent"}))
+                self._enqueue_meta(force=True)
+                log("[REMOTE-DESKTOP] WS connected")
+
+                ws.settimeout(0.15)
+                while self._running and not self._stop.is_set():
+                    # Drain outbound (meta + binary JPEG) on THIS thread
+                    self._ws_flush_out(ws)
+                    try:
+                        msg = ws.recv()
+                        if msg is not None:
+                            self._on_ws_message(msg)
+                    except websocket.WebSocketTimeoutException:
+                        pass
+                    except Exception as e:
+                        log(f"[REMOTE-DESKTOP] WS recv error: {e}")
+                        break
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] WS connect/loop error: {e}")
+            finally:
+                self._ws_ok = False
+                self._ws = None
+                if self._running:
+                    self._transport = "http"
+                    self._stats["ws_reconnects"] += 1
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                log("[REMOTE-DESKTOP] WS closed")
+
             if self._running and not self._stop.is_set():
                 self._stop.wait(WS_RECONNECT_SEC)
+
+    def _enqueue_meta(self, force: bool = False):
+        if not force and self._seq % META_EVERY_N_FRAMES != 0:
+            return
+        meta = {
+            "t": "meta",
+            "width": int(self._capture_w or self._max_width),
+            "height": int(self._capture_h or 720),
+            "seq": int(self._seq),
+            "fps": float(self._fps),
+        }
+        self._q_put(("txt", json.dumps(meta)))
+
+    def _enqueue_ws_frame(self, jpeg: bytes, w: int, h: int, seq: int) -> bool:
+        if not self._ws_ok:
+            return False
+        self._capture_w, self._capture_h = w, h
+        self._enqueue_meta(force=(seq <= 3 or seq % META_EVERY_N_FRAMES == 0))
+        return self._q_put(("bin", jpeg))
+
+    def _q_put(self, item) -> bool:
+        try:
+            # Drop oldest if full — prefer fresh frames
+            if self._out_q.full():
+                try:
+                    self._out_q.get_nowait()
+                except queue.Empty:
+                    pass
+            self._out_q.put_nowait(item)
+            return True
+        except Exception:
+            return False
+
+    def _ws_flush_out(self, ws) -> None:
+        import websocket
+        while True:
+            try:
+                kind, payload = self._out_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if kind == "txt":
+                    ws.send(payload)
+                else:
+                    ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] WS send failed: {e}")
+                self._ws_ok = False
+                raise
 
     def _close_ws(self):
         self._ws_ok = False
         ws = self._ws
         self._ws = None
+        self._drain_out_q()
         if ws is not None:
             try:
                 ws.close()
             except Exception:
                 pass
 
-    def _ws_send_meta(self, force: bool = False):
-        if not self._ws_ok or self._ws is None:
-            return
-        if not force and self._seq % META_EVERY_N_FRAMES != 0:
-            return
-        try:
-            meta = {
-                "t": "meta",
-                "width": int(self._capture_w or self._max_width),
-                "height": int(self._capture_h or 720),
-                "seq": int(self._seq),
-                "fps": float(self._fps),
-            }
-            self._ws.send(json.dumps(meta))
-        except Exception as e:
-            log(f"[REMOTE-DESKTOP] WS meta failed: {e}")
-            self._ws_ok = False
-
-    def _ws_send_frame(self, jpeg: bytes, w: int, h: int, seq: int) -> bool:
-        if not self._ws_ok or self._ws is None:
-            return False
-        try:
-            import websocket
-            self._ws_send_meta(force=(seq <= 1 or seq % META_EVERY_N_FRAMES == 0))
-            self._ws.send(jpeg, opcode=websocket.ABNF.OPCODE_BINARY)
-            return True
-        except Exception as e:
-            log(f"[REMOTE-DESKTOP] WS binary send failed: {e}")
-            self._ws_ok = False
-            return False
-
     def _on_ws_message(self, message):
         try:
             if isinstance(message, bytes):
-                message = message.decode("utf-8", errors="replace")
+                # Ignore unexpected binary from server
+                try:
+                    message = message.decode("utf-8", errors="replace")
+                except Exception:
+                    return
             data = json.loads(message)
         except Exception:
             return
@@ -509,7 +692,6 @@ class RemoteDesktopStreamer:
             return
         t = (data.get("t") or data.get("type") or "").lower()
         if t in ("input", "remote_input", ""):
-            # {"t":"input","event":"mousedown",...} or bare input fields
             params = dict(data)
             params.pop("t", None)
             params.pop("type", None)

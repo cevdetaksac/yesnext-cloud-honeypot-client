@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.16"  # Full process list 80–150 (interactive apps like Notepad++)
+VERSION = "4.4.17"  # Fix black remote desktop: GDI capture + thread-safe WS + HTTP keyframes
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

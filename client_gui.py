@@ -3061,12 +3061,14 @@ class ModernGUI:
                     color = COLORS.get("green", "#10b981")
                     detail = self.t("rd_detail_streaming_ws").format(
                         fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
+                        method=st.get("capture_method") or "—",
                     )
                 else:
                     badge = self.t("rd_badge_http")
                     color = COLORS.get("orange", "#f59e0b")
                     detail = self.t("rd_detail_streaming_http").format(
                         fps=fps, w=cw, h=ch, frames=frames, failed=failed, inputs=inputs,
+                        method=st.get("capture_method") or "—",
                     )
             elif ready:
                 badge = self.t("rd_badge_ready")

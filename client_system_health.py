@@ -43,7 +43,15 @@ COLLECT_INTERVAL = 10       # Collect metrics every 10 seconds
 REPORT_INTERVAL = 60        # Health report to API every 60s (sessions/processes for dashboard)
 ANOMALY_Z_THRESHOLD = 3.0   # Z-score threshold for anomaly
 MIN_SAMPLES = 15            # Minimum samples before anomaly detection
-MAX_TOP_PROCESSES = 120     # Cap process list for health report
+MAX_TOP_PROCESSES = 150     # Cap process list for health report (dashboard full table)
+MIN_TOP_PROCESSES = 80      # Prefer at least this many unique PIDs per report
+
+# User-facing apps that must appear even at ~0% CPU
+_INTERACTIVE_NAME_HINTS = (
+    "notepad", "chrome", "msedge", "firefox", "explorer", "code.exe", "devenv",
+    "winword", "excel", "outlook", "teams", "slack", "discord", "spotify",
+    "powershell", "pwsh", "cmd.exe", "windowsterminal", "taskmgr", "notepad++",
+)
 
 # Suspicious process heuristics
 _SUSPICIOUS_NAMES = (
@@ -263,20 +271,23 @@ class SystemHealthMonitor:
         except Exception:
             pass
 
-        # ── Top / rich processes + active sessions ──
+        # ── Sessions first (interactive user filter for process list) ──
+        try:
+            self._stats["active_sessions"] = self._collect_active_sessions()
+        except Exception as e:
+            log(f"[HEALTH] Session collect error: {e}")
+
+        # ── Rich processes (80–150 unique PIDs) ──
         try:
             mem_total = mem.total or 1
             self._mem_total_bytes = mem_total
             rich = self._collect_rich_processes(psutil, mem_total)
             self._stats["top_processes"] = rich
-            self._stats["top_cpu_processes"] = rich[:10]
+            # Alias: dashboard may read top_cpu_processes — send FULL list
+            self._stats["top_cpu_processes"] = rich
+            log(f"[HEALTH] processes collected: {len(rich)}")
         except Exception as e:
             log(f"[HEALTH] Process collect error: {e}")
-
-        try:
-            self._stats["active_sessions"] = self._collect_active_sessions()
-        except Exception as e:
-            log(f"[HEALTH] Session collect error: {e}")
 
         # ── Anomaly detection ──
         detected_anomalies = []
@@ -525,8 +536,14 @@ class SystemHealthMonitor:
         return None
 
     def _collect_rich_processes(self, psutil, mem_total: int) -> List[dict]:
-        """Build canonical top_processes list (≤ MAX_TOP_PROCESSES)."""
+        """Build canonical top_processes list (80–150 unique PIDs).
+
+        Merge: top CPU + top memory + interactive session apps + suspicious.
+        Ensures Notepad++/browsers appear even at ~0% CPU.
+        """
         now = time.time()
+        interactive_users = self._interactive_usernames()
+
         # Prime CPU counters
         for p in psutil.process_iter(["pid"]):
             try:
@@ -543,7 +560,14 @@ class SystemHealthMonitor:
             try:
                 info = p.info
                 pid = info.get("pid")
-                if not pid:
+                if pid is None:
+                    continue
+                # Keep PID 0 (Idle) for dashboard sorting; skip negatives only
+                try:
+                    pid = int(pid)
+                except Exception:
+                    continue
+                if pid < 0:
                     continue
                 mem_info = info.get("memory_info")
                 rss = getattr(mem_info, "rss", 0) if mem_info else 0
@@ -563,14 +587,16 @@ class SystemHealthMonitor:
                     ).strftime("%Y-%m-%dT%H:%M:%SZ")
                     runtime_sec = max(0, int(now - create_time))
 
+                username = info.get("username") or ""
                 suspicious, reasons = self._process_suspicion(name, path, cmdline)
+                interactive = self._is_interactive_process(name, username, interactive_users)
                 entry = {
                     "pid": pid,
                     "name": name,
                     "path": path[:260] if path else "",
-                    "username": info.get("username") or "",
+                    "username": username,
                     "cpu_percent": round(cpu, 1),
-                    "cpu": round(cpu, 1),  # alias
+                    "cpu": round(cpu, 1),
                     "memory_mb": mem_mb,
                     "memory_percent": mem_pct,
                     "status": info.get("status") or "running",
@@ -579,6 +605,7 @@ class SystemHealthMonitor:
                     "cmdline": (cmdline[:500] if cmdline else ""),
                     "suspicious": suspicious,
                     "suspicion_reasons": reasons,
+                    "interactive": interactive,
                 }
                 collected[pid] = entry
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -590,17 +617,80 @@ class SystemHealthMonitor:
         by_cpu = sorted(procs, key=lambda x: x.get("cpu_percent", 0), reverse=True)[:80]
         by_mem = sorted(procs, key=lambda x: x.get("memory_mb", 0), reverse=True)[:40]
         suspicious = [p for p in procs if p.get("suspicious")]
+        interactive = [p for p in procs if p.get("interactive")]
 
         merged: Dict[int, dict] = {}
-        for group in (by_cpu, by_mem, suspicious):
+        for group in (by_cpu, by_mem, interactive, suspicious):
             for p in group:
+                merged[p["pid"]] = p
+
+        # Pad to MIN_TOP_PROCESSES so dashboard is never a skinny top-10
+        if len(merged) < MIN_TOP_PROCESSES:
+            by_mem_all = sorted(procs, key=lambda x: x.get("memory_mb", 0), reverse=True)
+            for p in by_mem_all:
+                if len(merged) >= MIN_TOP_PROCESSES:
+                    break
+                merged[p["pid"]] = p
+        if len(merged) < MIN_TOP_PROCESSES:
+            for p in sorted(procs, key=lambda x: (x.get("name") or "").lower()):
+                if len(merged) >= min(MIN_TOP_PROCESSES, len(procs)):
+                    break
                 merged[p["pid"]] = p
 
         out = list(merged.values())
         out.sort(
-            key=lambda x: (not x.get("suspicious"), -(x.get("cpu_percent") or 0)),
+            key=lambda x: (
+                not x.get("suspicious"),
+                not x.get("interactive"),
+                -(x.get("cpu_percent") or 0),
+            ),
         )
         return out[:MAX_TOP_PROCESSES]
+
+    def _interactive_usernames(self) -> set:
+        """Lowercased SAM names from active_sessions (best-effort)."""
+        users = set()
+        try:
+            for s in (self._stats.get("active_sessions") or []):
+                u = (s.get("username") or "").strip()
+                if not u:
+                    continue
+                users.add(u.lower())
+                if "\\" in u:
+                    users.add(u.split("\\")[-1].lower())
+        except Exception:
+            pass
+        return users
+
+    @staticmethod
+    def _is_interactive_process(name: str, username: str, interactive_users: set) -> bool:
+        """True for console/RDP user apps (include even at 0% CPU)."""
+        nlow = (name or "").lower()
+        ulow = (username or "").lower()
+        if any(h in nlow for h in _INTERACTIVE_NAME_HINTS):
+            return True
+        if interactive_users and ulow:
+            for u in interactive_users:
+                if u and u in ulow:
+                    return True
+        # Non-system account with a real username → session process
+        if ulow and not any(
+            x in ulow
+            for x in (
+                "nt authority\\system",
+                "nt authority\\local service",
+                "nt authority\\network service",
+                "font driver host",
+                "umfd-",
+                "dwm-",
+            )
+        ):
+            # Skip pure services account noise: SYSTEM without domain user
+            if ulow.endswith("\\system") or ulow == "system":
+                return False
+            if "\\" in ulow or "@" in ulow:
+                return True
+        return False
 
     @staticmethod
     def _process_suspicion(name: str, path: str, cmdline: str) -> Tuple[bool, List[str]]:
@@ -811,20 +901,12 @@ class SystemHealthMonitor:
                 "connection_count": self._latest.get("connection_count", 0),
                 "anomalies_detected": self._anomalies,
                 "top_processes": list(self._stats.get("top_processes") or []),
-                "top_cpu_processes": [
-                    {
-                        "pid": p.get("pid"),
-                        "name": p.get("name"),
-                        "cpu_percent": p.get("cpu_percent", p.get("cpu", 0)),
-                        "cpu": p.get("cpu_percent", p.get("cpu", 0)),
-                        "memory_mb": p.get("memory_mb", 0),
-                        "memory_percent": p.get("memory_percent", 0),
-                        "path": p.get("path", ""),
-                        "username": p.get("username", ""),
-                        "suspicious": p.get("suspicious", False),
-                    }
-                    for p in (self._stats.get("top_cpu_processes") or self._stats.get("top_processes") or [])[:15]
-                ],
+                # Full list alias (was truncated to 15 — dashboard showed only top-CPU)
+                "top_cpu_processes": list(
+                    self._stats.get("top_cpu_processes")
+                    or self._stats.get("top_processes")
+                    or []
+                ),
                 "active_sessions": list(self._stats.get("active_sessions") or []),
                 "sessions": list(self._stats.get("active_sessions") or []),
                 "vss_shadow_count": vss_shadow_count,

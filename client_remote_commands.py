@@ -683,7 +683,7 @@ class RemoteCommandExecutor:
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
                 procs.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
-                procs = procs[:50]
+                procs = procs[:150]
             except Exception as e:
                 return {"success": False, "error": str(e)}
         return {

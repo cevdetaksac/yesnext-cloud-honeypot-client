@@ -2423,17 +2423,17 @@ if __name__ == "__main__":
             else:
                 log("Normal user mode - Task Scheduler will be configured later")
             
-            # --show-gui / onboarding / missing token → always show window (register first)
-            from client_utils import should_force_gui_visible, set_force_gui_onboarding
+            # --show-gui: show this session. Onboarding flag only from installer / no-token.
+            from client_utils import should_force_gui_visible
             has_token = bool(app.get_token() or app.state.get("token"))
-            # Installer wrote onboarding flag; also force when no token yet
-            if want_show_gui and should_force_gui_visible(has_token):
-                set_force_gui_onboarding("show_gui_launch")
+            # Token present → clear stale flag and allow tray; no-token → force visible
             force_gui = want_show_gui or should_force_gui_visible(has_token)
             # Tray-minimized ONLY for explicit --mode=tray AND not onboarding
             tray_mode = want_tray and not force_gui
             if force_gui:
                 log("Onboarding/GUI required — starting visible (not tray-minimized)")
+            else:
+                log("Token present — tray minimize allowed")
             
             # Build GUI in both cases
             log("Building main GUI...")

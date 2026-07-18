@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.35"  # Interactive update: open NSIS directly (no self-QUIT race)
+VERSION = "4.4.36"  # Allow tray minimize once token exists (clear stuck onboarding flag)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

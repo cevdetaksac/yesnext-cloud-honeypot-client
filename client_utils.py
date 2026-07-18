@@ -1749,13 +1749,21 @@ def clear_force_gui_onboarding() -> None:
 
 
 def should_force_gui_visible(has_token: bool = False) -> bool:
-    """True when interactive onboarding requires a visible window (not tray-only)."""
+    """True only while this machine has no durable agent token yet.
+
+    Once a token exists, onboarding is done — allow minimize-to-tray and clear
+    any stale force_gui_onboarding.flag (otherwise close-to-tray stays blocked forever).
+    """
+    if has_token:
+        clear_force_gui_onboarding()
+        return False
     try:
         if os.path.isfile(onboarding_flag_path()):
             return True
     except OSError:
         pass
-    return not bool(has_token)
+    # No token yet → keep window visible for first registration
+    return True
 
 
 def _update_lock_path() -> str:

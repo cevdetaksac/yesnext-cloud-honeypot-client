@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 26
+!define VERSIONBUILD 27
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -204,23 +204,38 @@ FunctionEnd
 Function KillHoneypotProcesses
     Push $0
     Push $1
+    Push $2
 
     DetailPrint "[KILL] Verified shutdown sequence..."
     Call PreInstallKillFast
 
-    nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
-    Pop $0
-    Pop $1
-    StrCmp $1 "STOPPED" KillDone
+    ; Wait up to ~15s for honeypot-client.exe to disappear (DACL + file locks)
+    StrCpy $2 "0"
+    KillWaitLoop:
+        nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
+        Pop $0
+        Pop $1
+        StrCmp $1 "STOPPED" KillDone
+        IntOp $2 $2 + 1
+        IntCmp $2 15 KillForce KillWaitMore KillForce
+        KillWaitMore:
+            DetailPrint "[KILL] Still running — wait pass $2..."
+            Sleep 1000
+            Call PreInstallKillFast
+            Goto KillWaitLoop
 
-    DetailPrint "[KILL] Still running — second SeDebug kill pass..."
-    Call PreInstallKillFast
-    Sleep 400
+    KillForce:
+        DetailPrint "[KILL] Final SeDebug kill pass..."
+        Call PreInstallKillFast
+        Sleep 1500
 
     KillDone:
     DetailPrint "[KILL] Process shutdown complete."
     nsExec::Exec 'cmd /c del "%TEMP%\honeypot_watchdog_token.txt" 2>nul'
+    ; Brief settle so Program Files EXE lock is released before File overwrite
+    Sleep 2000
 
+    Pop $2
     Pop $1
     Pop $0
 FunctionEnd
@@ -332,6 +347,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=README.md "dist\README.md"
     CreateDirectory "$INSTDIR\scripts"
     File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
+    File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
     !insertmacro LOG "[FILES] Application files installed."
 
     ; =================================================================
@@ -428,6 +444,7 @@ Section "Uninstall"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\scripts\kill-honeypot.ps1"
+    Delete "$INSTDIR\scripts\update-and-install.ps1"
     RMDir "$INSTDIR\scripts"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"

@@ -1632,6 +1632,8 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
 
     kill_processes=False: sadece görevleri durdur/devre dışı bırak (indirme sırasında kullanma).
     kill_processes=True: QUIT + kill-honeypot (yalnızca installer başlatılırken).
+    Prefer launch_safe_update_install() for interactive/silent updates — it runs
+    elevated and waits for a clean process exit before overwriting the onefile EXE.
     """
     import socket
     import subprocess
@@ -1708,6 +1710,139 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
             )
         except Exception:
             pass
+
+
+def _update_helper_staging_dir() -> str:
+    base = os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+        "YesNext",
+        "CloudHoneypotClient",
+        "update",
+    )
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def stage_update_install_helper() -> Optional[str]:
+    """Copy update-and-install.ps1 to ProgramData so INSTDIR overwrite cannot break it."""
+    import shutil
+
+    src_candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "update-and-install.ps1"),
+    ]
+    if getattr(sys, "frozen", False):
+        src_candidates.insert(
+            0,
+            os.path.join(os.path.dirname(sys.executable), "scripts", "update-and-install.ps1"),
+        )
+        try:
+            mei = getattr(sys, "_MEIPASS", "") or ""
+            if mei:
+                src_candidates.insert(0, os.path.join(mei, "scripts", "update-and-install.ps1"))
+        except Exception:
+            pass
+
+    src = next((p for p in src_candidates if os.path.isfile(p)), None)
+    if not src:
+        return None
+    dst = os.path.join(_update_helper_staging_dir(), "update-and-install.ps1")
+    try:
+        shutil.copy2(src, dst)
+        return dst
+    except OSError:
+        return src if os.path.isfile(src) else None
+
+
+def launch_safe_update_install(
+    installer_path: str,
+    *,
+    silent: bool = False,
+    show_gui_after: bool = True,
+    expect_exit_pid: Optional[int] = None,
+    elevate: bool = True,
+) -> bool:
+    """Start elevated update helper (detached). Caller should then exit gracefully.
+
+    The helper waits for expect_exit_pid, force-kills leftovers, runs the installer,
+    then starts the new app. This prevents overwriting a still-running onefile EXE
+    (which causes Failed to load Python DLL / _MEI errors).
+    """
+    import socket
+    import subprocess
+
+    if not installer_path or not os.path.isfile(installer_path):
+        return False
+
+    helper = stage_update_install_helper()
+    if not helper:
+        return False
+
+    pid = int(expect_exit_pid if expect_exit_pid is not None else os.getpid())
+    # Already elevated (admin/SYSTEM)? Skip UAC — SilentUpdater runs as SYSTEM.
+    if elevate:
+        try:
+            elevate = not bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            elevate = True
+
+    acquire_update_lock("installing")
+    # Stop respawners first; do NOT force-kill self here — helper does that elevated
+    prepare_client_for_installer(kill_processes=False)
+    try:
+        with socket.create_connection(("127.0.0.1", 58632), timeout=0.5) as sock:
+            sock.sendall(b"QUIT\n")
+    except Exception:
+        pass
+
+    # Tiny launcher avoids nested quoting hell for Start-Process -Verb RunAs
+    staging = _update_helper_staging_dir()
+    launcher = os.path.join(staging, f"run-update-{pid}.ps1")
+    flags = []
+    if silent:
+        flags.append("-Silent")
+    if show_gui_after:
+        flags.append("-ShowGuiAfter")
+    flag_str = " ".join(flags)
+    launcher_body = (
+        f"$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"& '{helper}' -InstallerPath '{installer_path}' "
+        f"-ExpectExitPid {pid} -GraceWaitSec 45 {flag_str}\n"
+        f"exit $LASTEXITCODE\n"
+    )
+    try:
+        with open(launcher, "w", encoding="utf-8") as fh:
+            fh.write(launcher_body)
+    except OSError:
+        return False
+
+    try:
+        if elevate:
+            ps = (
+                "Start-Process -FilePath 'powershell.exe' -Verb RunAs "
+                f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{launcher}\"' "
+                "-WindowStyle Hidden"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                creationflags=subprocess.CREATE_NO_WINDOW
+                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", launcher,
+                ],
+                creationflags=subprocess.CREATE_NO_WINDOW
+                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+                close_fds=True,
+            )
+        return True
+    except Exception:
+        return False
 
 
 class UpdateProgressDialog:

@@ -68,24 +68,49 @@ def show_completion_dialog(installer_path: str, version: str):
         button_frame.grid(row=2, column=0, columnspan=2, pady=(5, 0), sticky="ew")
         
         def run_installer():
-            """Installer'ı çalıştır — önce başlat, sonra süreçleri kapat."""
+            """Elevated helper: wait for us to exit → kill leftovers → install → relaunch."""
             try:
-                from client_utils import prepare_client_for_installer, release_update_lock
+                from client_utils import launch_safe_update_install
 
-                # Installer önce açılsın; QUIT/kill sonrası Start-Process kaçmasın
-                cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
-                subprocess.run(cmd, shell=True, check=False,
-                              creationflags=subprocess.CREATE_NO_WINDOW)
-
-                release_update_lock(resume_updaters=False)
-                prepare_client_for_installer(kill_processes=True)
+                ok = launch_safe_update_install(
+                    installer_path,
+                    silent=False,
+                    show_gui_after=True,
+                    expect_exit_pid=os.getpid(),
+                    elevate=True,
+                )
+                if not ok:
+                    messagebox.showerror(
+                        "Hata",
+                        "Güncelleme yardımcısı başlatılamadı.\n"
+                        "Lütfen indirilen installer'ı yönetici olarak çalıştırın.",
+                    )
+                    return
 
                 messagebox.showinfo(
-                    "Installer Başlatıldı",
-                    "Installer başlatıldı.\n\n"
-                    "UAC onayını verin; mevcut uygulama otomatik kapanacak ve kurulum tamamlanacak."
+                    "Güncelleme",
+                    "Kurulum yardımcısı başlatıldı.\n\n"
+                    "UAC onayını verin. Uygulama kapanacak, kurulum bitecek "
+                    "ve yeni sürüm otomatik açılacak.",
                 )
                 dialog.destroy()
+                # Exit ourselves so helper can overwrite the onefile EXE safely
+                try:
+                    root = dialog.master if hasattr(dialog, "master") else None
+                    app = None
+                    # Best-effort: signal graceful exit via control port / hard exit
+                    import socket as _sock
+                    try:
+                        with _sock.create_connection(("127.0.0.1", 58632), timeout=0.5) as s:
+                            s.sendall(b"QUIT\n")
+                    except Exception:
+                        pass
+                    threading.Thread(
+                        target=lambda: (time.sleep(1.2), os._exit(0)),
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    os._exit(0)
             except Exception as e:
                 messagebox.showerror("Hata", f"Installer başlatılamadı:\n{str(e)}")
         
@@ -191,6 +216,16 @@ def show_completion_dialog(installer_path: str, version: str):
         )
         if result:
             try:
+                from client_utils import launch_safe_update_install
+                if launch_safe_update_install(
+                    installer_path,
+                    silent=False,
+                    show_gui_after=True,
+                    expect_exit_pid=os.getpid(),
+                    elevate=True,
+                ):
+                    time.sleep(1.0)
+                    os._exit(0)
                 cmd = f'powershell -Command "Start-Process -FilePath \\"{installer_path}\\" -Verb RunAs"'
                 subprocess.run(cmd, shell=True, check=False,
                               creationflags=subprocess.CREATE_NO_WINDOW)
@@ -370,45 +405,48 @@ def check_updates_and_apply_silent() -> bool:
             log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
             touch_update_lock()
 
-            # Re-check: if interactive claimed lock somehow, abort kill
-            # (we hold silent lock — proceed to install)
-            from client_utils import prepare_client_for_installer
-            # Kill ONLY now that download finished — never mid-download
-            prepare_client_for_installer(kill_processes=True)
-            
-            # Execute the update process
-            log("[SILENT UPDATE] Starting installer process...")
-            
-            cmd = [
+            # Detached elevated helper waits for THIS process to exit, then kills leftovers,
+            # runs installer, recreates tasks. Never overwrite a live onefile EXE.
+            from client_utils import launch_safe_update_install, release_update_lock
+
+            # Detect interactive desktop → show GUI after; else daemon
+            show_gui = False
+            try:
+                import ctypes
+                show_gui = bool(ctypes.windll.user32.GetForegroundWindow())
+            except Exception:
+                show_gui = False
+
+            ok = launch_safe_update_install(
                 installer_path,
-                "/S",  # Silent install
-                "/NCRC"  # Skip CRC check for speed
-            ]
-            
-            result = subprocess.run(cmd, 
-                                  capture_output=True, 
-                                  text=True, 
-                                  timeout=300,  # 5 minute timeout
-                                  creationflags=subprocess.CREATE_NO_WINDOW)
-            
-            if result.returncode == 0:
-                log("[SILENT UPDATE] Installer completed successfully")
-                log("[SILENT UPDATE] New version will be started automatically by installer")
-                
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception:
-                    pass
-                
-                release_update_lock(resume_updaters=False)
-                log("[SILENT UPDATE] ✅ Silent update completed - installer will handle app restart")
-                return True
-                
-            else:
-                log(f"[SILENT UPDATE] Installer failed with code: {result.returncode}")
-                log(f"[SILENT UPDATE] Installer stdout: {result.stdout}")
-                log(f"[SILENT UPDATE] Installer stderr: {result.stderr}")
+                silent=True,
+                show_gui_after=show_gui,
+                expect_exit_pid=os.getpid(),
+                elevate=True,
+            )
+            if not ok:
+                log("[SILENT UPDATE] Failed to launch update helper — falling back to inline install")
+                from client_utils import prepare_client_for_installer
+                prepare_client_for_installer(kill_processes=True)
+                time.sleep(3)
+                cmd = [installer_path, "/S", "/NCRC"]
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if result.returncode == 0:
+                    release_update_lock(resume_updaters=False)
+                    return True
+                log(f"[SILENT UPDATE] Fallback installer failed: {result.returncode}")
                 return False
+
+            log("[SILENT UPDATE] Helper launched — exiting so install can overwrite EXE safely")
+            # Keep update lock; helper clears it after install. Do NOT resume tasks yet.
+            time.sleep(1.5)
+            os._exit(0)
                 
         except Exception as e:
             log(f"[SILENT UPDATE] Update process error: {e}")
@@ -417,6 +455,7 @@ def check_updates_and_apply_silent() -> bool:
         finally:
             try:
                 # Success path already released without resume; failure → unlock + resume
+                # (os._exit skips finally — OK; helper owns lock)
                 if is_update_in_progress():
                     release_update_lock(resume_updaters=True)
             except Exception:

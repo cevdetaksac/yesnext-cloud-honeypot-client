@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.26"  # System language; update lock kill-guard; first-install GUI visible
+VERSION = "4.4.27"  # Safe update helper: exit → elevated kill → install → relaunch
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

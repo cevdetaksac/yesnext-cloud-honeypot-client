@@ -1,7 +1,7 @@
 {
   "application": {
     "name": "Cloud Honeypot Client",
-    "version": "4.4.45",
+    "version": "4.4.46",
     "author": "YesNext Technology"
   },
   "language": {
@@ -84,9 +84,10 @@
   },
   "updates": {
     "auto_check": true,
-    "check_interval_hours": 0.5,
+    "check_interval_hours": 0.25,
     "show_notifications": true,
-    "check_interval_minutes": 30,
+    "check_interval_minutes": 15,
+    "startup_check_delay_seconds": 90,
     "verify_checksum": true
   },
   "advanced": {

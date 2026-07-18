@@ -610,33 +610,48 @@ def download_installer_file(url: str, local_path: str, expected_sha256: str = ""
 
 
 def update_watchdog_loop():
-    """Periodic update checker — interval from config (default 30 min)."""
+    """Periodic silent update checker.
+
+    First check after a short startup delay, then every N minutes (config).
+    A "no update" poll is only a small GitHub API GET — safe at 5–15 min.
+    """
     from client_utils import get_from_config
+
+    # Quick first check so a just-released version is picked up soon after launch
+    try:
+        startup_delay = max(30, int(get_from_config("updates.startup_check_delay_seconds", 90) or 90))
+    except Exception:
+        startup_delay = 90
+    for _ in range(max(1, startup_delay // 10)):
+        time.sleep(10)
 
     while True:
         try:
-            # Prefer minutes; fall back to hours (legacy config)
-            minutes = get_from_config("updates.check_interval_minutes", None)
-            if minutes is None:
-                hours = float(get_from_config("updates.check_interval_hours", 0.5) or 0.5)
-                minutes = max(15, int(hours * 60))
-            else:
-                minutes = max(15, int(minutes))
-            # Sleep in 10s slices so lock / shutdown stay responsive
-            for _ in range(max(1, minutes * 6)):
-                time.sleep(10)
+            if not bool(get_from_config("updates.auto_check", True)):
+                time.sleep(60)
+                continue
             try:
                 from client_utils import is_update_in_progress
                 if is_update_in_progress():
                     log("[UPDATE WATCHDOG] Skipped — update already in progress")
-                    continue
+                else:
+                    check_updates_and_apply_silent()
             except Exception:
-                pass
-            if not bool(get_from_config("updates.auto_check", True)):
-                continue
-            check_updates_and_apply_silent()
+                check_updates_and_apply_silent()
+
+            # Prefer minutes; fall back to hours (legacy config). Floor 5 min.
+            minutes = get_from_config("updates.check_interval_minutes", None)
+            if minutes is None:
+                hours = float(get_from_config("updates.check_interval_hours", 0.25) or 0.25)
+                minutes = max(5, int(hours * 60))
+            else:
+                minutes = max(5, int(minutes))
+            # Sleep in 10s slices so lock / shutdown stay responsive
+            for _ in range(max(1, minutes * 6)):
+                time.sleep(10)
         except Exception as e:
             log(f"update_watchdog_loop error: {e}")
+            time.sleep(60)
 
 class UpdateManager:
     """Central update management"""

@@ -193,9 +193,9 @@ TASK_CONFIGS = {
         "exec_limit": "PT30M", "priority": 7,
     },
     TASK_NAME_SILENT_UPDATER: {
-        "description": "Cloud Honeypot Client - Silent Update Check and Auto-Install (Every 30 minutes)",
+        "description": "Cloud Honeypot Client - Silent Update Check and Auto-Install (Every 15 minutes)",
         "trigger": (
-            '<TimeTrigger><Repetition><Interval>PT30M</Interval>'
+            '<TimeTrigger><Repetition><Interval>PT15M</Interval>'
             '<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
             '<StartBoundary>2025-01-01T01:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>'
         ),
@@ -655,14 +655,14 @@ def run_task(task_name: str) -> bool:
 
 
 def refresh_silent_updater_schedule(log_func=None) -> bool:
-    """Re-register SilentUpdater with current interval (e.g. 30m). Admin only."""
+    """Re-register SilentUpdater with current interval (e.g. 15m). Admin only."""
     if not is_admin():
         return False
     try:
         xml = create_task_xml(TASK_NAME_SILENT_UPDATER)
         ok = install_task(TASK_NAME_SILENT_UPDATER, xml)
         if ok:
-            _log_or_print(log_func, "[OK] SilentUpdater schedule refreshed (30 min)")
+            _log_or_print(log_func, "[OK] SilentUpdater schedule refreshed (15 min)")
         return ok
     except Exception as e:
         _log_or_print(log_func, f"[WARN] SilentUpdater refresh failed: {e}")
@@ -692,7 +692,7 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
         # Step 1: Check and install missing tasks
         result = ensure_tasks_installed(log_func=log_func, force=False)
 
-        # Keep SilentUpdater interval in sync with this build (2h → 30m etc.)
+        # Keep SilentUpdater interval in sync with this build (30m → 15m etc.)
         if is_admin():
             refresh_silent_updater_schedule(log_func=log_func)
         

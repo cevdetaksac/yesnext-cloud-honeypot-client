@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.45"  # Update: disarm self-protect so client is closable during install
+VERSION = "4.4.46"  # Silent update check every 15m + quick startup poll
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

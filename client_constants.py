@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.14"  # onedir package — python312.dll in $INSTDIR\_internal (no _MEI)
+VERSION = "4.5.15"  # SYSTEM daemon: APP_DIR=ProgramData (fix WinError 183 on systemprofile Roaming)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -85,14 +85,90 @@ DEFENDER_MARKERS = {
 
 # ===================== FILE PATHS ===================== #
 
+def _is_system_profile_context() -> bool:
+    """True for SYSTEM / Session 0 — Roaming APPDATA under systemprofile is fragile."""
+    try:
+        appdata = (os.environ.get("APPDATA") or "").lower()
+        if "systemprofile" in appdata:
+            return True
+        userprofile = (os.environ.get("USERPROFILE") or "").lower()
+        if "systemprofile" in userprofile:
+            return True
+        username = (os.environ.get("USERNAME") or os.environ.get("USER") or "").upper()
+        if username in ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"):
+            return True
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+        sid = wintypes.DWORD()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(
+            ctypes.windll.kernel32.GetCurrentProcessId(), ctypes.byref(sid)
+        ):
+            if int(sid.value) == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_directory(path: str) -> bool:
+    """Create directory; tolerate WinError 183 (path exists as file / race)."""
+    try:
+        if os.path.isdir(path):
+            return True
+        if os.path.isfile(path):
+            # Broken install left a FILE where a directory should be
+            try:
+                os.replace(path, path + ".bak_file")
+            except OSError:
+                path = path + "_data"
+        os.makedirs(path, exist_ok=True)
+        return os.path.isdir(path)
+    except OSError as e:
+        # WinError 183: cannot create a file when that file already exists
+        if os.path.isdir(path):
+            return True
+        # Parent component may be a file — try sibling name
+        try:
+            alt = path + "_dir"
+            os.makedirs(alt, exist_ok=True)
+            if os.path.isdir(alt):
+                return False  # caller should not use alt via this bool alone
+        except OSError:
+            pass
+        # Last resort: ignore — caller picks fallback path
+        _ = e
+        return os.path.isdir(path)
+
+
 def get_app_directory() -> str:
-    """Get or create application data directory"""
+    """Application data directory.
+
+    SYSTEM / Session 0 daemon → ProgramData (shared, stable).
+    Interactive user GUI → %APPDATA%\\YesNext\\CloudHoneypotClient.
+    Never crash import on WinError 183 under systemprofile.
+    """
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+    machine_dir = os.path.join(program_data, "YesNext", "CloudHoneypotClient")
+
+    if _is_system_profile_context():
+        if _ensure_directory(machine_dir):
+            return machine_dir
+        # Extreme fallback
+        return program_data
+
     app_dir = os.path.join(
-        os.environ.get("APPDATA", os.path.expanduser("~")), 
-        "YesNext", 
-        "CloudHoneypotClient"
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "YesNext",
+        "CloudHoneypotClient",
     )
-    os.makedirs(app_dir, exist_ok=True)
+    if _ensure_directory(app_dir):
+        return app_dir
+    # Roaming broken (file-in-path / ACL) → machine-wide
+    if _ensure_directory(machine_dir):
+        return machine_dir
     return app_dir
 
 # Application directories
@@ -105,8 +181,8 @@ MACHINE_DATA_DIR = os.path.join(
     "CloudHoneypotClient",
 )
 try:
-    os.makedirs(MACHINE_DATA_DIR, exist_ok=True)
-except OSError:
+    _ensure_directory(MACHINE_DATA_DIR)
+except Exception:
     pass
 TOKEN_FILE = os.path.join(MACHINE_DATA_DIR, "token.dat")
 

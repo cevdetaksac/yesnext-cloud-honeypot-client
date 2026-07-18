@@ -500,9 +500,25 @@ class CloudHoneypotClient:
         NOTE: When daemon is running, skip background tasks to avoid duplication.
         Tray mode in UI-only configuration only provides the interface.
         """
-        # Skip background tasks if daemon is already handling them
+        # Skip heavy background tasks if daemon is already handling them — but ALWAYS
+        # start HealthMonitor here too: tray used to skip it entirely while daemon also
+        # never started it, so dashboard got processes from stale/partial data and
+        # active_sessions stayed empty even when the user was logged in.
         if getattr(self, 'daemon_is_active', False):
-            log("🔄 UI-only mode: Skipping background API sync (daemon handles this)")
+            log("🔄 UI-only mode: Skipping ServiceManager/firewall sync (daemon handles those)")
+
+            def _tray_health_start():
+                try:
+                    time.sleep(max(2, int(API_STARTUP_DELAY) if API_STARTUP_DELAY else 2))
+                    self._start_threat_and_health_services(source="tray-ui")
+                except Exception as e:
+                    log(f"⚠️ tray health start failed: {e}")
+
+            threading.Thread(
+                target=_tray_health_start,
+                daemon=True,
+                name="TrayHealthStart",
+            ).start()
             return
             
         def delayed_api_start():

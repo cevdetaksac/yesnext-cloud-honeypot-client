@@ -55,6 +55,11 @@ def show_completion_dialog(installer_path: str, version: str, parent=None):
     def _exit_for_update():
         """Quit quickly so NSIS can overwrite the onefile EXE."""
         try:
+            from client_self_protection import disarm_for_update
+            disarm_for_update(reason="gui_update_exit")
+        except Exception:
+            pass
+        try:
             import socket as _sock
             try:
                 with _sock.create_connection(("127.0.0.1", 58632), timeout=0.4) as s:
@@ -515,6 +520,18 @@ def check_updates_and_apply_silent() -> bool:
 
             log("[SILENT UPDATE] Helper launched — exiting so install can overwrite EXE safely")
             # Keep update lock; helper clears it after install. Do NOT resume tasks yet.
+            try:
+                from client_self_protection import disarm_for_update
+                disarm_for_update(reason="silent_update_exit")
+            except Exception:
+                pass
+            # Ask any sibling GUI/daemon to exit cleanly (this process may be updater-only)
+            try:
+                import socket as _sock
+                with _sock.create_connection(("127.0.0.1", 58632), timeout=0.6) as s:
+                    s.sendall(b"QUIT\n")
+            except Exception:
+                pass
             time.sleep(1.5)
             os._exit(0)
                 

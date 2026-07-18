@@ -1182,20 +1182,40 @@ class CloudHoneypotClient:
                         except Exception:
                             pass
                 elif cmd in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
-                    # Protect freshly launched --show-gui from installer/kill race
+                    # During update/install, NEVER ignore QUIT — self-protect must yield
+                    updating = False
+                    try:
+                        from client_utils import is_update_in_progress
+                        updating = bool(is_update_in_progress())
+                    except Exception:
+                        updating = False
+
                     protect_until = float(getattr(self, "_quit_protect_until", 0) or 0)
-                    if time.time() < protect_until:
+                    if (not updating) and time.time() < protect_until:
                         log("[CTRL] QUIT ignored — GUI startup grace active")
                         try:
                             conn.sendall(b"BUSY\n")
                         except Exception:
                             pass
                         continue
+
+                    # Clear startup grace + disarm DACL so kill/update can finish
+                    self._quit_protect_until = 0.0
+                    try:
+                        from client_self_protection import disarm_for_update
+                        disarm_for_update(reason="ctrl_quit")
+                    except Exception:
+                        pass
+
                     # Installer / updater graceful exit — bypasses DACL self-protection
                     log("[CTRL] QUIT received — graceful exit for install/update")
                     try:
                         from client_utils import write_watchdog_token
                         write_watchdog_token("stop", WATCHDOG_TOKEN_FILE)
+                    except Exception:
+                        pass
+                    try:
+                        conn.sendall(b"OK\n")
                     except Exception:
                         pass
                     threading.Thread(
@@ -1925,6 +1945,12 @@ class CloudHoneypotClient:
         """Merkezi temiz çıkış — tüm kaynakları serbest bırakır"""
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
+            self._quit_protect_until = 0.0
+            try:
+                from client_self_protection import disarm_for_update
+                disarm_for_update(reason="graceful_exit")
+            except Exception:
+                pass
             if getattr(self, "process_protection", None):
                 try:
                     self.process_protection.mark_graceful_shutdown()

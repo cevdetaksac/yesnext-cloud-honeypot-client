@@ -1907,6 +1907,14 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
     import socket
     import subprocess
 
+    # Always disarm self-protect on THIS process first (DACL + Guard).
+    # Without this, update helpers cannot close the client reliably.
+    try:
+        from client_self_protection import disarm_for_update
+        disarm_for_update(reason="prepare_client_for_installer")
+    except Exception:
+        pass
+
     flag_paths = [
         os.path.join(os.environ.get("TEMP", ""), "honeypot_watchdog_token.txt"),
         os.path.join(os.environ.get("APPDATA", ""), "YesNext", "CloudHoneypot", "watchdog_token.txt"),

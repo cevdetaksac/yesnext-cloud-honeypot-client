@@ -48,6 +48,68 @@ TASK_DESCRIPTION = "YesNext Honeypot Client — otomatik yeniden başlatma koruy
 LAST_BREATH_THREAT_WINDOW = 60  # seconds
 LAST_BREATH_MIN_SCORE = 70     # minimum threat score to trigger IP block
 
+# Active ProcessProtection instance (this process) — updater/QUIT paths use it to disarm
+_ACTIVE_PROTECTION: Optional["ProcessProtection"] = None
+
+
+def disarm_for_update(reason: str = "update") -> None:
+    """Make this process closable for installer/update (DACL off, guard off, graceful flag).
+
+    Safe to call from any thread / without an app instance.
+    """
+    global _ACTIVE_PROTECTION
+    try:
+        if _ACTIVE_PROTECTION is not None:
+            _ACTIVE_PROTECTION.allow_termination_for_update(reason=reason)
+            return
+    except Exception as e:
+        log(f"[SELF-PROTECT] disarm via instance failed: {e}")
+    # No instance (e.g. silent-update-check process) — still clear DACL / guard best-effort
+    try:
+        _disarm_process_dacl_best_effort()
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["schtasks", "/end", "/tn", TASK_NAME],
+            capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW,
+        )
+        subprocess.run(
+            ["schtasks", "/change", "/tn", TASK_NAME, "/disable"],
+            capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+    log(f"[SELF-PROTECT] disarm_for_update (no instance) reason={reason}")
+
+
+def _disarm_process_dacl_best_effort() -> bool:
+    """Reset process DACL to NULL (everyone can terminate). Returns True on success."""
+    try:
+        import win32api
+        import win32security
+        import win32con
+
+        handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, os.getpid())
+        try:
+            sd = win32security.GetKernelObjectSecurity(
+                handle,
+                win32security.DACL_SECURITY_INFORMATION,
+            )
+            # NULL DACL → unrestricted access (process can be terminated again)
+            sd.SetSecurityDescriptorDacl(True, None, False)
+            win32security.SetKernelObjectSecurity(
+                handle,
+                win32security.DACL_SECURITY_INFORMATION,
+                sd,
+            )
+        finally:
+            win32api.CloseHandle(handle)
+        return True
+    except Exception as e:
+        log(f"[SELF-PROTECT] DACL disarm error: {e}")
+        return False
+
 
 # ── Process Protection ────────────────────────────────────────────
 
@@ -90,14 +152,17 @@ class ProcessProtection:
             self.api_url = api_url
         self.token_getter = token_getter or (lambda: "")
         self._setup_done = False
+        self._dacl_armed = False
 
     # ── Public Setup ──────────────────────────────────────────────
 
     def setup(self):
         """Tüm koruma katmanlarını etkinleştir."""
+        global _ACTIVE_PROTECTION
         if self._setup_done:
             return
         self._setup_done = True
+        _ACTIVE_PROTECTION = self
 
         # Katman 2: Shutdown priority + DACL
         self._set_shutdown_priority()
@@ -116,7 +181,7 @@ class ProcessProtection:
         return {
             "setup_done": self._setup_done,
             "task_exists": self._check_task_exists(),
-            "dacl_protected": self._setup_done,
+            "dacl_protected": bool(self._dacl_armed),
             "last_breath_armed": self._setup_done,
             "graceful_shutdown": bool(getattr(self, "_graceful_shutdown", False)),
         }
@@ -126,7 +191,33 @@ class ProcessProtection:
         self._graceful_shutdown = True
         log("[SELF-PROTECT] Graceful shutdown marked (update/PIN exit)")
 
-    # ── Katman 1: Task Scheduler ──────────────────────────────────
+    def allow_termination_for_update(self, reason: str = "update"):
+        """Disarm self-protect so installer/helper can close this process.
+
+        Must be called before update install / force-kill — otherwise DACL + Guard
+        can block or immediately respawn the client mid-update.
+        """
+        self._graceful_shutdown = True
+        log(f"[SELF-PROTECT] Allow termination for {reason}")
+
+        # Stop + disable guard so process death does not respawn during install
+        try:
+            subprocess.run(
+                ["schtasks", "/end", "/tn", TASK_NAME],
+                capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW,
+            )
+            subprocess.run(
+                ["schtasks", "/change", "/tn", TASK_NAME, "/disable"],
+                capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW,
+            )
+            log("[SELF-PROTECT] HoneypotClientGuard disabled for update")
+        except Exception as e:
+            log(f"[SELF-PROTECT] Guard disable error: {e}")
+
+        if _disarm_process_dacl_best_effort():
+            self._dacl_armed = False
+            log("[SELF-PROTECT] Process DACL disarmed — closable for update")
+
 
     def _ensure_task_scheduler(self):
         """
@@ -236,6 +327,7 @@ class ProcessProtection:
             )
 
             win32api.CloseHandle(handle)
+            self._dacl_armed = True
             log("[SELF-PROTECT] Process DACL protected — casual taskkill blocked")
 
         except ImportError:

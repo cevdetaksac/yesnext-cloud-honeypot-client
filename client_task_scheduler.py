@@ -160,7 +160,7 @@ TASK_CONFIGS = {
         "description": "Cloud Honeypot Client - Interactive Tray",
         "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></LogonTrigger>",
         "principal": "<GroupId>Users</GroupId><RunLevel>HighestAvailable</RunLevel>",
-        "args": "--mode=tray --silent",
+        "args": "--show-gui",
         "multi_instance": "StopExisting",
         "hidden": False, "wake": False, "network_required": False,
         "exec_limit": "PT0S", "priority": 7,

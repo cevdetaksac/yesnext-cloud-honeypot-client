@@ -34,7 +34,7 @@ import customtkinter as ctk
 
 # Local module imports  
 from client_firewall import FirewallAgent
-from client_helpers import log, ClientHelpers, run_cmd
+from client_helpers import log, ClientHelpers, run_cmd, is_session_zero, launch_interactive_tray_gui
 import client_helpers
 from client_service_manager import ServiceManager
 from client_api import HoneypotAPIClient, api_request_with_token
@@ -1149,6 +1149,14 @@ class CloudHoneypotClient:
                 line = buf.split(b"\n", 1)[0]
                 cmd = line.decode("utf-8", "ignore").strip().upper()
                 if cmd == "SHOW":
+                    # Session 0 windows are invisible on the user desktop — never claim OK
+                    if is_session_zero():
+                        log("[CTRL] SHOW received in Session 0 — NOGUI (invisible)")
+                        try:
+                            conn.sendall(b"NOGUI\n")
+                        except Exception:
+                            pass
+                        continue
                     has_gui = bool(
                         self.show_cb
                         and getattr(self, "root", None) is not None
@@ -2470,6 +2478,11 @@ if __name__ == "__main__":
         if not check_singleton(operation_mode, allow_steal=False):
             log("Tray launch skipped — another instance already running (GUI kept)")
             sys.exit(0)
+    elif operation_mode == DAEMON_MODE or args.daemon:
+        # Daemon must never steal/kill a visible GUI (Watchdog race → Session 0 takeover)
+        if not check_singleton(operation_mode, allow_steal=False):
+            log("Daemon skipped — another instance already running")
+            sys.exit(0)
     else:
         if not check_singleton(operation_mode, allow_steal=True):
             log("ERROR: Cannot start - another instance is running or mutex failed")
@@ -2479,6 +2492,18 @@ if __name__ == "__main__":
     
     if operation_mode == GUI_MODE:
         # ===== GUI MODE - Normal GUI application with tray functionality =====
+
+        # Session 0 (SYSTEM) cannot show a visible desktop window
+        if is_session_zero():
+            log(
+                "Refusing GUI in Session 0 (invisible to user). "
+                "Handing off to CloudHoneypot-Tray in interactive session."
+            )
+            try:
+                launch_interactive_tray_gui()
+            except Exception as e:
+                log(f"Session-0 GUI handoff failed: {e}")
+            sys.exit(0)
         
         # Initialize basic logging FIRST
         log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
@@ -2597,58 +2622,69 @@ if __name__ == "__main__":
             return False
 
         if is_user_logged_on():
-            log("Active user session detected at daemon startup. Switching to tray/GUI mode.")
-            # Tray/GUI modunu başlat
-            log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
-            os.makedirs(log_dir, exist_ok=True)
-            setup_logging()
-            try:
-                selected_language = resolve_app_language()
-                app = CloudHoneypotClient()
-                app.lang = selected_language
-                app._quit_protect_until = time.time() + 25.0
-                log(f"Application initialized with language: {selected_language}")
-                log("Building main GUI (daemon detected logon)...")
-                app.build_gui(minimized=False)
-                log("GUI build completed successfully")
-                # Previously missing: without this, HealthMonitor never starts when
-                # Background task pivots daemon→GUI on interactive logon, while Tray
-                # skips health because it still sees --mode=daemon in cmdline.
-                app.start_delayed_api_sync()
-                if hasattr(app, 'root') and app.root:
-                    app.root.mainloop()
-            except Exception as gui_error:
-                log(f"GUI Mode Error (daemon logon): {gui_error}")
-                import traceback
-                log(f"GUI Error traceback: {traceback.format_exc()}")
-                sys.exit(1)
-            sys.exit(0)
-        else:
-            app = None
-            try:
-                log("=== DAEMON MODE STARTUP ===")
-                log_dir = os.path.join(os.environ.get('PROGRAMDATA', ''), 'YesNext', 'CloudHoneypotClient', 'logs')
+            # CRITICAL: Background task runs as SYSTEM (Session 0).
+            # Building a Tk GUI here is invisible on the user desktop.
+            if is_session_zero():
+                log(
+                    "Active user session detected, but we are in Session 0 (SYSTEM). "
+                    "Keeping headless daemon and launching interactive Tray/GUI."
+                )
+                try:
+                    launch_interactive_tray_gui()
+                except Exception as e:
+                    log(f"Interactive tray launch failed: {e}")
+                # Fall through to normal headless daemon (do NOT build GUI here)
+            else:
+                log("Active user session detected at daemon startup. Switching to tray/GUI mode.")
+                # Tray/GUI modunu başlat
+                log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
                 os.makedirs(log_dir, exist_ok=True)
                 setup_logging()
-                log("Setting up daemon mode application...")
-                app = CloudHoneypotClient()
-                log("Starting daemon mode...")
-                app.run_daemon()
-            except KeyboardInterrupt:
-                log("Daemon interrupted by user signal")
-                sys.exit(0)
-            except Exception as daemon_error:
-                log(f"DAEMON CRITICAL ERROR: {daemon_error}")
-                import traceback
-                log(f"Daemon traceback: {traceback.format_exc()}")
                 try:
-                    if app and hasattr(app, 'heartbeat_path'):
-                        if hasattr(app, 'monitoring_manager'):
-                            app.monitoring_manager.stop_heartbeat_system()
-                except:
-                    pass
-                sys.exit(1)  # Exit code 1 = Unhandled exception
+                    selected_language = resolve_app_language()
+                    app = CloudHoneypotClient()
+                    app.lang = selected_language
+                    app._quit_protect_until = time.time() + 25.0
+                    log(f"Application initialized with language: {selected_language}")
+                    log("Building main GUI (daemon detected logon)...")
+                    app.build_gui(minimized=False)
+                    log("GUI build completed successfully")
+                    app.start_delayed_api_sync()
+                    if hasattr(app, 'root') and app.root:
+                        app.root.mainloop()
+                except Exception as gui_error:
+                    log(f"GUI Mode Error (daemon logon): {gui_error}")
+                    import traceback
+                    log(f"GUI Error traceback: {traceback.format_exc()}")
+                    sys.exit(1)
+                sys.exit(0)
+
+        # Headless daemon (no interactive session, or Session 0 with tray handoff)
+        app = None
+        try:
+            log("=== DAEMON MODE STARTUP ===")
+            log_dir = os.path.join(os.environ.get('PROGRAMDATA', ''), 'YesNext', 'CloudHoneypotClient', 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+            setup_logging()
+            log("Setting up daemon mode application...")
+            app = CloudHoneypotClient()
+            log("Starting daemon mode...")
+            app.run_daemon()
+        except KeyboardInterrupt:
+            log("Daemon interrupted by user signal")
             sys.exit(0)
+        except Exception as daemon_error:
+            log(f"DAEMON CRITICAL ERROR: {daemon_error}")
+            import traceback
+            log(f"Daemon traceback: {traceback.format_exc()}")
+            try:
+                if app and hasattr(app, 'heartbeat_path'):
+                    if hasattr(app, 'monitoring_manager'):
+                        app.monitoring_manager.stop_heartbeat_system()
+            except Exception:
+                pass
+            sys.exit(1)  # Exit code 1 = Unhandled exception
+        sys.exit(0)
     
     elif operation_mode == "watchdog":
         # ===== WATCHDOG MODE - Hourly process monitoring and restart =====
@@ -2658,13 +2694,14 @@ if __name__ == "__main__":
             from client_helpers import ClientHelpers
             helper = ClientHelpers()
             
-            log("Watchdog mode activated - checking if background daemon is running...")
+            log("Watchdog mode activated - checking if client is already running...")
             
-            # Check if daemon is running
-            is_running = helper.is_daemon_running()
+            # Any live instance (GUI or daemon) counts — do NOT spawn Session-0 daemon
+            # over a visible user GUI (that race made the window invisible).
+            is_running = helper.is_app_running() or helper.is_daemon_running()
             
             if not is_running:
-                log("Background daemon not running, starting new daemon instance...")
+                log("No client instance running, starting new daemon instance...")
                 
                 # Get executable path
                 exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
@@ -2679,7 +2716,7 @@ if __name__ == "__main__":
                 
                 log("New daemon instance started successfully")
             else:
-                log("Background daemon is already running - watchdog check passed")
+                log("Client already running - watchdog check passed")
                 
         except Exception as e:
             log(f"Watchdog error: {e}")

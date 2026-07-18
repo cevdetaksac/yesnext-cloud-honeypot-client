@@ -40,6 +40,51 @@ _ip_cache = {
     'cache_duration': 300  # 5 minutes cache (was checking every 60s)
 }
 
+def get_windows_session_id() -> int:
+    """Return current process Windows session id, or -1 on failure."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        sid = wintypes.DWORD()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(
+            ctypes.windll.kernel32.GetCurrentProcessId(),
+            ctypes.byref(sid),
+        ):
+            return int(sid.value)
+    except Exception:
+        pass
+    return -1
+
+
+def is_session_zero() -> bool:
+    """True when running in Session 0 (services / SYSTEM) — GUI is invisible to users."""
+    return get_windows_session_id() == 0
+
+
+def launch_interactive_tray_gui() -> bool:
+    """Start CloudHoneypot-Tray in the logged-on user session (visible desktop)."""
+    try:
+        import subprocess
+        from client_task_scheduler import TASK_NAME_TRAY
+        CREATE_NO_WINDOW = 0x08000000
+        # Ensure task is enabled, then run it (Users group principal → interactive session)
+        subprocess.run(
+            ["schtasks", "/change", "/tn", TASK_NAME_TRAY, "/enable"],
+            capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+        )
+        r = subprocess.run(
+            ["schtasks", "/run", "/tn", TASK_NAME_TRAY],
+            capture_output=True, text=True, timeout=15,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        ok = r.returncode == 0
+        log(f"[SESSION] Trigger {TASK_NAME_TRAY}: rc={r.returncode} ok={ok}")
+        return ok
+    except Exception as e:
+        log(f"[SESSION] launch_interactive_tray_gui failed: {e}")
+        return False
+
+
 def set_logger(logger: logging.Logger) -> None:
     """Set global logger for helper functions"""
     global LOGGER

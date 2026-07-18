@@ -231,13 +231,20 @@ class CloudHoneypotClient:
         _is_daemon_argv = "--mode=daemon" in _argv_join or "--daemon" in _argv_join
         if not _is_daemon_argv:
             try:
-                from client_daemon_ipc import ping
+                from client_daemon_ipc import is_motor_healthy, ping
                 _t_ping = time.time()
-                self.daemon_is_active = bool(ping(timeout=0.15))
+                healthy = bool(is_motor_healthy(timeout=0.35))
+                pong = True if healthy else bool(ping(timeout=0.15))
+                self.daemon_is_active = healthy
                 log(
-                    f"[PERF] early_daemon_ping ok={self.daemon_is_active} "
+                    f"[PERF] early_motor_check healthy={healthy} ping={pong} "
                     f"{(time.time() - _t_ping) * 1000:.0f}ms"
                 )
+                if pong and not healthy:
+                    log(
+                        "[IPC] WARN: :58632 PING ok but motor_ok=false — "
+                        "not entering frontend_only (will build motors / ensure Background)"
+                    )
             except Exception:
                 self.daemon_is_active = False
             if self.daemon_is_active:
@@ -418,12 +425,12 @@ class CloudHoneypotClient:
         # Late re-check only if we still think we're a local motor (GUI path)
         if not self.frontend_only and not _is_daemon_argv:
             try:
-                from client_daemon_ipc import ping
-                if ping(timeout=0.1):
+                from client_daemon_ipc import is_motor_healthy
+                if is_motor_healthy(timeout=0.25):
                     self.daemon_is_active = True
                     self.frontend_only = True
                     self._protection_mode_cache = "monitoring"
-                    log("[PERF] late daemon ping — switching to frontend_only")
+                    log("[PERF] late motor_ok — switching to frontend_only")
             except Exception as e:
                 log(f"⚠️ Daemon detection failed: {e}")
         
@@ -635,21 +642,43 @@ class CloudHoneypotClient:
 
             def _frontend_status_poll():
                 try:
-                    from client_daemon_ipc import get_status, ping
+                    from client_daemon_ipc import get_status, is_motor_healthy, ensure_daemon_running
                     time.sleep(2)
-                    if ping():
+                    if is_motor_healthy():
                         st = get_status()
                         log(
-                            f"[IPC] Daemon STATUS: services={st.get('running_services')} "
+                            f"[IPC] Daemon STATUS: motor_ok={st.get('motor_ok')} "
+                            f"remote_commands={st.get('remote_commands_running')} "
+                            f"services={st.get('running_services')} "
                             f"mode={st.get('protection_mode')}"
                         )
+                    else:
+                        log("[IPC] Motor unhealthy — ensure Background daemon")
+                        ensure_daemon_running(log_func=log, wait_sec=15.0)
                 except Exception as e:
                     log(f"[IPC] status poll: {e}")
+
+            def _frontend_motor_watchdog():
+                """If command poll dies, resurrect Background (dashboard RD / self_update)."""
+                while True:
+                    try:
+                        time.sleep(45)
+                        from client_daemon_ipc import is_motor_healthy, ensure_daemon_running
+                        if not is_motor_healthy(timeout=1.0):
+                            log("[IPC] motor watchdog: unhealthy — ensure_daemon_running")
+                            ensure_daemon_running(log_func=log, wait_sec=20.0)
+                    except Exception as e:
+                        log(f"[IPC] motor watchdog: {e}")
 
             threading.Thread(
                 target=_frontend_status_poll,
                 daemon=True,
                 name="FrontendStatus",
+            ).start()
+            threading.Thread(
+                target=_frontend_motor_watchdog,
+                daemon=True,
+                name="MotorWatchdog",
             ).start()
             return
             
@@ -1249,21 +1278,34 @@ class CloudHoneypotClient:
             running = list(self.service_manager.running_services or [])
         except Exception:
             running = []
-        mode = "daemon"
+        mode = "inactive"
         try:
             mode = self.get_protection_mode()
         except Exception:
             pass
+        is_motor = bool(getattr(self, "_is_daemon_motor", False))
+        rc = getattr(self, "remote_commands", None)
+        rc_running = bool(rc and getattr(rc, "_running", False))
+        frontend_only = bool(getattr(self, "frontend_only", False))
+        if is_motor:
+            role = "daemon"
+        elif frontend_only:
+            role = "frontend"
+        else:
+            role = "legacy"
         return {
             "ok": True,
-            "daemon": True,
-            "role": "daemon" if getattr(self, "_is_daemon_motor", False) else "legacy",
+            # CRITICAL: only Session-0 motor reports daemon=true (GUI must not impersonate)
+            "daemon": is_motor,
+            "role": role,
             "version": ver,
             "pid": os.getpid(),
             "running_services": running,
             "protection_mode": mode,
             "token_present": bool(self.state.get("token")),
-            "frontend_only": bool(getattr(self, "frontend_only", False)),
+            "frontend_only": frontend_only,
+            "remote_commands_running": rc_running,
+            "motor_ok": bool(is_motor and rc_running),
         }
 
     def control_server_loop(self, sock):
@@ -1438,22 +1480,27 @@ class CloudHoneypotClient:
                         pass
 
     def start_single_instance_server(self):
-        """Bind control socket. Daemon owns it; frontend never exits if port busy."""
-        if getattr(self, "frontend_only", False) and not getattr(self, "_is_daemon_motor", False):
-            log("[IPC] Frontend mode — control port owned by SYSTEM daemon (no bind)")
-            return
-
-        # If motor already answers, stay frontend (avoid bind fight / silent exit)
+        """Bind control socket — ONLY Session-0 daemon motor. GUI never binds."""
         if not getattr(self, "_is_daemon_motor", False):
+            # Frontend / tray must never own :58632 (fake PING broke command poll)
             try:
-                from client_daemon_ipc import ping
-                if ping(timeout=0.6):
+                from client_daemon_ipc import is_motor_healthy, ping
+                if is_motor_healthy(timeout=0.5):
                     self.frontend_only = True
                     self.daemon_is_active = True
-                    log("[IPC] Daemon PING ok — skipping control bind (frontend)")
+                    log("[IPC] Motor healthy — frontend skips control bind")
                     return
-            except Exception:
-                pass
+                if ping(timeout=0.4):
+                    log(
+                        "[IPC] Stale PING without motor_ok — not binding; "
+                        "Background daemon will own commands/pending"
+                    )
+                else:
+                    log("[IPC] No control listener — frontend will not bind (daemon owns port)")
+            except Exception as e:
+                log(f"[IPC] frontend bind skip: {e}")
+            self.frontend_only = True
+            return
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -1463,18 +1510,10 @@ class CloudHoneypotClient:
         try:
             s.bind((CONTROL_HOST, CONTROL_PORT))
         except OSError:
-            if getattr(self, "_is_daemon_motor", False):
-                log("[IPC] ERROR: Daemon cannot bind control port — another listener?")
-                return
-            # NEVER sys.exit here — that made GUI vanish after install when port busy
-            log("[IPC] Control port busy — continuing without exclusive listener (GUI stays up)")
-            try:
-                with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=0.8) as c:
-                    c.sendall(b"SHOW\n")
-            except Exception:
-                pass
-            self.frontend_only = True
-            self.daemon_is_active = True
+            log(
+                "[IPC] ERROR: Daemon cannot bind control port — another listener? "
+                "Motor continues (commands/pending still run)"
+            )
             return
 
         s.listen(8)
@@ -2401,9 +2440,50 @@ class CloudHoneypotClient:
             return
         return self.update_manager.start_update_watchdog(auto_update=True)
 
+    def _ensure_motor_stack(self) -> bool:
+        """Guarantee RemoteCommandExecutor (+ AutoResponse) exists for Session-0 motor.
+
+        Frontend-only __init__ may have skipped construction; daemon must still poll
+        commands/pending and open remote WS.
+        """
+        self._is_daemon_motor = True
+        self.frontend_only = False
+        ok = True
+        try:
+            if self.auto_response is None:
+                self.auto_response = AutoResponse(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                )
+                log("[MOTOR] AutoResponse constructed (daemon ensure)")
+            if self.remote_commands is None:
+                self.remote_commands = RemoteCommandExecutor(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    auto_response=self.auto_response,
+                )
+                if getattr(self, "cleanup_manager", None) is not None:
+                    self.remote_commands.cleanup_manager = self.cleanup_manager
+                if getattr(self, "health_monitor", None) is not None:
+                    self.remote_commands.health_monitor = self.health_monitor
+                log("[MOTOR] RemoteCommandExecutor constructed (daemon ensure)")
+        except Exception as e:
+            log(f"[MOTOR] ensure construct failed: {e}")
+            ok = False
+        return ok and self.remote_commands is not None
+
     def _start_threat_and_health_services(self, source: str = "gui") -> None:
         """Start v4 threat pipeline + health/sessions reporter (daemon owns these when tray is UI-only)."""
         if not ENABLE_THREAT_DETECTION:
+            # Remote commands still required for RD / self_update even if threat off
+            if source == "daemon":
+                self._ensure_motor_stack()
+                try:
+                    if self.remote_commands:
+                        self.remote_commands.start()
+                        log(f"[MOTOR] RemoteCommands started ({source}, threat disabled)")
+                except Exception as e:
+                    log(f"[MOTOR] RemoteCommands start failed: {e}")
             return
 
         # Threat pipeline
@@ -2422,12 +2502,20 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"⚠️ Threat detection start failed ({source}): {e}")
 
-        # Remote commands + auto-response (list_sessions / list_processes / logoff)
+        # Remote commands + auto-response (list_sessions / list_processes / logoff / RD / self_update)
         try:
+            if source == "daemon":
+                self._ensure_motor_stack()
             if getattr(self, "remote_commands", None):
                 if getattr(self, "health_monitor", None):
                     self.remote_commands.health_monitor = self.health_monitor
                 self.remote_commands.start()
+                log(
+                    f"[MOTOR] RemoteCommands polling commands/pending "
+                    f"({source}, running={getattr(self.remote_commands, '_running', False)})"
+                )
+            else:
+                log(f"[MOTOR] ERROR: remote_commands is None ({source}) — RD/self_update dead")
             if getattr(self, "auto_response", None):
                 self.auto_response.start()
             try:
@@ -2463,6 +2551,12 @@ class CloudHoneypotClient:
         self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
 
+        # Always construct command poller before IPC (STATUS must report motor_ok)
+        try:
+            self._ensure_motor_stack()
+        except Exception as e:
+            log(f"[MOTOR] pre-IPC ensure failed: {e}")
+
         # Control IPC first so GUIs can PING/STATUS while motor boots
         try:
             self.start_single_instance_server()
@@ -2490,6 +2584,19 @@ class CloudHoneypotClient:
             self._start_threat_and_health_services(source="daemon")
         except Exception as e:
             log(f"threat/health start failed (daemon): {e}")
+        # Hard guarantee: command loop must be up for RD / self_update
+        try:
+            if self.remote_commands and not getattr(self.remote_commands, "_running", False):
+                self.remote_commands.start()
+                log("[MOTOR] RemoteCommands re-started after threat init")
+            st = self._ipc_status_payload()
+            log(
+                f"[MOTOR] STATUS motor_ok={st.get('motor_ok')} "
+                f"remote_commands_running={st.get('remote_commands_running')} "
+                f"pid={st.get('pid')}"
+            )
+        except Exception as e:
+            log(f"[MOTOR] post-start verify failed: {e}")
         try:
             start_watchdog_if_needed(WATCHDOG_TOKEN_FILE, log)
         except Exception as e:
@@ -2523,6 +2630,21 @@ class CloudHoneypotClient:
                     ok = self.apply_services(rows)
                     if ok:
                         log("Daemon: Servisler aktif (arka plan).")
+                # Keep command poller alive (watchdog)
+                rc = getattr(self, "remote_commands", None)
+                if rc is None:
+                    self._ensure_motor_stack()
+                    rc = self.remote_commands
+                if rc:
+                    thr = getattr(rc, "_poll_thread", None)
+                    alive = bool(thr is not None and thr.is_alive())
+                    if not alive:
+                        log("[MOTOR] RemoteCommands poll thread dead — restarting")
+                        try:
+                            rc._running = False
+                            rc.start()
+                        except Exception as e:
+                            log(f"[MOTOR] RemoteCommands restart failed: {e}")
                 time.sleep(5)
             except KeyboardInterrupt:
                 break
@@ -2611,19 +2733,26 @@ class CloudHoneypotClient:
 
         self.start_single_instance_server()
 
-        # Prefer frontend if daemon already answers (avoid dual motor / GUI stutter)
+        # Prefer frontend only if SYSTEM motor is healthy (not mere PING)
         if not getattr(self, "frontend_only", False) and not getattr(self, "daemon_is_active", False):
             try:
-                from client_daemon_ipc import ping
+                from client_daemon_ipc import is_motor_healthy, ensure_daemon_running
                 _t = time.time()
-                if ping(timeout=0.15):
+                if is_motor_healthy(timeout=0.4):
                     self.frontend_only = True
                     self.daemon_is_active = True
                     self._protection_mode_cache = "monitoring"
                     log(
-                        f"[PERF] build_gui daemon ping ok "
+                        f"[PERF] build_gui motor_ok "
                         f"{(time.time() - _t) * 1000:.0f}ms — frontend_only"
                     )
+                else:
+                    # Kick Background so commands/pending + RD WS come back
+                    threading.Thread(
+                        target=lambda: ensure_daemon_running(log_func=log, wait_sec=12.0),
+                        daemon=True,
+                        name="EnsureMotor",
+                    ).start()
             except Exception:
                 pass
 
@@ -3007,21 +3136,21 @@ if __name__ == "__main__":
             # Create app instance
             app = CloudHoneypotClient()
             app.lang = selected_language
-            # Prefer frontend if motor already up; otherwise ensure in background (no UI block)
+            # Prefer frontend if SYSTEM motor already healthy; otherwise ensure in background
             try:
-                from client_daemon_ipc import ping
-                if ping(timeout=0.8):
+                from client_daemon_ipc import is_motor_healthy
+                if is_motor_healthy(timeout=0.8):
                     app.frontend_only = True
                     app.daemon_is_active = True
-                    log("[IPC] Confirmed daemon — forcing frontend_only")
+                    log("[IPC] Confirmed motor_ok — forcing frontend_only")
             except Exception:
                 pass
 
             def _bg_ensure_daemon():
                 try:
-                    from client_daemon_ipc import ensure_daemon_running, ping as _ping
-                    ok = ensure_daemon_running(log_func=log, wait_sec=8.0)
-                    if ok or _ping(timeout=0.8):
+                    from client_daemon_ipc import ensure_daemon_running, is_motor_healthy
+                    ok = ensure_daemon_running(log_func=log, wait_sec=12.0)
+                    if ok or is_motor_healthy(timeout=0.8):
                         app.frontend_only = True
                         app.daemon_is_active = True
                     log(f"[IPC] Background daemon ensure: {'ok' if ok else 'failed (GUI continues)'}")

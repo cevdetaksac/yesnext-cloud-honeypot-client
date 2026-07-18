@@ -81,6 +81,29 @@ def get_status(timeout: float = 3.0) -> Dict[str, Any]:
         return {"ok": False, "error": str(e), "daemon": False}
 
 
+def is_motor_healthy(timeout: float = 1.2) -> bool:
+    """True only if Session-0 motor answers STATUS with command poller alive.
+
+    Plain PING is not enough — a GUI/tray that bound :58632 also answers PONG
+    but never runs commands/pending or remote WS.
+    """
+    try:
+        st = get_status(timeout=timeout)
+        if not st.get("ok"):
+            return False
+        if st.get("motor_ok") is True:
+            return True
+        # Explicit fields from v4.5.12+
+        if "remote_commands_running" in st:
+            return bool(st.get("daemon")) and bool(st.get("remote_commands_running"))
+        # role=daemon without the new flag (older motor still OK if role set)
+        if st.get("role") == "daemon" and st.get("daemon") is True:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def honeypot_start(service: str, port: int, timeout: float = 8.0) -> Dict[str, Any]:
     svc = str(service).upper().strip()
     try:
@@ -105,49 +128,82 @@ def honeypot_list(timeout: float = 3.0) -> Dict[str, Any]:
 
 
 def ensure_daemon_running(log_func=None, wait_sec: float = 20.0) -> bool:
-    """If motor not answering, start --mode=daemon and wait for PING."""
+    """If SYSTEM motor is unhealthy, start --mode=daemon and wait for motor_ok."""
     if log_func is None:
         log_func = print
-    if ping():
+    if is_motor_healthy():
         return True
+
+    if ping() and not is_motor_healthy():
+        log_func(
+            "[IPC] Control port answers PING but motor_ok=false "
+            "(likely GUI stole :58632) — starting Background daemon anyway"
+        )
 
     try:
         from client_helpers import ClientHelpers
         if ClientHelpers.is_daemon_running():
-            log_func("[IPC] Daemon process present — waiting for control port...")
-            deadline = time.time() + wait_sec
+            log_func("[IPC] Daemon process present — waiting for motor health...")
+            deadline = time.time() + min(8.0, wait_sec)
             while time.time() < deadline:
-                if ping():
+                if is_motor_healthy():
                     return True
                 time.sleep(0.5)
     except Exception:
         pass
 
-    log_func("[IPC] Starting SYSTEM daemon motor...")
+    # Prefer scheduled Background task (SYSTEM Session 0) over user-context spawn
+    started = False
     try:
-        if getattr(sys, "frozen", False):
-            exe = sys.executable
-            args = [exe, "--mode=daemon", "--silent"]
-        else:
-            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client.py")
-            args = [sys.executable, script, "--mode=daemon", "--silent"]
-        flags = 0
-        if os.name == "nt":
-            flags = (
-                subprocess.DETACHED_PROCESS
-                | subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.CREATE_NO_WINDOW
-            )
-        subprocess.Popen(args, creationflags=flags, close_fds=True)
+        from client_task_scheduler import TASK_NAME_BACKGROUND
+        CREATE_NO_WINDOW = 0x08000000
+        subprocess.run(
+            ["schtasks", "/change", "/tn", TASK_NAME_BACKGROUND, "/enable"],
+            capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+        )
+        r = subprocess.run(
+            ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
+            capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW,
+        )
+        started = r.returncode == 0
+        log_func(f"[IPC] schtasks /run {TASK_NAME_BACKGROUND}: rc={r.returncode}")
     except Exception as e:
-        log_func(f"[IPC] Failed to spawn daemon: {e}")
-        return False
+        log_func(f"[IPC] schtasks Background run failed: {e}")
+
+    if not started:
+        log_func("[IPC] Starting SYSTEM daemon motor (direct spawn)...")
+        try:
+            if getattr(sys, "frozen", False):
+                exe = sys.executable
+                args = [exe, "--mode=daemon", "--silent"]
+            else:
+                script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client.py")
+                args = [sys.executable, script, "--mode=daemon", "--silent"]
+            flags = 0
+            if os.name == "nt":
+                flags = (
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NO_WINDOW
+                )
+            subprocess.Popen(args, creationflags=flags, close_fds=True)
+            started = True
+        except Exception as e:
+            log_func(f"[IPC] Failed to spawn daemon: {e}")
+            return False
 
     deadline = time.time() + wait_sec
     while time.time() < deadline:
-        if ping():
-            log_func("[IPC] Daemon motor ready")
+        if is_motor_healthy():
+            log_func("[IPC] Daemon motor ready (remote_commands_running)")
             return True
         time.sleep(0.5)
-    log_func("[IPC] Daemon did not answer PING in time")
-    return False
+    # Soft success: process may be up but port stolen — still better than nothing
+    if ping():
+        log_func(
+            "[IPC] WARN: listener up but motor_ok still false — "
+            "command poll may be missing until Background owns Session 0"
+        )
+    else:
+        log_func("[IPC] Daemon did not become healthy in time")
+    return is_motor_healthy()

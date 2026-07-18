@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 4
-!define VERSIONBUILD 30
+!define VERSIONBUILD 31
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -195,45 +195,51 @@ Function PreInstallKillFast
     nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1" -Force'
     Pop $0
     DetailPrint "[PRE-KILL] kill-honeypot.ps1 exit code: $0"
-    Sleep 200
 FunctionEnd
 
 ; ===================================================================
-; KILL HONEYPOT PROCESSES WITH VERIFICATION
+; KILL HONEYPOT PROCESSES WITH VERIFICATION (fast: 1 full kill + short poll)
 ; ===================================================================
 Function KillHoneypotProcesses
     Push $0
     Push $1
     Push $2
 
-    DetailPrint "[KILL] Verified shutdown sequence..."
+    DetailPrint "[KILL] Fast shutdown sequence..."
+
+    ; Skip full script if nothing to kill (e.g. already stopped in .onInit)
+    nsExec::ExecToStack 'cmd /c (tasklist /FI "IMAGENAME eq honeypot-client.exe" 2>nul | find /I "honeypot-client.exe" >nul) && (echo RUNNING) || (echo STOPPED)'
+    Pop $0
+    Pop $1
+    StrCmp $1 "STOPPED" KillDone
+
     Call PreInstallKillFast
 
-    ; Wait up to ~15s for honeypot-client.exe to disappear (DACL + file locks)
+    ; Quick verify: max 3 short polls, cheap taskkill retry (no full script loop)
     StrCpy $2 "0"
     KillWaitLoop:
-        nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-Process -Name honeypot-client -ErrorAction SilentlyContinue) { Write-Output RUNNING } else { Write-Output STOPPED }"'
+        nsExec::ExecToStack 'cmd /c (tasklist /FI "IMAGENAME eq honeypot-client.exe" 2>nul | find /I "honeypot-client.exe" >nul) && (echo RUNNING) || (echo STOPPED)'
         Pop $0
         Pop $1
         StrCmp $1 "STOPPED" KillDone
         IntOp $2 $2 + 1
-        IntCmp $2 15 KillForce KillWaitMore KillForce
+        IntCmp $2 3 KillForce KillWaitMore KillForce
         KillWaitMore:
-            DetailPrint "[KILL] Still running — wait pass $2..."
-            Sleep 1000
-            Call PreInstallKillFast
+            DetailPrint "[KILL] Still running - quick retry $2..."
+            nsExec::Exec 'taskkill /F /T /IM honeypot-client.exe >nul 2>&1'
+            Pop $0
+            Sleep 150
             Goto KillWaitLoop
 
     KillForce:
-        DetailPrint "[KILL] Final SeDebug kill pass..."
+        DetailPrint "[KILL] Final kill pass..."
         Call PreInstallKillFast
-        Sleep 1500
+        Sleep 150
 
     KillDone:
     DetailPrint "[KILL] Process shutdown complete."
     nsExec::Exec 'cmd /c del "%TEMP%\honeypot_watchdog_token.txt" 2>nul'
-    ; Brief settle so Program Files EXE lock is released before File overwrite
-    Sleep 2000
+    Sleep 300
 
     Pop $2
     Pop $1

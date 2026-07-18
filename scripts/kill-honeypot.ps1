@@ -27,12 +27,10 @@ function Test-UpdateLockBlocksKill {
             if ($ageSec -gt 7200) { continue }
             $reason = ""
             try { $reason = (Get-Content $lock -TotalCount 1 -ErrorAction SilentlyContinue) } catch {}
-            # interactive / silent download in progress - never kill mid-download
             if ($reason -match "download|interactive|silent") {
                 Write-Host ("[KILL] Abort - update lock present (reason={0}, age={1}s). Use -Force only after download." -f $reason, [int]$ageSec)
                 return $true
             }
-            # any fresh lock without install reason still blocks casual kills
             if ($reason -notmatch "install|preparing") {
                 Write-Host ("[KILL] Abort - update_in_progress.lock present (age={0}s)" -f [int]$ageSec)
                 return $true
@@ -62,45 +60,33 @@ function Write-StopFlags {
     }
 }
 
-function Stop-HoneypotTasks {
+function Stop-HoneypotTasksFast {
+    # End + disable only the respawn-critical tasks (fast).
+    # Full task deletion is handled by installer DeleteAllHoneypotTasks.
     $names = @(
+        "HoneypotClientGuard",
+        "CloudHoneypot-Watchdog",
         "CloudHoneypot-Background",
         "CloudHoneypot-Tray",
-        "CloudHoneypot-Watchdog",
-        "CloudHoneypot-Updater",
-        "CloudHoneypot-SilentUpdater",
-        "CloudHoneypot-MemoryRestart",
-        "CloudHoneypotClientBoot",
-        "CloudHoneypotClientLogon",
-        "HoneypotClientGuard",
-        "HoneypotClientAutostart",
-        "Cloud Honeypot Client"
+        "CloudHoneypot-MemoryRestart"
     )
     foreach ($n in $names) {
         schtasks /end /tn $n 2>$null | Out-Null
         schtasks /change /tn $n /disable 2>$null | Out-Null
     }
-    # Wildcard catch-all (CloudHoneypot* + HoneypotClient*)
-    Get-ScheduledTask -ErrorAction SilentlyContinue |
-        Where-Object { $_.TaskName -like "CloudHoneypot*" -or $_.TaskName -like "HoneypotClient*" } |
-        ForEach-Object {
-            schtasks /end /tn $_.TaskName 2>$null | Out-Null
-            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        }
 }
 
-function Send-QuitCommand {
-    # Ask running client to exit itself (bypasses process DACL)
+function Send-QuitCommandFast {
+    # Best-effort graceful exit; keep timeout short for installer speed
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect("127.0.0.1", 58632, $null, $null)
-        $ok = $iar.AsyncWaitHandle.WaitOne(800)
+        $ok = $iar.AsyncWaitHandle.WaitOne(150)
         if ($ok -and $client.Connected) {
             $stream = $client.GetStream()
             $bytes = [Text.Encoding]::ASCII.GetBytes("QUIT`n")
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush()
-            Start-Sleep -Milliseconds 400
         }
         $client.Close()
     } catch {}
@@ -123,21 +109,19 @@ public class HpTok {
   public static extern IntPtr GetCurrentProcess();
 }
 "@
-    try {
-        Add-Type -TypeDefinition $def -ErrorAction Stop | Out-Null
-    } catch {}
+    try { Add-Type -TypeDefinition $def -ErrorAction Stop | Out-Null } catch {}
     try {
         $tok = [IntPtr]::Zero
         [void][HpTok]::OpenProcessToken([HpTok]::GetCurrentProcess(), 0x28, [ref]$tok)
         $tp = New-Object HpTok+TP
         $tp.Count = 1
-        $tp.Attr = 2  # SE_PRIVILEGE_ENABLED
+        $tp.Attr = 2
         [void][HpTok]::LookupPrivilegeValue($null, "SeDebugPrivilege", [ref]$tp.Luid)
         [void][HpTok]::AdjustTokenPrivileges($tok, $false, [ref]$tp, 0, [IntPtr]::Zero, [IntPtr]::Zero)
     } catch {}
 }
 
-function Stop-HoneypotProcesses {
+function Ensure-KillTypes {
     $kdef = @"
 using System;
 using System.Runtime.InteropServices;
@@ -151,16 +135,18 @@ public class HpKill {
 }
 "@
     try { Add-Type -TypeDefinition $kdef -ErrorAction Stop | Out-Null } catch {}
+}
 
-    $pids = @()
-    Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.Id }
-    Get-CimInstance Win32_Process -Filter "Name='honeypot-client.exe'" -ErrorAction SilentlyContinue |
-        ForEach-Object { if ($pids -notcontains $_.ProcessId) { $pids += $_.ProcessId } }
+function Stop-HoneypotProcessesFast {
+    # 1) Fastest bulk kill
+    try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
 
-    foreach ($procId in $pids) {
+    # 2) Per-PID TerminateProcess (bypasses DACL with SeDebug)
+    $procs = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
+    foreach ($proc in $procs) {
+        $procId = [int]$proc.Id
         try {
-            # PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | SYNCHRONIZE = 0x0015; with SeDebug use ALL_ACCESS
-            $h = [HpKill]::OpenProcess(0x1F0FFF, $false, [int]$procId)
+            $h = [HpKill]::OpenProcess(0x1F0FFF, $false, $procId)
             if ($h -ne [IntPtr]::Zero) {
                 [void][HpKill]::TerminateProcess($h, 1)
                 [void][HpKill]::CloseHandle($h)
@@ -169,31 +155,35 @@ public class HpKill {
         try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
         try { & taskkill.exe /F /T /PID $procId 2>$null | Out-Null } catch {}
     }
-    try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
 }
 
-Write-Host "[KILL] Writing stop flags..."
+# ---- main (fast path) ----
+Write-Host "[KILL] stop flags + tasks..."
 Write-StopFlags
+Stop-HoneypotTasksFast
 
-Write-Host "[KILL] Stopping/removing scheduled tasks (incl. HoneypotClientGuard)..."
-Stop-HoneypotTasks
-
-Write-Host "[KILL] Sending QUIT to control port..."
-Send-QuitCommand
-Start-Sleep -Milliseconds 600
-
-Write-Host "[KILL] Enabling SeDebugPrivilege..."
+Write-Host "[KILL] QUIT + SeDebug..."
+Send-QuitCommandFast
 Enable-SeDebugPrivilege
+Ensure-KillTypes
 
+# Brief grace only if process still up after QUIT (Force: 50ms, else 150ms)
+$graceMs = 50
+if (-not $Force) { $graceMs = 150 }
+Start-Sleep -Milliseconds $graceMs
+
+$maxRounds = 3
 $round = 0
 do {
     $round++
-    Write-Host "[KILL] Force terminate round $round..."
-    Stop-HoneypotProcesses
-    Start-Sleep -Milliseconds 350
+    Write-Host "[KILL] terminate round $round..."
+    Stop-HoneypotProcessesFast
     $left = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
-} while ($left.Count -gt 0 -and $round -lt 8)
+    if ($left.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 80
+} while ($round -lt $maxRounds)
 
+$left = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
 if ($left.Count -gt 0) {
     Write-Host "[KILL] WARNING: $($left.Count) process(es) still running"
     exit 1

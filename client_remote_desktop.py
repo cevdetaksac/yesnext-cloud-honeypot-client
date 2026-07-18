@@ -406,6 +406,12 @@ class RemoteDesktopStreamer:
         self._touch_activity()
 
         try:
+            # Self-check log (AGENT_REMOTE_KEYBOARD_PROMPT)
+            log(
+                f"[remote-input] t=input event={event or '?'} "
+                f"key={params.get('key', '')!r} text={(params.get('text') or '')[:40]!r} "
+                f"session={self._target_session_id}"
+            )
             ok = False
             if event in ("click", "dblclick"):
                 ok = self._do_click(
@@ -447,7 +453,10 @@ class RemoteDesktopStreamer:
             elif event == "type_text":
                 ok = self._do_type_text(str(params.get("text", "") or ""))
             elif event == "key":
-                ok = self._do_key(str(params.get("key", "") or ""))
+                ok = self._do_key(
+                    str(params.get("key", "") or ""),
+                    code=str(params.get("code", "") or ""),
+                )
             else:
                 return {"success": False, "error": f"unknown event: {event}"}
 
@@ -1467,15 +1476,34 @@ class RemoteDesktopStreamer:
         return True
 
     def _do_type_text(self, text: str) -> bool:
+        """Inject Unicode string via SendInput KEYEVENTF_UNICODE (layout-independent)."""
         if not text:
             return True
+        ok = True
+        for ch in text[:500]:
+            if not self._send_unicode_char(ch):
+                ok = False
+            time.sleep(0.003)
+        return ok
+
+    @staticmethod
+    def _send_input_structs(inputs) -> int:
+        """SendInput with correctly sized INPUT union (64-bit safe)."""
         import ctypes
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
-        INPUT_KEYBOARD = 1
-        KEYEVENTF_UNICODE = 0x0004
-        KEYEVENTF_KEYUP = 0x0002
+        ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
 
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [
@@ -1483,73 +1511,141 @@ class RemoteDesktopStreamer:
                 ("wScan", wintypes.WORD),
                 ("dwFlags", wintypes.DWORD),
                 ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+                ("dwExtraInfo", ULONG_PTR),
             ]
 
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", wintypes.DWORD),
+                ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD),
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
         class INPUT(ctypes.Structure):
-            class _I(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-            _anonymous_ = ("i",)
-            _fields_ = [("type", wintypes.DWORD), ("i", _I)]
+            _fields_ = [("type", wintypes.DWORD), ("u", INPUT_UNION)]
 
-        extra = ctypes.pointer(ctypes.c_ulong(0))
-        for ch in text[:500]:
-            for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
-                inp = INPUT(type=INPUT_KEYBOARD)
-                inp.ki = KEYBDINPUT(0, ord(ch), flags, 0, extra)
-                user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            time.sleep(0.003)
-        return True
+        n = len(inputs)
+        arr = (INPUT * n)()
+        for i, (vk, scan, flags) in enumerate(inputs):
+            arr[i].type = 1  # INPUT_KEYBOARD
+            arr[i].u.ki = KEYBDINPUT(vk, scan, flags, 0, 0)
+        sent = int(user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(INPUT)))
+        return sent
 
-    def _do_key(self, key: str) -> bool:
-        import ctypes
-        user32 = ctypes.windll.user32
-        key = (key or "").strip().lower()
+    def _send_unicode_char(self, ch: str) -> bool:
+        """KEYEVENTF_UNICODE down+up for one character (ğ, @, €, …)."""
+        if not ch:
+            return True
+        KEYEVENTF_UNICODE = 0x0004
+        KEYEVENTF_KEYUP = 0x0002
+        code = ord(ch)
+        # Surrogate pairs not needed for BMP; for >U+FFFF skip gracefully
+        if code > 0xFFFF:
+            log(f"[remote-input] skip non-BMP char U+{code:X}")
+            return False
+        sent = self._send_input_structs([
+            (0, code, KEYEVENTF_UNICODE),
+            (0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+        ])
+        return sent == 2
 
-        VK = {
-            "enter": 0x0D, "esc": 0x1B, "escape": 0x1B, "tab": 0x09,
-            "backspace": 0x08, "delete": 0x2E,
-            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-            "home": 0x24, "end": 0x23, "f5": 0x74, "win": 0x5B,
-            "space": 0x20, "pageup": 0x21, "pagedown": 0x22,
-        }
-        MOD = {
-            "ctrl": 0x11, "control": 0x11, "alt": 0x12,
-            "shift": 0x10, "win": 0x5B,
-        }
+    def _send_vk(self, vk: int, down: bool) -> bool:
+        KEYEVENTF_KEYUP = 0x0002
+        flags = 0 if down else KEYEVENTF_KEYUP
+        sent = self._send_input_structs([(int(vk) & 0xFF, 0, flags)])
+        return sent == 1
 
-        if key in ("ctrl+alt+del", "ctrl-alt-del", "cad"):
-            log("[REMOTE-DESKTOP] ctrl+alt+del blocked by OS — skipped")
+    def _do_key(self, key: str, code: str = "") -> bool:
+        """Apply dashboard key event.
+
+        - Single printable char → Unicode SendInput (never QWERTY scancode map)
+        - Named keys / ctrl+c → virtual-key SendInput
+        """
+        raw = (key or "").strip()
+        if not raw and not code:
             return False
 
-        parts = [p for p in key.replace("-", "+").split("+") if p]
+        VK_NAMED = {
+            "enter": 0x0D, "return": 0x0D,
+            "esc": 0x1B, "escape": 0x1B,
+            "tab": 0x09,
+            "backspace": 0x08,
+            "delete": 0x2E, "del": 0x2E,
+            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "home": 0x24, "end": 0x23,
+            "f5": 0x74, "win": 0x5B, "meta": 0x5B,
+            "space": 0x20,
+            "pageup": 0x21, "pagedown": 0x22,
+            "insert": 0x2D,
+        }
+        MOD = {
+            "ctrl": 0x11, "control": 0x11,
+            "alt": 0x12,
+            "shift": 0x10,
+            "win": 0x5B, "meta": 0x5B,
+        }
+
+        key_l = raw.lower()
+        if key_l in ("ctrl+alt+del", "ctrl-alt-del", "ctrl+alt+delete", "cad"):
+            # Real SAS requires remote_send_sas / SendSAS — not synthetic key events
+            log("[remote-input] ctrl+alt+del ignored — use remote_send_sas / SendSAS")
+            return False
+
+        # Single character (including Turkish / AltGr results like @ € ğ) → Unicode
+        # Do NOT lowercase before inject — preserve İ vs i etc.
+        if len(raw) == 1 and key_l not in VK_NAMED and key_l not in MOD:
+            return self._send_unicode_char(raw)
+
+        # Space as literal
+        if raw == " " or key_l == "space":
+            return self._tap_vk(0x20)
+
+        parts = [p for p in key_l.replace("-", "+").split("+") if p]
         if not parts:
             return False
 
         mods = []
         main = None
         for p in parts:
-            if p in ("ctrl", "control", "alt", "shift", "win"):
+            if p in MOD:
                 mods.append(MOD[p])
-            elif p in VK:
-                main = VK[p]
-            elif len(p) == 1:
+            elif p in VK_NAMED:
+                main = VK_NAMED[p]
+            elif len(p) == 1 and p.isascii() and p.isalnum():
+                # ASCII letter/digit shortcut chord (ctrl+c) — VK equals uppercase ord
                 main = ord(p.upper())
+            elif len(p) == 1:
+                # Unusual: modifier + unicode char → type unicode after mods
+                main = ("unicode", p)
 
         if main is None and len(parts) == 1 and parts[0] in MOD:
             main = MOD[parts[0]]
             mods = []
 
         if main is None:
+            # Optional physical code fallback (KeyQ) — still prefer failing honestly
+            log(f"[remote-input] unmapped key={raw!r} code={code!r}")
             return False
 
         for m in mods:
-            user32.keybd_event(m, 0, 0, 0)
-        user32.keybd_event(main, 0, 0, 0)
-        user32.keybd_event(main, 0, 2, 0)
-        for m in reversed(mods):
-            user32.keybd_event(m, 0, 2, 0)
-        return True
+            self._send_vk(m, down=True)
+        try:
+            if isinstance(main, tuple) and main[0] == "unicode":
+                ok = self._send_unicode_char(main[1])
+            else:
+                ok = self._tap_vk(int(main))
+        finally:
+            for m in reversed(mods):
+                self._send_vk(m, down=False)
+        return ok
+
+    def _tap_vk(self, vk: int) -> bool:
+        ok1 = self._send_vk(vk, down=True)
+        ok2 = self._send_vk(vk, down=False)
+        return ok1 and ok2
 
     # ── Screen / DPI ──────────────────────────────────────────────
 

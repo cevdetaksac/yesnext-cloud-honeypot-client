@@ -808,10 +808,24 @@ class ModernGUI:
         )
         self._header_status.pack(side="right", padx=16)
 
-    def update_header_status(self, active: bool):
-        """Koruma durumu badge'ini güncelle"""
+    def update_header_status(self, active=None):
+        """Koruma durumu badge'ini güncelle.
+
+        active: bool (eski API) veya 'full'|'monitoring'|'inactive' mode str.
+        """
         try:
-            if active:
+            mode = active
+            if isinstance(active, bool) or active is None:
+                if hasattr(self.app, "get_protection_mode"):
+                    mode = self.app.get_protection_mode()
+                else:
+                    mode = "full" if active else "inactive"
+            if mode == "monitoring":
+                self._header_status.configure(
+                    text="● " + self.t("protection_monitoring"),
+                    text_color=COLORS["blue"],
+                )
+            elif mode == "full":
                 self._header_status.configure(
                     text="● " + self.t("protection_active"),
                     text_color=COLORS["green"],
@@ -2877,12 +2891,33 @@ class ModernGUI:
         sm = self.app.service_manager
         running = sm.running_services
         total = len(self.app.PORT_TABLOSU)
+        monitoring = False
+        try:
+            monitoring = bool(self.app.is_threat_monitoring_active())
+        except Exception:
+            monitoring = False
 
         ctk.CTkLabel(
             content,
             text=f"{self.t('dash_active_services')}: {len(running)}/{total}",
             font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=COLORS["green"],
+            text_color=COLORS["green"] if running else COLORS["text_dim"],
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+
+        # Honeypot bait ≠ port monitoring — kurallar bait kapalıyken de çalışır
+        mon_color = COLORS["green"] if monitoring else COLORS["text_dim"]
+        mon_text = (
+            self.t("detail_port_monitoring_on")
+            if monitoring
+            else self.t("detail_port_monitoring_off")
+        )
+        ctk.CTkLabel(
+            content,
+            text=mon_text,
+            font=ctk.CTkFont(size=12),
+            text_color=mon_color,
+            wraplength=420,
+            justify="left",
         ).pack(anchor="w", padx=4, pady=(0, 8))
 
         headers = [self.t("ip_col_service"), "Port", self.t("detail_status")]
@@ -4055,8 +4090,12 @@ class ModernGUI:
                 except Exception:
                     pass
 
-            # Header badge senkronizasyonu
-            self.update_header_status(active_count > 0)
+            # Header badge senkronizasyonu (bait yokken de EventLog izleme aktif olabilir)
+            try:
+                mode = self.app.get_protection_mode()
+            except Exception:
+                mode = "full" if active_count > 0 else "inactive"
+            self.update_header_status(mode)
 
         except Exception:
             pass
@@ -4073,9 +4112,17 @@ class ModernGUI:
                     return
                 self._pulse_visible = not self._pulse_visible
                 if hasattr(self, '_pulse_dot'):
-                    any_active = len(getattr(self.app, 'service_manager', None) and
-                                     self.app.service_manager.running_services or []) > 0
-                    pulse_color = COLORS["green"] if any_active else COLORS["text_dim"]
+                    try:
+                        mode = self.app.get_protection_mode()
+                    except Exception:
+                        mode = "inactive"
+                    any_active = mode != "inactive"
+                    if mode == "monitoring":
+                        pulse_color = COLORS["blue"]
+                    elif any_active:
+                        pulse_color = COLORS["green"]
+                    else:
+                        pulse_color = COLORS["text_dim"]
                     self._pulse_dot.configure(
                         text_color=pulse_color if self._pulse_visible else COLORS["card"]
                     )
@@ -4214,9 +4261,11 @@ class ModernGUI:
             is_active = str(service).upper() in running_names
             self._build_service_card(sec, str(port), str(service), is_active)
 
-        # İlk açılışta header durumunu doğru set et
-        any_active = len(running_names) > 0
-        self.update_header_status(any_active)
+        # İlk açılışta header durumunu doğru set et (threat izleme bait'ten bağımsız)
+        try:
+            self.update_header_status(self.app.get_protection_mode())
+        except Exception:
+            self.update_header_status("full" if running_names else "inactive")
 
         # Hızlı blink timer başlat (800ms)
         self._start_pulse_blink()
@@ -4422,9 +4471,13 @@ class ModernGUI:
             else:
                 self._set_card_inactive(btn, card, sl, sd)
 
-            # Header badge
-            any_active = len(self.app.service_manager.running_services) > 0
-            self.update_header_status(any_active)
+            # Header badge (threat monitoring may stay active without bait)
+            try:
+                self.update_header_status(self.app.get_protection_mode())
+            except Exception:
+                self.update_header_status(
+                    len(self.app.service_manager.running_services) > 0
+                )
 
         self._gui_safe(apply)
 

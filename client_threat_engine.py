@@ -350,17 +350,34 @@ class ThreatEngine:
 
     # ── Public API ────────────────────────────────────────────────
 
+    @property
+    def is_running(self) -> bool:
+        """True while housekeeping / scoring pipeline is active."""
+        return bool(self._running)
+
+    def get_active_block_rules(self) -> List[dict]:
+        """Snapshot of currently applied block rules (API or local defaults)."""
+        with self._block_rules_lock:
+            return list(self._block_rules)
+
     def update_block_rules(self, rules: List[dict]):
         """Update API-defined block rules.
 
         Each rule: {name, services, threshold_count, window_minutes,
                     actions, enabled, email_cooldown_min, match_usernames}
+
+        Empty / all-disabled payload → fall back to DEFAULT_BLOCK_RULES so
+        real-port monitoring still blocks when honeypots are stopped.
         """
         with self._block_rules_lock:
-            enabled = [r for r in rules if r.get("enabled", True)]
+            enabled = [r for r in rules if r.get("enabled", True)] if rules else []
+            using_defaults = not enabled
             self._block_rules = enabled if enabled else list(DEFAULT_BLOCK_RULES)
         rule_names = [r.get("name", "?") for r in self._block_rules]
-        log(f"[THREAT] 📋 Block rules updated: {rule_names}")
+        if using_defaults:
+            log(f"[THREAT] 📋 No dashboard rules — using local defaults: {rule_names}")
+        else:
+            log(f"[THREAT] 📋 Block rules updated: {rule_names}")
 
     def update_whitelist(self, ips: Set[str]):
         """Update whitelisted IPs from dashboard/API."""

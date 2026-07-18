@@ -1,78 +1,117 @@
 # ===============================================================================
-# 🔄 Honeypot Memory Restart Script
-# Task Scheduler tarafından 8 saatte bir çalıştırılır
-# Registry'den son mode'u okur, process'i kill eder, aynı mode'da restart eder
+# Honeypot Memory Restart Script
+# Task Scheduler every 8h: kill client, restart in correct mode, log lifecycle.
 # ===============================================================================
 
 param(
-    [string]$InstallPath = "C:\Program Files\YesNext\CloudHoneypotClient"
+    [string]$InstallPath = ""
 )
 
-# Logging
-function Write-Log {
-    param($Message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logPath = "$env:TEMP\honeypot_memory_restart.log"
-    "[$timestamp] $Message" | Tee-Object -FilePath $logPath -Append
+$ErrorActionPreference = "Continue"
+$ProgramDataDir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
+$LifecycleLog = Join-Path $ProgramDataDir "lifecycle.log"
+$LifecycleQueue = Join-Path $ProgramDataDir "lifecycle_queue.jsonl"
+$LegacyLog = Join-Path $env:TEMP "honeypot_memory_restart.log"
+
+function Ensure-Dir([string]$Path) {
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
 }
 
-Write-Log "🔄 Starting memory restart process..."
+function Write-Lifecycle {
+    param(
+        [string]$EventType,
+        [string]$Reason,
+        [string]$Severity = "info",
+        [hashtable]$Details = @{}
+    )
+    Ensure-Dir $ProgramDataDir
+    $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $hostName = $env:COMPUTERNAME
+    $detailJson = "{}"
+    try { $detailJson = ($Details | ConvertTo-Json -Compress -Depth 5) } catch {}
+    $line = "$ts [$($Severity.ToUpper())] $EventType`: $Reason | $detailJson"
+    try { Add-Content -Path $LifecycleLog -Value $line -Encoding UTF8 } catch {}
+    try { Add-Content -Path $LegacyLog -Value $line -Encoding UTF8 } catch {}
+    $evt = @{
+        ts = $ts
+        event_type = $EventType
+        reason = $Reason
+        severity = $Severity
+        hostname = $hostName
+        version = ""
+        pid = $PID
+        details = $Details
+    }
+    try {
+        ($evt | ConvertTo-Json -Compress -Depth 6) | Add-Content -Path $LifecycleQueue -Encoding UTF8
+    } catch {}
+}
 
-# 1. Registry'den son mode'u oku
+function Resolve-InstallPath {
+    param([string]$Hint)
+    $candidates = @()
+    if ($Hint) { $candidates += $Hint }
+    $candidates += @(
+        "C:\Program Files\YesNext\Cloud Honeypot Client",
+        "C:\Program Files (x86)\YesNext\Cloud Honeypot Client",
+        "C:\Program Files\YesNext\CloudHoneypotClient",
+        (Split-Path -Parent $PSScriptRoot),
+        $PSScriptRoot,
+        (Get-Location).Path
+    )
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        $exe = Join-Path $c "honeypot-client.exe"
+        if (Test-Path $exe) { return $c }
+    }
+    return $null
+}
+
 function Get-LastModeFromRegistry {
     try {
         $regPath = "HKCU:\Software\YesNext\CloudHoneypot"
         if (Test-Path $regPath) {
             $lastMode = Get-ItemProperty -Path $regPath -Name "LastMode" -ErrorAction SilentlyContinue
             if ($lastMode -and $lastMode.LastMode) {
-                Write-Log "📋 Registry'den mode: $($lastMode.LastMode)"
-                return $lastMode.LastMode
+                return [string]$lastMode.LastMode
             }
         }
-        Write-Log "⚠️ Registry'de LastMode bulunamadı"
-        return $null
-    }
-    catch {
-        Write-Log "❌ Registry error: $($_.Exception.Message)"
-        return $null
-    }
+    } catch {}
+    return $null
 }
 
-# 2. Smart mode detection
 function Get-SmartMode {
     try {
-        # User session kontrolü
         $sessions = quser 2>$null
         if ($sessions) {
-            Write-Log "👤 User session aktif"
-            # Explorer process var mı?
             $explorer = Get-Process -Name "explorer" -ErrorAction SilentlyContinue
-            if ($explorer) {
-                Write-Log "🖥️ Desktop -> GUI mode"
-                return "--mode=gui"
-            } else {
-                Write-Log "📱 No desktop -> Tray mode"
-                return "--mode=tray"
-            }
-        } else {
-            Write-Log "🤖 No user session -> Daemon mode"
-            return "--mode=daemon"
+            if ($explorer) { return "--mode=gui" }
+            return "--mode=tray"
         }
-    }
-    catch {
-        Write-Log "❌ Smart detection error: $($_.Exception.Message)"
-        return "--mode=daemon"
-    }
+    } catch {}
+    return "--mode=daemon"
 }
 
-# 3. Mode belirleme
-$targetMode = Get-LastModeFromRegistry
-if (-not $targetMode) {
-    $targetMode = Get-SmartMode
-}
-Write-Log "✅ Target mode: $targetMode"
+Write-Lifecycle -EventType "memory_restart_begin" -Reason "scheduled_8h_cleanup" -Severity "info"
 
-# Skip kill/restart while interactive or silent installer download is running
+$resolved = Resolve-InstallPath -Hint $InstallPath
+if (-not $resolved) {
+    Write-Lifecycle -EventType "memory_restart_failed" -Reason "exe_not_found" -Severity "error" -Details @{
+        install_path_hint = $InstallPath
+        script = $PSCommandPath
+    }
+    exit 1
+}
+
+$exePath = Join-Path $resolved "honeypot-client.exe"
+Write-Lifecycle -EventType "memory_restart_path" -Reason "resolved" -Severity "info" -Details @{
+    install_path = $resolved
+    exe = $exePath
+}
+
+# Skip while update lock present
 $updateLocks = @(
     (Join-Path $env:ProgramData "YesNext\CloudHoneypotClient\update_in_progress.lock"),
     (Join-Path $env:APPDATA "YesNext\CloudHoneypotClient\update_in_progress.lock")
@@ -81,49 +120,114 @@ foreach ($ul in $updateLocks) {
     if (Test-Path $ul) {
         $age = ((Get-Date) - (Get-Item $ul).LastWriteTime).TotalSeconds
         if ($age -lt 7200) {
-            Write-Log "⏸️ Skipped memory restart — update_in_progress.lock present (age=${age}s)"
+            Write-Lifecycle -EventType "memory_restart_skipped" -Reason "update_in_progress" -Severity "warning" -Details @{
+                lock = $ul
+                age_sec = [int]$age
+            }
             exit 0
         }
     }
 }
 
-# 4. Process kill
-Write-Log "🛑 Killing honeypot processes..."
+$targetMode = Get-LastModeFromRegistry
+if (-not $targetMode) { $targetMode = Get-SmartMode }
+# SYSTEM session 0: never force interactive GUI
 try {
-    Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 2
-    Write-Log "✅ Processes killed"
-}
-catch {
-    Write-Log "⚠️ Kill error: $($_.Exception.Message)"
+    $sessionName = $env:SESSIONNAME
+    if (-not $sessionName -or $sessionName -eq "Services") {
+        if ($targetMode -match "gui|tray|show-gui") {
+            $targetMode = "--mode=daemon"
+        }
+    }
+} catch {}
+
+Write-Lifecycle -EventType "memory_restart_kill" -Reason "stopping_session0_only" -Severity "info" -Details @{
+    target_mode = $targetMode
 }
 
-# 5. Restart
-Write-Log "🚀 Starting new instance: $targetMode"
+# Multi-user safe: NEVER kill interactive session GUIs (SessionId > 0).
+# Only recycle Session 0 (SYSTEM/daemon) for memory cleanup.
 try {
-    # Executable path
-    $exePath = ""
-    if (Test-Path "$InstallPath\honeypot-client.exe") {
-        $exePath = "$InstallPath\honeypot-client.exe"
-    } elseif (Test-Path ".\honeypot-client.exe") {
-        $exePath = ".\honeypot-client.exe"
-    } else {
-        Write-Log "❌ honeypot-client.exe not found!"
-        exit 1
+    $all = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
+    $interactive = @($all | Where-Object { $_.SessionId -gt 0 })
+    $session0 = @($all | Where-Object { $_.SessionId -eq 0 })
+
+    if ($interactive.Count -gt 0 -and $session0.Count -eq 0) {
+        Write-Lifecycle -EventType "memory_restart_skipped" -Reason "interactive_gui_only" -Severity "info" -Details @{
+            interactive_pids = @($interactive | ForEach-Object { $_.Id })
+        }
+        exit 0
     }
-    
-    # Start process
-    $arguments = "$targetMode --silent"
-    Write-Log "📂 Exe: $exePath"
-    Write-Log "⚙️ Args: $arguments"
-    
-    Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden
-    Write-Log "✅ New instance started!"
+
+    if ($session0.Count -gt 0) {
+        $session0 | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        Write-Lifecycle -EventType "memory_restart_kill" -Reason "session0_killed" -Severity "info" -Details @{
+            killed = @($session0 | ForEach-Object { $_.Id })
+            preserved_interactive = @($interactive | ForEach-Object { $_.Id })
+        }
+    } else {
+        Write-Lifecycle -EventType "memory_restart_kill" -Reason "no_session0_process" -Severity "info"
+    }
+} catch {
+    Write-Lifecycle -EventType "memory_restart_kill_error" -Reason $_.Exception.Message -Severity "warning"
 }
-catch {
-    Write-Log "❌ Restart error: $($_.Exception.Message)"
+
+# Always restart/ensure daemon in Session 0; do not replace interactive GUI mode
+$arguments = "--mode=daemon --silent"
+try {
+    # If interactive GUI already running, only ensure daemon if missing
+    $stillInteractive = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 })
+    $still0 = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq 0 })
+    if ($stillInteractive.Count -gt 0 -and $still0.Count -gt 0) {
+        Write-Lifecycle -EventType "memory_restart_ok" -Reason "interactive_preserved_daemon_alive" -Severity "info" -Details @{
+            interactive_pids = @($stillInteractive | ForEach-Object { $_.Id })
+            daemon_pids = @($still0 | ForEach-Object { $_.Id })
+        }
+        exit 0
+    }
+    if ($stillInteractive.Count -gt 0 -and $still0.Count -eq 0) {
+        # Start daemon alongside existing GUI (watchdog/Background will also help)
+        Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden
+        Start-Sleep -Seconds 3
+        Write-Lifecycle -EventType "memory_restart_ok" -Reason "daemon_started_beside_gui" -Severity "info"
+        exit 0
+    }
+
+    Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden
+    Start-Sleep -Seconds 4
+    $alive = Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue
+    if ($alive) {
+        Write-Lifecycle -EventType "memory_restart_ok" -Reason "process_restarted" -Severity "info" -Details @{
+            target_mode = "--mode=daemon"
+            new_pids = @($alive | ForEach-Object { $_.Id })
+        }
+        exit 0
+    }
+
+    # Fallback: trigger Background scheduled task
+    Write-Lifecycle -EventType "memory_restart_fallback" -Reason "process_not_alive_after_start" -Severity "warning" -Details @{
+        target_mode = "--mode=daemon"
+    }
+    schtasks /run /tn "CloudHoneypot-Background" 2>$null | Out-Null
+    Start-Sleep -Seconds 5
+    $alive2 = Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue
+    if ($alive2) {
+        Write-Lifecycle -EventType "memory_restart_ok" -Reason "restarted_via_background_task" -Severity "info" -Details @{
+            new_pids = @($alive2 | ForEach-Object { $_.Id })
+        }
+        exit 0
+    }
+
+    Write-Lifecycle -EventType "memory_restart_failed" -Reason "restart_did_not_stick" -Severity "error" -Details @{
+        exe = $exePath
+        args = $arguments
+    }
+    exit 1
+} catch {
+    Write-Lifecycle -EventType "memory_restart_failed" -Reason $_.Exception.Message -Severity "error" -Details @{
+        exe = $exePath
+        args = $arguments
+    }
     exit 1
 }
-
-Write-Log "🎉 Memory restart completed successfully!"
-exit 0

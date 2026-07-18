@@ -155,6 +155,11 @@ class EventLogWatcher:
 
     # ── Public API ────────────────────────────────────────────────
 
+    @property
+    def is_running(self) -> bool:
+        """True while EventLog subscriptions are active (port monitoring)."""
+        return bool(self._running)
+
     def start(self):
         """Subscribe to all configured event channels."""
         if not EVTLOG_AVAILABLE:

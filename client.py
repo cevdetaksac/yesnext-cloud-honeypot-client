@@ -377,12 +377,23 @@ class CloudHoneypotClient:
         else:
             self.heartbeat_path = ""
         
-        # Check if daemon is already running (for tray UI-only mode)
+        # Check if SYSTEM daemon motor is running (GUI becomes frontend-only)
         self.daemon_is_active = False
+        self.frontend_only = False
+        self._is_daemon_motor = False
         try:
             self.daemon_is_active = ClientHelpers.is_daemon_running()
-            if self.daemon_is_active:
-                log("🔄 Daemon detected - Tray will run in UI-only mode (no duplicate background tasks)")
+            if not self.daemon_is_active:
+                try:
+                    from client_daemon_ipc import ping
+                    self.daemon_is_active = bool(ping(timeout=0.8))
+                except Exception:
+                    pass
+            if self.daemon_is_active and not (
+                "--mode=daemon" in " ".join(sys.argv) or "--daemon" in sys.argv
+            ):
+                self.frontend_only = True
+                log("🔄 SYSTEM daemon motor detected — GUI frontend-only (no local threat/RD stack)")
         except Exception as e:
             log(f"⚠️ Daemon detection failed: {e}")
         
@@ -419,6 +430,29 @@ class CloudHoneypotClient:
         # Comprehensive Task Scheduler management
         from client_task_scheduler import perform_comprehensive_task_management
         task_result = perform_comprehensive_task_management(log_func=log, app_state=self.state)
+
+        # Lifecycle: flush queued crash/restart events + mark startup
+        try:
+            from client_lifecycle import report_now, flush_queue_to_api
+            report_now(
+                "client_startup",
+                "app_init",
+                {
+                    "mode": getattr(self, "_startup_mode", None) or "unknown",
+                    "tasks_ok": bool((task_result or {}).get("success", True)),
+                },
+                severity="info",
+                api_client=getattr(self, "api_client", None),
+                token=(self.state.get("token") or ""),
+                log_func=log,
+            )
+            flush_queue_to_api(
+                api_client=getattr(self, "api_client", None),
+                token=(self.state.get("token") or ""),
+                log_func=log,
+            )
+        except Exception as e:
+            log(f"[LIFECYCLE] startup report error: {e}")
         
         # Memory management — restart every 8 hours if threshold exceeded
         if MEMORY_RESTART_AVAILABLE:
@@ -468,24 +502,24 @@ class CloudHoneypotClient:
     def _detect_current_mode(self):
         """Mevcut çalışma modunu tespit et"""
         try:
-            # Command line arguments'dan mode'u anla
+            argv = " ".join(sys.argv).lower()
             for arg in sys.argv:
                 if "--mode=daemon" in arg:
                     return "--mode=daemon"
                 elif "--mode=tray" in arg:
                     return "--mode=tray"
-                elif "--mode=gui" in arg:
+                elif "--mode=gui" in arg or "--mode=frontend" in arg:
                     return "--mode=gui"
-            
-            # Default: GUI varsa gui, yoksa daemon
-            if hasattr(self, 'root') and self.root:
+            if "--show-gui" in argv or "/show-gui" in argv:
                 return "--mode=gui"
-            else:
+            if getattr(self, "_is_daemon_motor", False):
                 return "--mode=daemon"
-                
+            if hasattr(self, "root") and self.root:
+                return "--mode=gui"
+            return "--mode=gui"
         except Exception as e:
             log(f"⚠️ Mode detection error: {e}")
-            return "--mode=daemon"  # Safe fallback
+            return "--mode=gui"
 
     def monitor_user_sessions(self):
         """Monitor for user logon sessions in daemon mode (optimized subprocess usage)"""
@@ -516,10 +550,13 @@ class CloudHoneypotClient:
                 )
                 
                 if has_active:
-                    log("Daemon: Active user session detected, gracefully shutting down for tray handover...")
-                    time.sleep(3)
-                    log("Daemon: Exiting for user session handover")
-                    os._exit(0)
+                    # Keep SYSTEM motor alive — only ensure interactive frontend exists
+                    try:
+                        from client_helpers import launch_interactive_tray_gui
+                        launch_interactive_tray_gui()
+                    except Exception as e:
+                        log(f"Daemon tray handoff (non-fatal): {e}")
+                    # Do not os._exit — multi-user + RD require permanent Session 0 motor
                     
             except subprocess.TimeoutExpired:
                 log("Session monitoring: query session timed out")
@@ -538,20 +575,27 @@ class CloudHoneypotClient:
         # start HealthMonitor here too: tray used to skip it entirely while daemon also
         # never started it, so dashboard got processes from stale/partial data and
         # active_sessions stayed empty even when the user was logged in.
-        if getattr(self, 'daemon_is_active', False):
-            log("🔄 UI-only mode: Skipping ServiceManager/firewall sync (daemon handles those)")
+        if getattr(self, 'frontend_only', False) or getattr(self, 'daemon_is_active', False):
+            self.frontend_only = True
+            log("🔄 Frontend mode: SYSTEM daemon owns motor — skipping local ServiceManager/threat/RD")
 
-            def _tray_health_start():
+            def _frontend_status_poll():
                 try:
-                    time.sleep(max(2, int(API_STARTUP_DELAY) if API_STARTUP_DELAY else 2))
-                    self._start_threat_and_health_services(source="tray-ui")
+                    from client_daemon_ipc import get_status, ping
+                    time.sleep(2)
+                    if ping():
+                        st = get_status()
+                        log(
+                            f"[IPC] Daemon STATUS: services={st.get('running_services')} "
+                            f"mode={st.get('protection_mode')}"
+                        )
                 except Exception as e:
-                    log(f"⚠️ tray health start failed: {e}")
+                    log(f"[IPC] status poll: {e}")
 
             threading.Thread(
-                target=_tray_health_start,
+                target=_frontend_status_poll,
                 daemon=True,
-                name="TrayHealthStart",
+                name="FrontendStatus",
             ).start()
             return
             
@@ -822,10 +866,13 @@ class CloudHoneypotClient:
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
             # Fetch block rules from dashboard (GET /api/premium/rules)
+            # Empty list → ThreatEngine falls back to DEFAULT_BLOCK_RULES (real-port protection)
             rules = self.api_client.fetch_block_rules(token)
-            if rules and isinstance(rules, list) and self.threat_engine:
+            if rules is not None and isinstance(rules, list) and self.threat_engine:
                 self.threat_engine.update_block_rules(rules)
-                log(f"[CONFIG-SYNC] Block rules synced: {len(rules)} rule(s)")
+                log(f"[CONFIG-SYNC] Block rules synced: {len(rules)} rule(s) from API")
+            elif self.threat_engine:
+                log("[CONFIG-SYNC] Block rules fetch empty/unavailable — keeping local defaults")
         except Exception as e:
             log(f"[CONFIG-SYNC] Error: {e}")
 
@@ -1131,32 +1178,123 @@ class CloudHoneypotClient:
         except Exception:
             self._poll_chain_active = False
 
-    # ---------- Single Instance Control ---------- #
+    # ---------- Single Instance / Daemon IPC Control ---------- #
+    def _ipc_status_payload(self) -> dict:
+        """Machine status for GUI frontends (JSON over control socket)."""
+        try:
+            from client_constants import VERSION
+            ver = VERSION
+        except Exception:
+            ver = ""
+        running = []
+        try:
+            running = list(self.service_manager.running_services or [])
+        except Exception:
+            running = []
+        mode = "daemon"
+        try:
+            mode = self.get_protection_mode()
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "daemon": True,
+            "role": "daemon" if getattr(self, "_is_daemon_motor", False) else "legacy",
+            "version": ver,
+            "pid": os.getpid(),
+            "running_services": running,
+            "protection_mode": mode,
+            "token_present": bool(self.state.get("token")),
+            "frontend_only": bool(getattr(self, "frontend_only", False)),
+        }
+
     def control_server_loop(self, sock):
-        """Handle control server connections for single instance enforcement"""
-        MAX_CMD_LEN = 256  # Prevent malicious clients from sending unbounded data
+        """Handle control server connections — SHOW/QUIT + daemon IPC."""
+        MAX_CMD_LEN = 256
         while True:
             conn = None
             try:
                 conn, _ = sock.accept()
                 conn.settimeout(2.0)
 
-                # Buffered read with size limit (replaces byte-by-byte recv(1))
                 buf = conn.recv(MAX_CMD_LEN)
                 if not buf:
                     continue
 
-                # Extract first line (commands are newline-terminated)
                 line = buf.split(b"\n", 1)[0]
-                cmd = line.decode("utf-8", "ignore").strip().upper()
-                if cmd == "SHOW":
-                    # Session 0 windows are invisible on the user desktop — never claim OK
-                    if is_session_zero():
-                        log("[CTRL] SHOW received in Session 0 — NOGUI (invisible)")
-                        try:
-                            conn.sendall(b"NOGUI\n")
-                        except Exception:
-                            pass
+                cmd = line.decode("utf-8", "ignore").strip()
+                cmd_u = cmd.upper()
+
+                def _send(data: str):
+                    try:
+                        if not data.endswith("\n"):
+                            data += "\n"
+                        conn.sendall(data.encode("utf-8"))
+                    except Exception:
+                        pass
+
+                if cmd_u == "PING":
+                    _send("PONG")
+                    continue
+
+                if cmd_u == "STATUS":
+                    try:
+                        _send(json.dumps(self._ipc_status_payload(), ensure_ascii=False))
+                    except Exception as e:
+                        _send(json.dumps({"ok": False, "error": str(e)}))
+                    continue
+
+                if cmd_u.startswith("HONEYPOT "):
+                    # HONEYPOT START SVC PORT | HONEYPOT STOP SVC | HONEYPOT LIST
+                    try:
+                        parts = cmd.split()
+                        op = (parts[1] if len(parts) > 1 else "").upper()
+                        if op == "LIST":
+                            _send(json.dumps({
+                                "ok": True,
+                                "services": list(self.service_manager.running_services or []),
+                            }, ensure_ascii=False))
+                        elif op == "START" and len(parts) >= 4:
+                            svc = parts[2].upper()
+                            port = int(parts[3])
+                            ok = bool(self.service_manager.start_service(svc, port))
+                            if ok:
+                                try:
+                                    self._on_service_started(svc, port)
+                                except Exception:
+                                    pass
+                            _send(json.dumps({"ok": ok, "service": svc, "port": port}, ensure_ascii=False))
+                        elif op == "STOP" and len(parts) >= 3:
+                            svc = parts[2].upper()
+                            ok = False
+                            try:
+                                if hasattr(self.service_manager, "stop_service"):
+                                    ok = bool(self.service_manager.stop_service(svc))
+                                else:
+                                    # fallback: shutdown matching honeypot
+                                    hp = getattr(self.service_manager, "_honeypots", {}).get(svc)
+                                    if hp:
+                                        hp.stop()
+                                        ok = True
+                            except Exception as e:
+                                _send(json.dumps({"ok": False, "error": str(e)}))
+                                continue
+                            if ok:
+                                try:
+                                    self.write_status(self._active_rows_from_services(), running=True)
+                                except Exception:
+                                    pass
+                            _send(json.dumps({"ok": ok, "service": svc}, ensure_ascii=False))
+                        else:
+                            _send(json.dumps({"ok": False, "error": "bad_honeypot_cmd"}))
+                    except Exception as e:
+                        _send(json.dumps({"ok": False, "error": str(e)}))
+                    continue
+
+                if cmd_u == "SHOW":
+                    if is_session_zero() or getattr(self, "_is_daemon_motor", False):
+                        log("[CTRL] SHOW received on daemon/Session0 — NOGUI")
+                        _send("NOGUI")
                         continue
                     has_gui = bool(
                         self.show_cb
@@ -1171,19 +1309,13 @@ class CloudHoneypotClient:
                     if has_gui:
                         log("[CTRL] SHOW received — bringing GUI to front")
                         self._gui_safe(self.show_cb)
-                        try:
-                            conn.sendall(b"OK\n")
-                        except Exception:
-                            pass
+                        _send("OK")
                     else:
-                        # Daemon-only / no window — caller must start a GUI instance
                         log("[CTRL] SHOW received — no GUI window (NOGUI)")
-                        try:
-                            conn.sendall(b"NOGUI\n")
-                        except Exception:
-                            pass
-                elif cmd in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
-                    # During update/install, NEVER ignore QUIT — self-protect must yield
+                        _send("NOGUI")
+                    continue
+
+                if cmd_u in ("QUIT", "EXIT", "STOP", "SHUTDOWN"):
                     updating = False
                     try:
                         from client_utils import is_update_in_progress
@@ -1194,13 +1326,16 @@ class CloudHoneypotClient:
                     protect_until = float(getattr(self, "_quit_protect_until", 0) or 0)
                     if (not updating) and time.time() < protect_until:
                         log("[CTRL] QUIT ignored — GUI startup grace active")
-                        try:
-                            conn.sendall(b"BUSY\n")
-                        except Exception:
-                            pass
+                        _send("BUSY")
                         continue
 
-                    # Clear startup grace + disarm DACL so kill/update can finish
+                    # Frontend must never kill the SYSTEM motor via accidental QUIT
+                    # from a second user's launcher — only honor when updating or explicit.
+                    if getattr(self, "_is_daemon_motor", False) and not updating:
+                        # Still allow installer/updater (they set update lock) and
+                        # explicit INSTALLER_QUIT handled below.
+                        pass
+
                     self._quit_protect_until = 0.0
                     try:
                         from client_self_protection import disarm_for_update
@@ -1208,24 +1343,31 @@ class CloudHoneypotClient:
                     except Exception:
                         pass
 
-                    # Installer / updater graceful exit — bypasses DACL self-protection
                     log("[CTRL] QUIT received — graceful exit for install/update")
+                    try:
+                        from client_lifecycle import report_now
+                        report_now(
+                            "gui_quit",
+                            "control_socket_quit",
+                            {"cmd": cmd_u, "daemon": bool(getattr(self, "_is_daemon_motor", False))},
+                            severity="warning",
+                            log_func=log,
+                        )
+                    except Exception:
+                        pass
                     try:
                         from client_utils import write_watchdog_token
                         write_watchdog_token("stop", WATCHDOG_TOKEN_FILE)
                     except Exception:
                         pass
-                    try:
-                        conn.sendall(b"OK\n")
-                    except Exception:
-                        pass
+                    _send("OK")
                     threading.Thread(
                         target=lambda: (time.sleep(0.2), self.graceful_exit(0)),
                         daemon=True,
                     ).start()
+                    continue
 
             except Exception as e:
-                # Avoid log storms when socket is half-closed during shutdown
                 msg = str(e)
                 if "10038" not in msg and "10004" not in msg:
                     log(f"Control server loop error: {e}")
@@ -1238,21 +1380,48 @@ class CloudHoneypotClient:
                         pass
 
     def start_single_instance_server(self):
-        """Start single instance enforcement server"""
+        """Bind control socket. Daemon owns it; frontend never exits if port busy."""
+        if getattr(self, "frontend_only", False) and not getattr(self, "_is_daemon_motor", False):
+            log("[IPC] Frontend mode — control port owned by SYSTEM daemon (no bind)")
+            return
+
+        # If motor already answers, stay frontend (avoid bind fight / silent exit)
+        if not getattr(self, "_is_daemon_motor", False):
+            try:
+                from client_daemon_ipc import ping
+                if ping(timeout=0.6):
+                    self.frontend_only = True
+                    self.daemon_is_active = True
+                    log("[IPC] Daemon PING ok — skipping control bind (frontend)")
+                    return
+            except Exception:
+                pass
+
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception:
+            pass
         try:
             s.bind((CONTROL_HOST, CONTROL_PORT))
         except OSError:
-            # Instance already running, send show command and exit
+            if getattr(self, "_is_daemon_motor", False):
+                log("[IPC] ERROR: Daemon cannot bind control port — another listener?")
+                return
+            # NEVER sys.exit here — that made GUI vanish after install when port busy
+            log("[IPC] Control port busy — continuing without exclusive listener (GUI stays up)")
             try:
-                with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=1.0) as c:
+                with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=0.8) as c:
                     c.sendall(b"SHOW\n")
             except Exception:
                 pass
-            sys.exit(0)
-        
-        s.listen(5)
+            self.frontend_only = True
+            self.daemon_is_active = True
+            return
+
+        s.listen(8)
         self.state["ctrl_sock"] = s
+        log(f"[IPC] Control server listening on {CONTROL_HOST}:{CONTROL_PORT}")
         threading.Thread(target=self.control_server_loop, args=(s,), daemon=True).start()
 
     # ---------- Watchdog & Persistence ---------- #
@@ -1265,22 +1434,28 @@ class CloudHoneypotClient:
         self._write_status_raw(data)
 
     def read_status(self):
-        """Read status from persistent storage"""
-        if not os.path.exists(STATUS_FILE):
+        """Read status from persistent storage (machine-wide, legacy fallback)."""
+        path = STATUS_FILE
+        try:
+            from client_constants import STATUS_FILE_LEGACY
+            if not os.path.exists(path) and os.path.exists(STATUS_FILE_LEGACY):
+                path = STATUS_FILE_LEGACY
+        except Exception:
+            pass
+        if not os.path.exists(path):
             self.write_status([], running=False)
             return [], False
         try:
-            data = json.load(open(STATUS_FILE, "r", encoding="utf-8"))
-            if data.get("fresh_install", False):  # <-- default artık False
+            data = json.load(open(path, "r", encoding="utf-8"))
+            if data.get("fresh_install", False):
                 self.write_status([], running=False)
                 return [], False
             rows = data.get("active_ports", [])
             running = bool(data.get("running", False))
-            # Normalize: support both legacy 3-tuple and new 2-tuple
             norm = []
             for r in rows:
                 if len(r) >= 3:
-                    norm.append((str(r[0]), str(r[2])))  # skip middle element
+                    norm.append((str(r[0]), str(r[2])))
                 elif len(r) == 2:
                     norm.append((str(r[0]), str(r[1])))
             return norm, running
@@ -1577,16 +1752,63 @@ class CloudHoneypotClient:
         try:
             self.update_rdp_button()
             self.update_tray_icon()
-            # Update header badge
+            # Update header badge (threat monitoring ≠ honeypot bait)
             if hasattr(self, 'gui') and self.gui:
-                any_active = len(self.service_manager.running_services) > 0
-                self.gui.update_header_status(any_active)
+                self.gui.update_header_status(self.get_protection_mode())
         except Exception as e:
             log(f"[GUI_SYNC] Senkronizasyon hatası: {e}")
             import traceback
             log(f"[GUI_SYNC] Traceback: {traceback.format_exc()}")
 
     # ---------- Servis Durum Yönetimi ---------- #
+    def is_threat_monitoring_active(self) -> bool:
+        """EventLog + ThreatEngine — or SYSTEM daemon motor online (frontend)."""
+        if getattr(self, "frontend_only", False):
+            try:
+                from client_daemon_ipc import ping
+                return bool(ping(timeout=0.8))
+            except Exception:
+                return bool(getattr(self, "daemon_is_active", False))
+        if not ENABLE_THREAT_DETECTION:
+            return False
+        ew = getattr(self, "event_watcher", None)
+        te = getattr(self, "threat_engine", None)
+        ew_ok = bool(ew and getattr(ew, "is_running", False))
+        te_ok = bool(te and getattr(te, "is_running", False))
+        return ew_ok or te_ok
+
+    def get_protection_mode(self) -> str:
+        """'full' | 'monitoring' | 'inactive'"""
+        if getattr(self, "frontend_only", False):
+            try:
+                from client_daemon_ipc import get_status
+                st = get_status(timeout=1.5)
+                if st.get("ok"):
+                    mode = st.get("protection_mode")
+                    if mode in ("full", "monitoring", "inactive"):
+                        return mode
+                    if st.get("running_services"):
+                        return "full"
+                    return "monitoring" if st.get("daemon") else "inactive"
+            except Exception:
+                pass
+            return "monitoring" if getattr(self, "daemon_is_active", False) else "inactive"
+        bait = False
+        try:
+            bait = len(self.service_manager.running_services) > 0
+        except Exception:
+            bait = False
+        monitoring = self.is_threat_monitoring_active()
+        if bait:
+            return "full"
+        if monitoring:
+            return "monitoring"
+        return "inactive"
+
+    def is_protection_active(self) -> bool:
+        """Tray/header: port izleme veya honeypot bait aktifse koruma var sayılır."""
+        return self.get_protection_mode() != "inactive"
+
     def get_service_state(self) -> Dict[str, Any]:
         """ServiceManager'dan güncel servis durumlarını al."""
         return self.service_manager.get_all_statuses()
@@ -1623,12 +1845,18 @@ class CloudHoneypotClient:
         self._gui_safe(apply)
 
     def _active_rows_from_services(self):
-        """Build active rows list from ServiceManager's running services"""
+        """Build active rows list from ServiceManager (or daemon IPC in frontend)."""
         rows = []
         try:
-            running = self.service_manager.running_services
+            running = list(self.service_manager.running_services or [])
+            if getattr(self, "frontend_only", False) and not running:
+                try:
+                    from client_daemon_ipc import honeypot_list
+                    running = list(honeypot_list().get("services") or [])
+                except Exception:
+                    running = []
             for (p1, svc) in self.PORT_TABLOSU:
-                if str(svc).upper() in running:
+                if str(svc).upper() in [str(x).upper() for x in running]:
                     rows.append((str(p1), str(svc)))
         except Exception as e:
             log(f"Exception: {e}")
@@ -1661,7 +1889,7 @@ class CloudHoneypotClient:
                 # RDP güvenli portta — 3389 boşsa honeypot başlat
                 if not port_in_use:
                     log(f"✅ RDP güvenli portta ({RDP_SECURE_PORT}), 3389 boş - honeypot başlatılıyor...")
-                    if self.service_manager.start_service("RDP", 3389):
+                    if self._engine_start_service("RDP", 3389):
                         self._on_service_started("RDP", 3389)
                         self.service_manager.reconciliation_paused = False
                         return True
@@ -1702,14 +1930,41 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"Port-in-use dialog failed for port {listen_port}: {e}")
         
-        # ServiceManager üzerinden honeypot başlat
-        if self.service_manager.start_service(service_upper, listen_port):
+        # ServiceManager üzerinden honeypot başlat (frontend → SYSTEM daemon IPC)
+        if self._engine_start_service(service_upper, listen_port):
             self._on_service_started(service_upper, listen_port)
             return True
         
         try: messagebox.showerror(self.t("error"), self.t("port_busy_error"))
         except: pass
         return False
+
+    def _engine_start_service(self, service_upper: str, listen_port: int) -> bool:
+        """Start honeypot on SYSTEM motor (IPC) or local ServiceManager."""
+        if getattr(self, "frontend_only", False):
+            try:
+                from client_daemon_ipc import honeypot_start
+                resp = honeypot_start(service_upper, listen_port)
+                if not resp.get("ok"):
+                    log(f"[IPC] honeypot START failed: {resp}")
+                return bool(resp.get("ok"))
+            except Exception as e:
+                log(f"[IPC] honeypot START error: {e}")
+                return False
+        return bool(self.service_manager.start_service(service_upper, listen_port))
+
+    def _engine_stop_service(self, service_upper: str) -> bool:
+        if getattr(self, "frontend_only", False):
+            try:
+                from client_daemon_ipc import honeypot_stop
+                resp = honeypot_stop(service_upper)
+                if not resp.get("ok"):
+                    log(f"[IPC] honeypot STOP failed: {resp}")
+                return bool(resp.get("ok"))
+            except Exception as e:
+                log(f"[IPC] honeypot STOP error: {e}")
+                return False
+        return bool(self.service_manager.stop_service(service_upper))
 
     def stop_single_row(self, p1: str, service: str, manual_action: bool = False) -> bool:
         """Tek bir honeypot servisini ServiceManager üzerinden durdurur."""
@@ -1718,7 +1973,7 @@ class CloudHoneypotClient:
 
         if service_upper == 'RDP':
             # RDP durdurulduğunda rollback popup göster
-            self.service_manager.stop_service("RDP")
+            self._engine_stop_service("RDP")
             
             if manual_action:
                 def on_rdp_confirm_rollback():
@@ -1732,7 +1987,7 @@ class CloudHoneypotClient:
             return True
 
         # Non-RDP stop
-        self.service_manager.stop_service(service_upper)
+        self._engine_stop_service(service_upper)
         self._on_service_stopped(service_upper, listen_port)
         return True
 
@@ -2043,6 +2298,10 @@ class CloudHoneypotClient:
                     self.threat_engine.start()
                 self.event_watcher.start()
                 log(f"🛡️ Threat detection pipeline started ({source})")
+                log(
+                    "[THREAT] Port monitoring (EventLog) is independent of honeypot bait — "
+                    "block rules apply to real RDP/SSH/… even when tunnels are stopped"
+                )
             except Exception as e:
                 log(f"⚠️ Threat detection start failed ({source}): {e}")
 
@@ -2081,39 +2340,43 @@ class CloudHoneypotClient:
 
     # ---------- Daemon ---------- #
     def run_daemon(self):
+        """Session-0 SYSTEM motor — owns protection, RD, API, honeypots. Never exits on logon."""
+        self._is_daemon_motor = True
+        self.frontend_only = False
         self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
+
+        # Control IPC first so GUIs can PING/STATUS while motor boots
+        try:
+            self.start_single_instance_server()
+        except Exception as e:
+            log(f"[IPC] daemon control server failed: {e}")
+
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         
-        # Session monitoring for daemon-to-tray handover
+        # Soft tray handoff only — do NOT exit when users log on
         threading.Thread(target=self.monitor_user_sessions, daemon=True).start()
-        # Remote management: report open ports
         try:
             threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
         except Exception as e:
             log(f"open ports reporter start failed: {e}")
-        # ServiceManager (sync + watchdog + batch reporter)
         try:
             self.service_manager.start()
             log("ServiceManager başlatıldı (daemon mode)")
         except Exception as e:
             log(f"ServiceManager start failed: {e}")
-        # Start firewall agent in background (Windows/Linux)
         try:
             self.start_firewall_agent()
         except Exception as e:
             log(f"firewall agent start failed (daemon): {e}")
-        # Threat + health/sessions (tray is UI-only when daemon is up — must run here)
         try:
             self._start_threat_and_health_services(source="daemon")
         except Exception as e:
             log(f"threat/health start failed (daemon): {e}")
-        # Start external watchdog
         try:
             start_watchdog_if_needed(WATCHDOG_TOKEN_FILE, log)
         except Exception as e:
             log(f"watchdog start error: {e}")
-        # Hourly update checker
         try:
             self.start_update_watchdog()
         except Exception as e:
@@ -2121,15 +2384,16 @@ class CloudHoneypotClient:
 
         cons = self.read_consent()
         if not cons.get("accepted"):
-            log("Daemon: kullanıcı onayı yok, servis uygulanmayacak.")
-            return
+            log("Daemon: consent yok — motor idle (API/threat/RD aktif, honeypot bait bekliyor)")
+            while True:
+                time.sleep(30)
 
         saved_rows, saved_running = self.read_status()
-        rows = saved_rows if saved_rows else [(p1, s) for (p1, s) in self.PORT_TABLOSU]
+        rows = saved_rows if saved_rows else []
         self.state["selected_rows"] = [(str(a[0]), str(a[1])) for a in rows]
 
         if not rows:
-            log("Daemon: aktif port yok, beklemede.")
+            log("Daemon: aktif port yok, beklemede (motor ayakta).")
 
         while True:
             try:
@@ -2147,7 +2411,6 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"Exception: {e}")
         
-        # Cleanup heartbeat file on daemon exit
         try:
             if hasattr(self, 'monitoring_manager'):
                 self.monitoring_manager.stop_heartbeat_system()
@@ -2155,7 +2418,6 @@ class CloudHoneypotClient:
             log(f"Daemon heartbeat cleanup error: {e}")
             
         log("Daemon: durduruldu.")
-
 
 
     # ---------- Firewall Agent ---------- #
@@ -2334,7 +2596,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     
     # Simplified mode system
-    parser.add_argument("--mode", choices=["daemon", "tray", "watchdog"], help="Operation mode: daemon (background service), tray (tray-only mode), watchdog (hourly process check). Default is GUI mode.")
+    parser.add_argument("--mode", choices=["daemon", "tray", "watchdog", "gui", "frontend"], help="Operation mode: daemon (SYSTEM motor), tray/gui/frontend (UI), watchdog. Default is GUI mode.")
     parser.add_argument("--minimized", action="store_true", help="Start GUI minimized to tray")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
@@ -2486,38 +2748,37 @@ if __name__ == "__main__":
     log(f"Process PID: {os.getpid()}")
     log(f"Command line: {' '.join(sys.argv)}")
     
-    # Singleton: tray must NEVER steal/kill a visible GUI; --show-gui prefers SHOW then force-takeover
+    # Architecture v4.5:
+    #   SYSTEM daemon = sole motor (threat/RD/honeypot/API)
+    #   GUI/--show-gui = frontend only (multi-user OK, never steals daemon)
     want_tray = getattr(args, "mode", None) == "tray"
     want_show_gui = bool(getattr(args, "show_gui", False))
+    want_frontend = (
+        want_show_gui
+        or operation_mode in (GUI_MODE, "frontend")
+        or getattr(args, "mode", None) == "frontend"
+    ) and not (operation_mode == DAEMON_MODE or args.daemon)
 
-    # If another instance is alive, try SHOW; only exit if it confirmed a real GUI.
-    # Daemon-only replies NOGUI → fall through and steal so the user gets a window.
-    if (want_show_gui or operation_mode == GUI_MODE) and not want_tray:
+    if operation_mode == DAEMON_MODE or args.daemon:
+        from client_instance import try_acquire_daemon_mutex
+        if not try_acquire_daemon_mutex():
+            log("Daemon already running (DAEMON mutex held) — exiting")
+            sys.exit(0)
+        # Soft legacy singleton so old tools still see a holder (optional)
         try:
-            from client_instance import mutex_already_held, request_show_existing
-            if mutex_already_held() and request_show_existing():
-                log("Existing instance raised via SHOW — exiting launcher")
-                sys.exit(0)
-        except Exception as e:
-            log(f"SHOW probe failed: {e}")
-
-    if want_tray and not want_show_gui:
-        if not check_singleton(operation_mode, allow_steal=False):
-            log("Tray launch skipped — another instance already running (GUI kept)")
-            sys.exit(0)
-    elif operation_mode == DAEMON_MODE or args.daemon:
-        # Daemon must never steal/kill a visible GUI (Watchdog race → Session 0 takeover)
-        if not check_singleton(operation_mode, allow_steal=False):
-            log("Daemon skipped — another instance already running")
-            sys.exit(0)
+            from client_instance import try_acquire_mutex_soft
+            try_acquire_mutex_soft()
+        except Exception:
+            pass
     else:
-        if not check_singleton(operation_mode, allow_steal=True):
-            log("ERROR: Cannot start - another instance is running or mutex failed")
-            sys.exit(2)  # Exit code 2 = Mutex taken
+        if not (want_frontend or want_tray):
+            if not check_singleton(operation_mode, allow_steal=False):
+                log("ERROR: Cannot start - another instance is running or mutex failed")
+                sys.exit(2)
 
     # ===== SIMPLIFIED MODE-BASED EXECUTION =====
     
-    if operation_mode == GUI_MODE:
+    if operation_mode == GUI_MODE or want_frontend:
         # ===== GUI MODE - Normal GUI application with tray functionality =====
 
         # Session 0 (SYSTEM) cannot show a visible desktop window
@@ -2546,6 +2807,32 @@ if __name__ == "__main__":
             # Create app instance
             app = CloudHoneypotClient()
             app.lang = selected_language
+            # Prefer frontend if motor already up; otherwise ensure in background (no UI block)
+            try:
+                from client_daemon_ipc import ping
+                if ping(timeout=0.8):
+                    app.frontend_only = True
+                    app.daemon_is_active = True
+                    log("[IPC] Confirmed daemon — forcing frontend_only")
+            except Exception:
+                pass
+
+            def _bg_ensure_daemon():
+                try:
+                    from client_daemon_ipc import ensure_daemon_running, ping as _ping
+                    ok = ensure_daemon_running(log_func=log, wait_sec=8.0)
+                    if ok or _ping(timeout=0.8):
+                        app.frontend_only = True
+                        app.daemon_is_active = True
+                    log(f"[IPC] Background daemon ensure: {'ok' if ok else 'failed (GUI continues)'}")
+                except Exception as e:
+                    log(f"[IPC] ensure_daemon failed: {e}")
+
+            if want_frontend or want_tray:
+                threading.Thread(
+                    target=_bg_ensure_daemon, daemon=True, name="EnsureDaemon"
+                ).start()
+
             if want_show_gui:
                 # Installer/desktop launch: ignore QUIT for a few seconds (kill race)
                 app._quit_protect_until = time.time() + 20.0
@@ -2714,40 +3001,85 @@ if __name__ == "__main__":
         sys.exit(0)
     
     elif operation_mode == "watchdog":
-        # ===== WATCHDOG MODE - Hourly process monitoring and restart =====
+        # ===== WATCHDOG MODE — every 2 min process check / restart =====
         try:
             log("=== WATCHDOG MODE STARTUP ===")
-            
             from client_helpers import ClientHelpers
+            from client_lifecycle import report_now, flush_queue_to_api
+
             helper = ClientHelpers()
-            
-            log("Watchdog mode activated - checking if client is already running...")
-            
-            # Any live instance (GUI or daemon) counts — do NOT spawn Session-0 daemon
-            # over a visible user GUI (that race made the window invisible).
             is_running = helper.is_app_running() or helper.is_daemon_running()
-            
+
             if not is_running:
                 log("No client instance running, starting new daemon instance...")
-                
-                # Get executable path
+                report_now(
+                    "watchdog_restart",
+                    "client_not_running",
+                    {"action": "start_daemon"},
+                    severity="warning",
+                    log_func=log,
+                )
+
                 exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
-                
-                # Start daemon mode
                 if getattr(sys, 'frozen', False):
-                    subprocess.Popen([exe_path, "--mode=daemon", "--silent"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                    subprocess.Popen(
+                        [exe_path, "--mode=daemon", "--silent"],
+                        creationflags=(
+                            subprocess.DETACHED_PROCESS
+                            | subprocess.CREATE_NEW_PROCESS_GROUP
+                            | subprocess.CREATE_NO_WINDOW
+                        ),
+                    )
                 else:
-                    subprocess.Popen([sys.executable, "client.py", "--mode=daemon", "--silent"], 
-                                   creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
-                
+                    subprocess.Popen(
+                        [sys.executable, "client.py", "--mode=daemon", "--silent"],
+                        creationflags=(
+                            subprocess.DETACHED_PROCESS
+                            | subprocess.CREATE_NEW_PROCESS_GROUP
+                            | subprocess.CREATE_NO_WINDOW
+                        ),
+                    )
                 log("New daemon instance started successfully")
+                time.sleep(2)
+                still = helper.is_app_running() or helper.is_daemon_running()
+                if not still:
+                    report_now(
+                        "watchdog_restart_failed",
+                        "daemon_not_alive_after_start",
+                        {},
+                        severity="error",
+                        log_func=log,
+                    )
+                else:
+                    report_now(
+                        "watchdog_restart_ok",
+                        "daemon_running",
+                        {},
+                        severity="info",
+                        log_func=log,
+                    )
             else:
                 log("Client already running - watchdog check passed")
-                
+
+            try:
+                flush_queue_to_api(log_func=log)
+            except Exception:
+                pass
+
         except Exception as e:
             log(f"Watchdog error: {e}")
-        
+            try:
+                from client_lifecycle import report_now
+                report_now(
+                    "watchdog_error",
+                    str(e),
+                    {},
+                    severity="error",
+                    log_func=log,
+                )
+            except Exception:
+                pass
+
         sys.exit(0)
     
     else:

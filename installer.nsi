@@ -11,8 +11,8 @@ OutFile "cloud-client-installer.exe"
 !define COMPANYNAME "YesNext"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
-!define VERSIONMINOR 4
-!define VERSIONBUILD 48
+!define VERSIONMINOR 5
+!define VERSIONBUILD 1
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -37,7 +37,7 @@ RequestExecutionLevel admin
 
 ; Finish page - "Run after install" checkbox (checked by default)
 !define MUI_FINISHPAGE_TITLE "Setup Complete"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} has been installed successfully.$\r$\n$\r$\nDesktop shortcut has been created.$\r$\nSystem is ready for security monitoring.$\r$\n$\r$\nCheck the box below to launch the application now."
+!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} has been installed successfully.$\r$\n$\r$\nSystem is ready for security monitoring.$\r$\n$\r$\nUse the checkbox below to launch the application now."
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Launch Cloud Honeypot Client now"
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchAsCurrentUser
@@ -380,6 +380,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     CreateDirectory "$INSTDIR\scripts"
     File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
     File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
+    File /oname=scripts\memory_restart.ps1 "memory_restart.ps1"
     !insertmacro LOG "[FILES] Application files installed."
 
     ; =================================================================
@@ -409,9 +410,8 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoRepair" 1
 
-    ; Shortcuts
-    !insertmacro LOG "[CONFIG] Creating shortcuts..."
-    CreateShortCut "$DESKTOP\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "--show-gui"
+    ; Start Menu shortcuts (always)
+    !insertmacro LOG "[CONFIG] Creating Start Menu shortcuts..."
     CreateDirectory "$SMPROGRAMS\${COMPANYNAME}"
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "--show-gui"
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
@@ -446,6 +446,13 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     !insertmacro LOG "[FINISH] Installation complete."
 SectionEnd
 
+; Optional Components-page checkbox (UNCHECKED by default — user must opt in).
+; Start Menu shortcut is always created in SEC_MAIN.
+Section /o "Desktop Shortcut" SEC_DESKTOP
+    !insertmacro LOG "[CONFIG] Creating desktop shortcut..."
+    CreateShortCut "$DESKTOP\Cloud Honeypot Client.lnk" "$INSTDIR\honeypot-client.exe" "--show-gui"
+SectionEnd
+
 ; ===================================================================
 ; UNINSTALLER SECTION
 ; ===================================================================
@@ -478,6 +485,7 @@ Section "Uninstall"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\scripts\kill-honeypot.ps1"
     Delete "$INSTDIR\scripts\update-and-install.ps1"
+    Delete "$INSTDIR\scripts\memory_restart.ps1"
     RMDir "$INSTDIR\scripts"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
@@ -496,4 +504,5 @@ SectionEnd
 ; Section descriptions
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
 !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "Core Cloud Honeypot Client application and configuration files. This component is required."
+!insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Optional: create a desktop shortcut. Off by default — check to enable."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END

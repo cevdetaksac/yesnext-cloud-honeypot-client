@@ -113,34 +113,44 @@ class TrayManager:
         
 
     def is_protection_active(self) -> bool:
-        """Check if any honeypot service is currently active via ServiceManager.
+        """Port izleme (EventLog) veya honeypot bait aktifse True.
 
-        Empty running set is normal on workstations when no tunnels are enabled —
-        do not log a warning (icon already shows inactive).
+        Honeypot kapalı workstation'larda da threat kuralları açıksa
+        koruma aktif sayılır — bait yok diye 'pasif' gösterme.
         """
         try:
-            if hasattr(self.app_instance, 'service_manager'):
-                running = self.app_instance.service_manager.running_services
-                return len(running) > 0
+            if hasattr(self.app_instance, "is_protection_active"):
+                return bool(self.app_instance.is_protection_active())
+            if hasattr(self.app_instance, "service_manager"):
+                return len(self.app_instance.service_manager.running_services) > 0
         except Exception as e:
             log(f"[TRAY] Protection status check error: {e}")
-        
         return False
 
     def update_tray_icon(self):
         """Update tray icon to reflect current protection status"""
         is_active = self.is_protection_active()
-        
+        mode = "inactive"
+        try:
+            if hasattr(self.app_instance, "get_protection_mode"):
+                mode = self.app_instance.get_protection_mode()
+        except Exception:
+            mode = "full" if is_active else "inactive"
+
         # Update tray icon
         if TRY_TRAY and self.tray_icon:
             try:
                 new_icon = tray_make_image(is_active)
                 self.tray_icon.icon = new_icon
-                
-                # Update title with status
-                status = self.t("protection_active") if is_active else self.t("protection_inactive")
+
+                if mode == "monitoring":
+                    status = self.t("protection_monitoring")
+                elif mode == "full":
+                    status = self.t("protection_active")
+                else:
+                    status = self.t("protection_inactive")
                 self.tray_icon.title = f"{self.t('app_title')} - {status}"
-                
+
             except Exception as e:
                 log(f"Tray icon update error: {e}")
                 

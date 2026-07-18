@@ -24,15 +24,35 @@ import win32api
 import winerror
 import psutil
 
-from client_constants import SINGLETON_MUTEX_NAME, CONTROL_HOST, CONTROL_PORT
+from client_constants import SINGLETON_MUTEX_NAME, DAEMON_MUTEX_NAME, CONTROL_HOST, CONTROL_PORT
 from client_helpers import log
 
 # Keep mutex handle alive for process lifetime
 _MUTEX_HANDLE = None
+_DAEMON_MUTEX_HANDLE = None
+
+
+def try_acquire_daemon_mutex() -> bool:
+    """Acquire daemon-only mutex. False if another SYSTEM motor is already up."""
+    global _DAEMON_MUTEX_HANDLE
+    try:
+        mutex = win32event.CreateMutex(None, False, DAEMON_MUTEX_NAME)
+        last_error = win32api.GetLastError()
+        if last_error == winerror.ERROR_ALREADY_EXISTS:
+            try:
+                win32api.CloseHandle(mutex)
+            except Exception:
+                pass
+            return False
+        _DAEMON_MUTEX_HANDLE = mutex
+        return True
+    except Exception as e:
+        log(f"ERROR: Daemon mutex acquire failed: {e}")
+        return False
 
 
 def try_acquire_mutex_soft() -> bool:
-    """Acquire singleton mutex without killing others. False if already taken."""
+    """Acquire legacy singleton mutex without killing others. False if already taken."""
     global _MUTEX_HANDLE
     try:
         mutex = win32event.CreateMutex(None, False, SINGLETON_MUTEX_NAME)
@@ -221,6 +241,34 @@ def _any_honeypot_running() -> bool:
     except Exception:
         pass
     return False
+
+
+def list_interactive_honeypot_pids(exclude_pid=None) -> list:
+    """PIDs of honeypot-client in interactive sessions (SessionId > 0)."""
+    found = []
+    me = exclude_pid if exclude_pid is not None else os.getpid()
+    try:
+        for p in psutil.process_iter(["pid", "name"]):
+            name = (p.info.get("name") or "").lower()
+            if name not in ("honeypot-client.exe", "client.exe"):
+                continue
+            pid = p.info.get("pid")
+            if pid == me:
+                continue
+            try:
+                sid = psutil.Process(pid).session_id()
+            except Exception:
+                continue
+            if sid and int(sid) > 0:
+                found.append(int(pid))
+    except Exception:
+        pass
+    return found
+
+
+def has_interactive_honeypot(exclude_pid=None) -> bool:
+    """True if another honeypot runs in a user desktop session (multi-user safe)."""
+    return bool(list_interactive_honeypot_pids(exclude_pid=exclude_pid))
 
 
 def shutdown_existing_instance() -> bool:

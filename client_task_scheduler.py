@@ -3,8 +3,8 @@
 """
 Client Task Scheduler — Windows Task Scheduler integration.
 
-6-task system: Background (boot), Tray (logon), Watchdog (15m),
-Updater (weekly), SilentUpdater (30m), MemoryRestart (8h).
+6-task system: Background (boot), Tray (logon), Watchdog (2m),
+Updater (weekly), SilentUpdater (15m), MemoryRestart (8h).
 XML-based schtasks creation, admin-optional activation.
 
 Key exports:
@@ -161,23 +161,24 @@ TASK_CONFIGS = {
         "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></LogonTrigger>",
         "principal": "<GroupId>Users</GroupId><RunLevel>HighestAvailable</RunLevel>",
         "args": "--show-gui",
-        "multi_instance": "StopExisting",
+        # IgnoreNew: multi-user RDP — second logon must NOT kill first user's GUI
+        "multi_instance": "IgnoreNew",
         "hidden": False, "wake": False, "network_required": False,
         "exec_limit": "PT0S", "priority": 7,
     },
     TASK_NAME_WATCHDOG: {
-        "description": "Cloud Honeypot Client - Hourly Watchdog Process Recovery",
+        "description": "Cloud Honeypot Client - Watchdog Process Recovery (every 2 min)",
         "trigger": (
             '<CalendarTrigger><StartBoundary>2025-01-01T00:00:00</StartBoundary>'
             '<Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>'
-            '<Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
+            '<Repetition><Interval>PT2M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>'
             '</CalendarTrigger>'
         ),
         "principal": "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
         "args": "--mode=watchdog",
         "multi_instance": "IgnoreNew",
         "hidden": True, "wake": True, "network_required": False,
-        "exec_limit": "PT10M", "priority": 7,
+        "exec_limit": "PT5M", "priority": 7,
     },
     TASK_NAME_UPDATER: {
         "description": "Cloud Honeypot Client - Weekly Update Check and Auto-Install",
@@ -225,14 +226,47 @@ TASK_CONFIGS = {
     },
 }
 
+def ensure_memory_restart_script_on_disk() -> str:
+    """Copy memory_restart.ps1 next to the installed exe (stable path, not _MEIPASS)."""
+    exe_dir = os.path.dirname(CLIENT_EXE)
+    scripts_dir = os.path.join(exe_dir, "scripts")
+    dest = os.path.join(scripts_dir, "memory_restart.ps1")
+    sources = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        sources.append(os.path.join(meipass, "memory_restart.ps1"))
+    sources.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_restart.ps1"))
+    sources.append(os.path.join(exe_dir, "memory_restart.ps1"))
+
+    src = next((p for p in sources if p and os.path.isfile(p)), None)
+    try:
+        os.makedirs(scripts_dir, exist_ok=True)
+        if src:
+            need_copy = True
+            if os.path.isfile(dest):
+                try:
+                    need_copy = os.path.getsize(dest) != os.path.getsize(src)
+                except OSError:
+                    need_copy = True
+            if need_copy:
+                import shutil
+                shutil.copy2(src, dest)
+        return dest if os.path.isfile(dest) else (src or dest)
+    except Exception:
+        return src or dest
+
+
 def _build_memory_restart_action() -> str:
-    """Build <Actions> block for memory restart task (PowerShell script)"""
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_restart.ps1")
+    """Build <Actions> block for memory restart task (PowerShell script)."""
+    script_path = ensure_memory_restart_script_on_disk()
+    install_path = os.path.dirname(CLIENT_EXE)
+    work_dir = os.path.dirname(script_path) if script_path else install_path
     return (
         f'<Actions Context="Author"><Exec>'
         f'<Command>PowerShell.exe</Command>'
-        f'<Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;{script_path}&quot;</Arguments>'
-        f'<WorkingDirectory>{os.path.dirname(script_path)}</WorkingDirectory>'
+        f'<Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;{script_path}&quot; '
+        f'-InstallPath &quot;{install_path}&quot;</Arguments>'
+        f'<WorkingDirectory>{work_dir}</WorkingDirectory>'
         f'</Exec></Actions>'
     )
 
@@ -669,6 +703,31 @@ def refresh_silent_updater_schedule(log_func=None) -> bool:
         return False
 
 
+def refresh_watchdog_and_memory_restart(log_func=None) -> bool:
+    """Re-register Watchdog (2m) + Tray (IgnoreNew) + MemoryRestart. Admin only."""
+    if not is_admin():
+        return False
+    ok_all = True
+    try:
+        ensure_memory_restart_script_on_disk()
+        for name, label in (
+            (TASK_NAME_WATCHDOG, "Watchdog 2m"),
+            (TASK_NAME_TRAY, "Tray IgnoreNew (multi-user)"),
+            (TASK_NAME_MEMORY_RESTART, "MemoryRestart path fix"),
+        ):
+            xml = create_task_xml(name)
+            ok = install_task(name, xml)
+            ok_all = ok_all and ok
+            if ok:
+                _log_or_print(log_func, f"[OK] {label} schedule refreshed")
+            else:
+                _log_or_print(log_func, f"[WARN] Failed to refresh {name}")
+    except Exception as e:
+        _log_or_print(log_func, f"[WARN] Watchdog/MemoryRestart refresh failed: {e}")
+        return False
+    return ok_all
+
+
 def perform_comprehensive_task_management(log_func=None, app_state=None):
     """
     Comprehensive Task Scheduler management for application startup
@@ -677,13 +736,6 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
     1. Check and install missing tasks (requires admin for installation)
     2. Verify and activate existing tasks (works without admin)
     3. Update application state with task information
-    
-    Args:
-        log_func: Logging function to use
-        app_state: Application state dict to update with missing task info
-        
-    Returns:
-        dict: Management results with success status and activated task count
     """
     if log_func is None: log_func = print
     try:
@@ -692,9 +744,10 @@ def perform_comprehensive_task_management(log_func=None, app_state=None):
         # Step 1: Check and install missing tasks
         result = ensure_tasks_installed(log_func=log_func, force=False)
 
-        # Keep SilentUpdater interval in sync with this build (30m → 15m etc.)
+        # Keep schedules in sync with this build (15m silent update, 2m watchdog, MR path)
         if is_admin():
             refresh_silent_updater_schedule(log_func=log_func)
+            refresh_watchdog_and_memory_restart(log_func=log_func)
         
         if result.get('success'):
             log_func("✅ All Task Scheduler tasks are registered")

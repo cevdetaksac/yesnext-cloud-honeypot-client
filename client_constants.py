@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.4.48"  # Remote Desktop session_id selection (WTS mirror)
+VERSION = "4.5.1"  # Fix: GUI no longer silent-exits when control port busy; faster startup
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -113,7 +113,9 @@ TOKEN_FILE = os.path.join(MACHINE_DATA_DIR, "token.dat")
 # Application files
 LOG_FILE = os.path.join(APP_DIR, "client.log")
 CONSENT_FILE = os.path.join(APP_DIR, "consent.json")
-STATUS_FILE = os.path.join(APP_DIR, "status.json")
+# Machine-wide status so SYSTEM daemon + all user GUIs share one source of truth
+STATUS_FILE = os.path.join(MACHINE_DATA_DIR, "status.json")
+STATUS_FILE_LEGACY = os.path.join(APP_DIR, "status.json")
 WATCHDOG_TOKEN_FILE = os.path.join(APP_DIR, "watchdog.token")
 TASK_STATE_FILE = os.path.join(APP_DIR, "task_state.json")
 
@@ -199,16 +201,18 @@ APP_STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 # ===================== APPLICATION MODES ===================== #
 
 # Operation modes
-GUI_MODE = "gui"        # Normal GUI application with tray functionality
-DAEMON_MODE = "daemon"  # Background-only mode for servers
+GUI_MODE = "gui"        # Interactive frontend (prefers SYSTEM daemon motor)
+DAEMON_MODE = "daemon"  # Session-0 SYSTEM motor — owns protection/RD/API
+FRONTEND_MODE = "frontend"  # Explicit UI-only alias of gui
 
 # ===================== HEARTBEAT CONFIGURATION ===================== #
 
 HEARTBEAT_FILE = "heartbeat.json"
 FILE_HEARTBEAT_INTERVAL = 60  # File heartbeat interval (was 10s, optimized to 60s for performance)
 
-# Singleton mutex name
+# Singleton mutex — DAEMON only (GUI frontends do not take this)
 SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
+DAEMON_MUTEX_NAME = "Global\\CloudHoneypotClient_Daemon"
 
 # ===================== TIMING CONFIGURATION ===================== #
 

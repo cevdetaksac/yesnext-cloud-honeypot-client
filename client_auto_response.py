@@ -50,8 +50,9 @@ AUTO_UNBLOCK_HOURS = 24
 # Protected resources — never touch these
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
-    "DEFAULTACCOUNT", "GUEST", "WDAGUTILITYACCOUNT",
-    "ADMINISTRATOR",  # V4: never disable/reset via remote cmd
+    "DEFAULTACCOUNT", "WDAGUTILITYACCOUNT",
+    "ADMINISTRATOR",  # never disable/reset via remote cmd
+    # Guest intentionally NOT protected — hardening should disable it
 }
 
 PROTECTED_PROCESSES: Set[str] = {

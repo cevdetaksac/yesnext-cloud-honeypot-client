@@ -620,6 +620,29 @@ class HoneypotAPIClient:
             self.log(f"[API] self-protection event report error: {e}")
             return False
 
+    def report_lifecycle_event(self, token: str, data: dict) -> bool:
+        """POST /api/alerts/lifecycle — client crash/watchdog/memory-restart olaylari.
+
+        Soft-fail if endpoint missing (404) so older backends do not break clients.
+        """
+        try:
+            payload = {"token": token, **(data or {})}
+            resp = self.api_request(
+                "POST", "alerts/lifecycle", data=payload, timeout=10,
+            )
+            if isinstance(resp, dict) and resp.get("status") in (
+                "ok", "success", "created", "accepted",
+            ):
+                return True
+            # Some APIs return empty 200/204 — treat non-exception as soft ok only if dict
+            if resp is True:
+                return True
+            return False
+        except Exception as e:
+            # Do not spam — lifecycle flush retries from queue
+            self.log(f"[API] lifecycle event report error: {e}")
+            return False
+
     def report_logon_challenge(self, token: str, data: dict) -> bool:
         """POST /api/alerts/logon-challenge — Email onaylı logon challenge."""
         try:

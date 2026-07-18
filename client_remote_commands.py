@@ -73,11 +73,13 @@ ALLOWED_COMMANDS: Set[str] = {
     "list_sessions", "list_processes", "snapshot",
     "collect_diagnostics",
     "remote_stream_start", "remote_stream_stop", "remote_input",
+    "remote_send_sas",
 }
 
 # High-frequency IR commands — skip global cmd/min rate limit
 _STREAM_COMMANDS = frozenset({
     "remote_stream_start", "remote_stream_stop", "remote_input",
+    "remote_send_sas",
 })
 
 # Incident-response: always fast poll + no rate limit (breach containment)
@@ -591,6 +593,58 @@ class RemoteCommandExecutor:
     def _cmd_remote_input(self, params: dict) -> dict:
         rd = self._get_remote_desktop()
         return rd.apply_input(params or {})
+
+    def _cmd_remote_send_sas(self, params: dict) -> dict:
+        """Ctrl+Alt+Del Secure Attention Sequence via SendSAS (sas.dll)."""
+        session_id = params.get("session_id")
+        try:
+            ok, detail = self._send_sas(session_id=session_id)
+            if ok:
+                return {
+                    "success": True,
+                    "message": "SendSAS ok",
+                    "data": {"session_id": session_id, "detail": detail},
+                }
+            return {
+                "success": False,
+                "error": "SEND_SAS_FAILED",
+                "message": detail or "SendSAS failed",
+                "data": {"session_id": session_id},
+            }
+        except Exception as e:
+            log(f"[REMOTE-CMD] remote_send_sas error: {e}")
+            return {"success": False, "error": str(e), "message": str(e)}
+
+    @staticmethod
+    def _send_sas(session_id=None) -> tuple:
+        """Call SendSAS(FALSE) from sas.dll. Requires elevated / SYSTEM often.
+
+        Returns (ok, detail_message).
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        # Prefer documented API: BOOL SendSAS(BOOL AsUser);
+        # AsUser=FALSE → simulate CAD for current session context
+        try:
+            sas = ctypes.WinDLL("sas.dll")
+        except OSError as e:
+            return False, f"sas.dll not loadable: {e}"
+
+        try:
+            SendSAS = sas.SendSAS
+            SendSAS.argtypes = [wintypes.BOOL]
+            SendSAS.restype = None  # void
+        except AttributeError:
+            return False, "sas.dll has no SendSAS export"
+
+        try:
+            # FALSE = not AsUser — standard remote CAD path for services
+            SendSAS(0)
+            log(f"[REMOTE-CMD] SendSAS(0) invoked session_id={session_id}")
+            return True, "SendSAS(0) called"
+        except Exception as e:
+            return False, f"SendSAS raised: {e}"
 
     # ── Command Handlers ──────────────────────────────────────────
 

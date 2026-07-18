@@ -299,7 +299,14 @@ def check_updates_and_prompt(app_instance) -> bool:
 def check_updates_and_apply_silent() -> bool:
     """Silent update with installer-based system - SERVER SAFE VERSION"""
     try:
-        from client_utils import create_update_manager, is_update_in_progress
+        from client_utils import (
+            create_update_manager,
+            is_update_in_progress,
+            acquire_update_lock,
+            release_update_lock,
+            touch_update_lock,
+            pause_competing_updaters,
+        )
         import tempfile
         import subprocess
         import shutil
@@ -308,7 +315,7 @@ def check_updates_and_apply_silent() -> bool:
         log("[SILENT UPDATE] Starting server-safe silent update process...")
 
         if is_update_in_progress():
-            log("[SILENT UPDATE] Skipped — interactive update download in progress")
+            log("[SILENT UPDATE] Skipped — another update download/install in progress")
             return False
         
         # Update manager oluştur
@@ -322,6 +329,10 @@ def check_updates_and_apply_silent() -> bool:
             return False
             
         log(f"[SILENT UPDATE] New version found: {update_info['latest_version']}")
+
+        # Claim machine-wide lock BEFORE download so GUI download cannot be killed
+        acquire_update_lock("silent-download")
+        pause_competing_updaters()
         
         # Create temp directory for update files
         temp_dir = tempfile.mkdtemp(prefix="honeypot_update_")
@@ -337,22 +348,37 @@ def check_updates_and_apply_silent() -> bool:
                 log("[SILENT UPDATE] No download URL found in update info")
                 return False
             
-            # Download the installer
-            download_success = download_installer_file(download_url, installer_path)
-            if not download_success:
-                log("[SILENT UPDATE] Installer download failed")
-                return False
+            # Download the installer (heartbeat via touch inside loop)
+            def _silent_progress(pct):
+                if pct % 10 == 0:
+                    touch_update_lock()
+                    log(f"[SILENT UPDATE] Download {pct}%")
+
+            # Prefer UpdateManager download with progress when possible
+            downloaded_path = update_mgr.download_installer(download_url, _silent_progress)
+            if downloaded_path and os.path.isfile(downloaded_path):
+                try:
+                    shutil.copy2(downloaded_path, installer_path)
+                except Exception:
+                    installer_path = downloaded_path
+            else:
+                download_success = download_installer_file(download_url, installer_path)
+                if not download_success:
+                    log("[SILENT UPDATE] Installer download failed")
+                    return False
                 
             log(f"[SILENT UPDATE] Installer downloaded to: {installer_path}")
-            
+            touch_update_lock()
+
+            # Re-check: if interactive claimed lock somehow, abort kill
+            # (we hold silent lock — proceed to install)
             from client_utils import prepare_client_for_installer
-            prepare_client_for_installer()
+            # Kill ONLY now that download finished — never mid-download
+            prepare_client_for_installer(kill_processes=True)
             
             # Execute the update process
-            # Installer kendi task management'ini yapacak
             log("[SILENT UPDATE] Starting installer process...")
             
-            # Run installer with SYSTEM privileges in silent mode
             cmd = [
                 installer_path,
                 "/S",  # Silent install
@@ -369,14 +395,12 @@ def check_updates_and_apply_silent() -> bool:
                 log("[SILENT UPDATE] Installer completed successfully")
                 log("[SILENT UPDATE] New version will be started automatically by installer")
                 
-                # Cleanup temp files
                 try:
-                    shutil.rmtree(temp_dir)
-                except:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
                     pass
                 
-                # Installer başarılı - uygulama açık kalır
-                # Installer kendi restart işlemini yapacak
+                release_update_lock(resume_updaters=False)
                 log("[SILENT UPDATE] ✅ Silent update completed - installer will handle app restart")
                 return True
                 
@@ -391,11 +415,16 @@ def check_updates_and_apply_silent() -> bool:
             return False
             
         finally:
-            # Cleanup temp directory
+            try:
+                # Success path already released without resume; failure → unlock + resume
+                if is_update_in_progress():
+                    release_update_lock(resume_updaters=True)
+            except Exception:
+                pass
             try:
                 if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-            except:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
                 pass
             
     except Exception as e:
@@ -419,10 +448,19 @@ def download_installer_file(url: str, local_path: str, expected_sha256: str = ""
         response.raise_for_status()
 
         sha = hashlib.sha256()
+        last_touch = time.time()
         with open(local_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
                 sha.update(chunk)
+                now = time.time()
+                if now - last_touch >= 15:
+                    last_touch = now
+                    try:
+                        from client_utils import touch_update_lock
+                        touch_update_lock()
+                    except Exception:
+                        pass
 
         file_size = os.path.getsize(local_path)
         digest = sha.hexdigest()
@@ -446,19 +484,30 @@ def download_installer_file(url: str, local_path: str, expected_sha256: str = ""
 
 
 def update_watchdog_loop():
-    """Hourly update checker loop"""
+    """Periodic update checker — interval from config (default 30 min)."""
+    from client_utils import get_from_config
+
     while True:
         try:
-            # 3600 seconds = 1 hour
-            for _ in range(360):
+            # Prefer minutes; fall back to hours (legacy config)
+            minutes = get_from_config("updates.check_interval_minutes", None)
+            if minutes is None:
+                hours = float(get_from_config("updates.check_interval_hours", 0.5) or 0.5)
+                minutes = max(15, int(hours * 60))
+            else:
+                minutes = max(15, int(minutes))
+            # Sleep in 10s slices so lock / shutdown stay responsive
+            for _ in range(max(1, minutes * 6)):
                 time.sleep(10)
             try:
                 from client_utils import is_update_in_progress
                 if is_update_in_progress():
-                    log("[UPDATE WATCHDOG] Skipped — interactive update in progress")
+                    log("[UPDATE WATCHDOG] Skipped — update already in progress")
                     continue
             except Exception:
                 pass
+            if not bool(get_from_config("updates.auto_check", True)):
+                continue
             check_updates_and_apply_silent()
         except Exception as e:
             log(f"update_watchdog_loop error: {e}")

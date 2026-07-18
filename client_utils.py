@@ -1055,11 +1055,21 @@ class InstallerUpdateManager:
             downloaded = 0
             
             with open(installer_path, 'wb') as f:
+                last_touch = time.time()
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        
+
+                        # Keep machine-wide update lock fresh during long downloads
+                        now = time.time()
+                        if now - last_touch >= 15:
+                            last_touch = now
+                            try:
+                                touch_update_lock()
+                            except Exception:
+                                pass
+
                         if progress_callback and total_size > 0:
                             progress = int((downloaded / total_size) * 100)
                             progress_callback(progress)
@@ -1365,9 +1375,13 @@ class InstallerUpdateManager:
 # ===================== UPDATE UI HELPERS ===================== #
 
 def _update_lock_path() -> str:
-    """Interactive download lock — silent updater must not kill mid-download."""
+    """Machine-wide lock — SYSTEM SilentUpdater and user GUI must share the same file.
+
+    Previous APPDATA path failed: interactive download locked user profile, while
+    CloudHoneypot-SilentUpdater (S-1-5-18) looked at SystemProfile AppData → race kill.
+    """
     base = os.path.join(
-        os.environ.get("APPDATA", os.path.expanduser("~")),
+        os.environ.get("ProgramData", r"C:\ProgramData"),
         "YesNext",
         "CloudHoneypotClient",
     )
@@ -1379,7 +1393,7 @@ def _update_lock_path() -> str:
 
 
 def acquire_update_lock(reason: str = "interactive") -> bool:
-    """Mark that an interactive update download is in progress."""
+    """Mark that an update download/install is in progress (all sessions)."""
     try:
         path = _update_lock_path()
         with open(path, "w", encoding="utf-8") as fh:
@@ -1389,12 +1403,32 @@ def acquire_update_lock(reason: str = "interactive") -> bool:
         return False
 
 
+def touch_update_lock() -> None:
+    """Heartbeat during long downloads so lock is never treated as stale."""
+    try:
+        path = _update_lock_path()
+        if os.path.isfile(path):
+            os.utime(path, None)
+            return
+        acquire_update_lock("heartbeat")
+    except OSError:
+        pass
+
+
 def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
-    """True if interactive download lock exists and is not stale."""
+    """True if update lock exists and is not stale."""
     try:
         path = _update_lock_path()
         if not os.path.isfile(path):
-            return False
+            # Migrate: also honour legacy per-user lock if present
+            legacy = os.path.join(
+                os.environ.get("APPDATA", os.path.expanduser("~")),
+                "YesNext", "CloudHoneypotClient", "update_in_progress.lock",
+            )
+            if os.path.isfile(legacy):
+                path = legacy
+            else:
+                return False
         age = time.time() - os.path.getmtime(path)
         if age > max_age_sec:
             try:
@@ -1408,10 +1442,15 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
 
 
 def pause_competing_updaters() -> None:
-    """Disable SilentUpdater / weekly Updater only — do NOT kill running client."""
+    """Stop scheduled tasks that kill/restart the client mid-download."""
     import subprocess
 
-    for task in ("CloudHoneypot-SilentUpdater", "CloudHoneypot-Updater"):
+    for task in (
+        "CloudHoneypot-SilentUpdater",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-MemoryRestart",
+        "CloudHoneypot-Watchdog",
+    ):
         try:
             subprocess.run(
                 ["schtasks", "/end", "/tn", task],
@@ -1430,10 +1469,15 @@ def pause_competing_updaters() -> None:
 
 
 def resume_competing_updaters() -> None:
-    """Re-enable SilentUpdater / weekly Updater after interactive download ends without install."""
+    """Re-enable updater/watchdog tasks after interactive download ends without install."""
     import subprocess
 
-    for task in ("CloudHoneypot-SilentUpdater", "CloudHoneypot-Updater"):
+    for task in (
+        "CloudHoneypot-SilentUpdater",
+        "CloudHoneypot-Updater",
+        "CloudHoneypot-MemoryRestart",
+        "CloudHoneypot-Watchdog",
+    ):
         try:
             subprocess.run(
                 ["schtasks", "/change", "/tn", task, "/enable"],

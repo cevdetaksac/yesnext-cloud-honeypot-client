@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.13"  # PyInstaller unpack to ProgramData (fix TEMP _MEI Access denied)
+VERSION = "4.5.14"  # onedir package — python312.dll in $INSTDIR\_internal (no _MEI)
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

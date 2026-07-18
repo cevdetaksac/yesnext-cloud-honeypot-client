@@ -83,11 +83,18 @@ try {
     exit 1
 }
 
-# Step 2: Copy config files to dist
+# Step 2: Copy config files to dist (installer root + onedir folder)
 Write-Host "[2/5] Copying configuration files..." -ForegroundColor Yellow
 try {
     Copy-Item -Path "client_config.json", "client_lang.json", "LICENSE", "README.md" -Destination "dist" -Force
-    Write-Host "   SUCCESS: Configuration files copied" -ForegroundColor Green
+    $onedir = Join-Path "dist" "honeypot-client"
+    if (Test-Path $onedir) {
+        Copy-Item -Path "client_config.json", "client_lang.json", "LICENSE", "README.md" -Destination $onedir -Force
+        Write-Host "   SUCCESS: Config copied to dist/ and dist/honeypot-client/" -ForegroundColor Green
+    } else {
+        Write-Host "   SUCCESS: Configuration files copied to dist/" -ForegroundColor Green
+        Write-Host "   WARN: dist/honeypot-client/ missing - expected onedir output" -ForegroundColor Yellow
+    }
 } catch {
     Write-Host "   ERROR: Failed to copy files: $_" -ForegroundColor Red
     exit 1
@@ -131,9 +138,9 @@ Write-Host "===============================================" -ForegroundColor Gr
 $installerFile = Get-Item "cloud-client-installer.exe" -ErrorAction SilentlyContinue
 if ($installerFile) {
     $sizeMB = [math]::Round($installerFile.Length / 1MB, 1)
-    Write-Host "Version:   v$VERSION" -ForegroundColor Cyan
-    Write-Host "Installer: cloud-client-installer.exe ($sizeMB MB)" -ForegroundColor Cyan
-    Write-Host "Built:     $($installerFile.LastWriteTime)" -ForegroundColor Cyan
+    Write-Host ("Version:   v{0}" -f $VERSION) -ForegroundColor Cyan
+    Write-Host ("Installer: cloud-client-installer.exe ({0} MB)" -f $sizeMB) -ForegroundColor Cyan
+    Write-Host ("Built:     {0}" -f $installerFile.LastWriteTime) -ForegroundColor Cyan
     Write-Host "Ready for distribution!" -ForegroundColor Green
 } else {
     Write-Host "ERROR: Installer file not found!" -ForegroundColor Red

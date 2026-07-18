@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 5
-!define VERSIONBUILD 13
+!define VERSIONBUILD 14
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -61,9 +61,8 @@ Var LogFile
 ; UTILITY FUNCTIONS
 ; ===================================================================
 
-; Launch app as current (non-elevated) user — ONE onefile start only.
-; Never run --create-tasks then --show-gui back-to-back: PyInstaller onefile
-; unpacks to %TEMP%\_MEI* and a second launch races → "Failed to load Python DLL".
+; Launch app as current (non-elevated) user.
+; onedir: DLLs live in $INSTDIR\_internal (no _MEI unpack race).
 Function LaunchAsCurrentUser
     SetOutPath "$INSTDIR"
 
@@ -84,8 +83,7 @@ Function LaunchAsCurrentUser
         nsExec::Exec 'taskkill /F /T /IM honeypot-client.exe >nul 2>&1'
         Pop $0
     LaunchAfterKill:
-    ; Let previous _MEI* unpack dirs finish deleting
-    Sleep 2000
+    Sleep 1500
 
     ; Clear stale update lock so kill/watchdog and GUI are not blocked
     ExpandEnvStrings $R9 "%ProgramData%\YesNext\CloudHoneypotClient\update_in_progress.lock"
@@ -370,9 +368,11 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     !insertmacro LOG "[INSTALL] Target directory: $INSTDIR"
     SetOutPath $INSTDIR
 
-    ; Install main files
-    !insertmacro LOG "[FILES] Installing application files..."
-    File /oname=honeypot-client.exe "dist\honeypot-client.exe"
+    ; Install main files (onedir: exe + _internal next to it)
+    !insertmacro LOG "[FILES] Installing application files (onedir)..."
+    SetOutPath $INSTDIR
+    File /r "dist\honeypot-client\*.*"
+    ; Extra config copies at install root (also inside _internal via PyInstaller datas)
     File /oname=client_config.json "dist\client_config.json"
     File /oname=client_lang.json "dist\client_lang.json"
     File /oname=LICENSE "dist\LICENSE"
@@ -381,14 +381,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
     File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
     File /oname=scripts\memory_restart.ps1 "memory_restart.ps1"
-    !insertmacro LOG "[FILES] Application files installed."
-
-    ; PyInstaller onefile runtime unpack dir (NOT C:\WINDOWS\TEMP — Access denied / AV)
-    ExpandEnvStrings $R8 "%ProgramData%\YesNext\CloudHoneypotClient"
-    CreateDirectory "$R8"
-    CreateDirectory "$R8\runtime"
-    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath ''$R8'' -Force -ErrorAction SilentlyContinue"'
-    !insertmacro LOG "[FILES] ProgramData runtime dir ready for _MEI unpack"
+    !insertmacro LOG "[FILES] Application files installed (exe + _internal)."
 
     ; =================================================================
     ; PHASE 3: POST-INSTALLATION CONFIGURATION
@@ -430,9 +423,8 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
         !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
         IfFileExists "$INSTDIR\honeypot-client.exe" SilentStart SkipAutoStart
         SilentStart:
-            ; ONE onefile launch only (daemon __init__ creates scheduled tasks).
-            ; Back-to-back --create-tasks + daemon caused _MEI python312.dll failures.
-            Sleep 1500
+            ; Single daemon launch (onedir — no _MEI unpack)
+            Sleep 1000
             Exec '"$INSTDIR\honeypot-client.exe" --mode=daemon --silent'
             !insertmacro LOG "[AUTO-START] Daemon started (single launch)."
         Goto SkipAutoStart
@@ -485,6 +477,8 @@ Section "Uninstall"
 
     ; Phase 4: Remove files
     DetailPrint "Removing application files..."
+    RMDir /r "$INSTDIR\_internal"
+    RMDir /r "$INSTDIR\runtime"
     Delete "$INSTDIR\honeypot-client.exe"
     Delete "$INSTDIR\client_config.json"
     Delete "$INSTDIR\client_lang.json"

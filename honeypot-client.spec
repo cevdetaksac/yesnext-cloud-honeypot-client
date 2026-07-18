@@ -1,10 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""
+onedir package — python312.dll lives under $INSTDIR\\_internal (no _MEI unpack).
+
+onefile caused: Failed to load Python DLL ... LoadLibrary: Access denied
+(AV / execute-from-TEMP / concurrent extract). onedir avoids runtime extract.
+"""
 import os, importlib
 
 # CustomTkinter veri dosyalarını bul
 ctk_path = os.path.dirname(importlib.import_module('customtkinter').__file__)
 
-# Bundle certifi CA file into onefile so TLS works after _MEI temp cleanup
+# Bundle certifi CA file for TLS
 try:
     import certifi as _certifi
     _cacert = _certifi.where()
@@ -30,18 +36,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='honeypot-client',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,  # UPX disabled to prevent python312.dll issues
-    upx_exclude=[],
-    # NEVER unpack under C:\WINDOWS\TEMP — LoadLibrary Access denied / AV / execute-from-TEMP policies
-    # break python312.dll for SYSTEM daemon + Admin tray. ProgramData is writable+executable.
-    runtime_tmpdir='%ProgramData%\\YesNext\\CloudHoneypotClient\\runtime',
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -49,4 +50,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['certs\\honeypot_256.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='honeypot-client',
 )

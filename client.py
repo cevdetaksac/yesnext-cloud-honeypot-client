@@ -916,12 +916,27 @@ class CloudHoneypotClient:
             ip = self.state.get("public_ip") or ClientHelpers.get_public_ip()
             
             if status_override is None: status_override = self.get_intelligent_status()
+            prev_linked = None
+            try:
+                from client_utils import is_account_linked
+                prev_linked = is_account_linked()
+            except Exception:
+                pass
             ok = self.api_client.send_heartbeat(
                 token, ip, SERVER_NAME,
                 self.state.get("running", False), status_override,
                 system_context=self._build_system_context()
             )
             self._last_heartbeat_ok = ok
+            # Heartbeat may carry account_linked — refresh top-bar badge if changed
+            try:
+                from client_utils import is_account_linked
+                if prev_linked is not None and is_account_linked() != prev_linked and self.gui:
+                    self._gui_safe(
+                        lambda: getattr(self.gui, "_render_account_link_controls", lambda *_a, **_k: None)(token)
+                    )
+            except Exception:
+                pass
 
     def heartbeat_loop(self):
         """Optimized heartbeat loop with IP caching"""

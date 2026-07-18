@@ -109,7 +109,10 @@ class HoneypotAPIClient:
             
             # Sık çağrılan endpointler için sessiz mod
             from client_constants import VERBOSE_LOGGING
-            is_frequent_endpoint = endpoint in ['attack-count', 'heartbeat', 'agent/tunnel-status', 'commands/pending', 'attack']
+            is_frequent_endpoint = endpoint in [
+                'attack-count', 'heartbeat', 'agent/tunnel-status',
+                'commands/pending', 'attack', 'agent/account-status', 'client_status',
+            ]
             show_logs = (verbose_logging or VERBOSE_LOGGING) and not is_frequent_endpoint
             
             if show_logs:
@@ -216,11 +219,61 @@ class HoneypotAPIClient:
             # Merge rich system context if provided
             if system_context:
                 payload["system_context"] = system_context
-            response = self.api_request("POST", "heartbeat", data=payload)
+            response = self.api_request("POST", "heartbeat", data=payload, verbose_logging=False)
+            # P1: heartbeat body may include account_linked
+            try:
+                from client_utils import apply_account_link_from_payload
+                apply_account_link_from_payload(response, source="heartbeat")
+            except Exception:
+                pass
             return response is not None
         except Exception as e:
             self.log(f"[API] Heartbeat gönderme hatası: {e}")
             return False
+
+    def get_account_status(self, token: str) -> Optional[Dict]:
+        """GET /api/agent/account-status — AccountClient membership for this agent token.
+
+        Falls back to client_status when dedicated endpoint is missing or has no
+        account_linked field. Returns the raw JSON dict that carries link state,
+        or None if unknown.
+        """
+        tok = (token or "").strip()
+        if not tok:
+            return None
+        try:
+            from client_utils import parse_account_link_payload
+
+            # Dedicated endpoint (P0)
+            primary = self.api_request(
+                "GET",
+                "agent/account-status",
+                params={"token": tok},
+                token=tok,
+                timeout=8,
+                verbose_logging=False,
+            )
+            if isinstance(primary, dict) and parse_account_link_payload(primary) is not None:
+                return primary
+
+            # Fallback: client_status with embedded account_linked (P1)
+            secondary = self.api_request(
+                "GET",
+                "client_status",
+                params={"token": tok},
+                token=tok,
+                timeout=8,
+                verbose_logging=False,
+            )
+            if isinstance(secondary, dict) and parse_account_link_payload(secondary) is not None:
+                return secondary
+            # If primary had data but no link field, still return it for callers
+            if isinstance(primary, dict):
+                return primary
+            return None
+        except Exception as e:
+            self.log(f"[API] account-status error: {e}")
+            return None
 
     def report_open_ports(self, token: str, ports: list) -> bool:
         """İstemcideki açık portları API'ye raporlar."""

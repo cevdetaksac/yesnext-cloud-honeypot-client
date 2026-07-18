@@ -299,32 +299,15 @@ class ModernGUI:
             command=lambda: self._copy_token_with_hint(token),
         ).pack(side="left", padx=(0, 4))
 
-        # Hesaba bağla — yalnızca henüz bağlı değilse CTA; bağlıysa rozet
-        from client_utils import is_account_linked, refresh_account_link_status
+        # Hesaba bağla — API account-status (fallback: local cache)
+        self._account_slot = ctk.CTkFrame(bar, fg_color="transparent")
+        self._account_slot.pack(side="left", padx=(0, 4))
+        self._render_account_link_controls(token)
+        # Background sync (don't block UI build)
         try:
-            refresh_account_link_status(
-                token,
-                api_client=getattr(self.app, "api_client", None),
-            )
+            self.root.after(800, lambda: self._sync_account_link_from_api(force_ui=True))
         except Exception:
             pass
-        linked = is_account_linked()
-        self._account_linked = linked
-        if linked:
-            ctk.CTkLabel(
-                bar, text=f"✓ {self.t('btn_account_linked')}",
-                font=ctk.CTkFont(size=10),
-                text_color=COLORS["green"],
-            ).pack(side="left", padx=(0, 4))
-        else:
-            ctk.CTkButton(
-                bar, text=self.t("btn_link_account"),
-                width=100, height=22,
-                font=ctk.CTkFont(size=10),
-                fg_color=COLORS["accent"], hover_color=COLORS["blue"],
-                text_color=COLORS["text_bright"], corner_radius=4,
-                command=lambda: self._open_link_account(token),
-            ).pack(side="left", padx=(0, 4))
 
         # ════════ SAĞ TARAF ════════ #
         # Yardım butonu
@@ -381,6 +364,76 @@ class ModernGUI:
         except Exception as e:
             log(f"clipboard error: {e}")
 
+    def _render_account_link_controls(self, token: str = ""):
+        """Rebuild account CTA / linked badge inside _account_slot."""
+        from client_utils import is_account_linked, get_linked_account_email
+
+        slot = getattr(self, "_account_slot", None)
+        if slot is None:
+            return
+        try:
+            for child in list(slot.winfo_children()):
+                child.destroy()
+        except Exception:
+            pass
+
+        tok = token or self.app.state.get("token", "") or ""
+        linked = is_account_linked()
+        self._account_linked = linked
+        if linked:
+            email = get_linked_account_email()
+            label = f"✓ {self.t('btn_account_linked')}"
+            if email:
+                short = email if len(email) <= 28 else (email[:26] + "…")
+                label = f"✓ {short}"
+            ctk.CTkLabel(
+                slot, text=label,
+                font=ctk.CTkFont(size=10),
+                text_color=COLORS["green"],
+            ).pack(side="left")
+            # Click badge → open My servers
+            try:
+                slot.bind("<Button-1>", lambda _e: webbrowser.open(f"{self._account_base_url()}/servers"))
+            except Exception:
+                pass
+        else:
+            ctk.CTkButton(
+                slot, text=self.t("btn_link_account"),
+                width=100, height=22,
+                font=ctk.CTkFont(size=10),
+                fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+                text_color=COLORS["text_bright"], corner_radius=4,
+                command=lambda: self._open_link_account(tok),
+            ).pack(side="left")
+
+    def _sync_account_link_from_api(self, *, force_ui: bool = False):
+        """Refresh account_linked from cloud; update top-bar if state changed."""
+        def _work():
+            try:
+                from client_utils import (
+                    is_account_linked,
+                    refresh_account_link_status,
+                )
+                tok = self.app.state.get("token", "") or ""
+                if not tok:
+                    return
+                prev = is_account_linked()
+                result = refresh_account_link_status(
+                    tok,
+                    api_client=getattr(self.app, "api_client", None),
+                )
+                now = is_account_linked()
+                if force_ui or (result is not None and prev != now):
+                    self._gui_safe(lambda: self._render_account_link_controls(tok))
+            except Exception as e:
+                log(f"account link sync error: {e}")
+
+        try:
+            import threading
+            threading.Thread(target=_work, daemon=True, name="AccountLinkSync").start()
+        except Exception:
+            _work()
+
     def _account_base_url(self) -> str:
         from client_constants import API_URL
         return API_URL.rsplit("/api", 1)[0]
@@ -428,6 +481,11 @@ class ModernGUI:
                 clear_force_gui_onboarding()
         except Exception:
             pass
+        # Re-check link status after user may have linked on web
+        try:
+            self.root.after(5000, lambda: self._sync_account_link_from_api(force_ui=True))
+        except Exception:
+            pass
 
     def _open_link_account(self, token: str = ""):
         """Copy token and open My servers / login page for Account linking."""
@@ -450,55 +508,63 @@ class ModernGUI:
             msg = self.t("token_copied_link_hint")
         messagebox.showinfo(self.t("btn_link_account"), msg)
         try:
-            from client_utils import clear_force_gui_onboarding, set_account_linked
+            from client_utils import clear_force_gui_onboarding
             if tok:
                 clear_force_gui_onboarding()
-            # Ask whether linking is done — hide CTA when yes
-            if messagebox.askyesno(
-                self.t("btn_link_account"),
-                self.t("link_account_confirm_done"),
-            ):
-                set_account_linked(True, source="user_confirm")
-                self._account_linked = True
-                try:
-                    self.show_toast(
-                        self.t("btn_account_linked"),
-                        self.t("link_account_marked"),
-                        "info",
-                    )
-                except Exception:
-                    pass
-                # Refresh top bar state without full rebuild if possible
-                try:
-                    self._rebuild_gui()
-                except Exception:
-                    pass
         except Exception:
             pass
         try:
             self.show_toast(self.t("btn_link_account"), self.t("token_copied_toast"), "info")
         except Exception:
             pass
+        # Poll API a few times — user may finish link-server on the web
+        for delay_ms in (8000, 20000, 45000):
+            try:
+                self.root.after(
+                    delay_ms,
+                    lambda: self._sync_account_link_from_api(force_ui=True),
+                )
+            except Exception:
+                pass
 
     def _mark_account_linked(self):
-        """Settings: already linked on web — hide Hesaba bağla CTA."""
+        """Settings: already linked on web — hide Hesaba bağla CTA (offline fallback)."""
         try:
-            from client_utils import set_account_linked
+            from client_utils import set_account_linked, refresh_account_link_status
+            tok = self.app.state.get("token", "") or ""
+            api_state = refresh_account_link_status(
+                tok, api_client=getattr(self.app, "api_client", None)
+            )
+            if api_state is True:
+                messagebox.showinfo(self.t("info"), self.t("link_account_marked"))
+                self._render_account_link_controls(tok)
+                return
             set_account_linked(True, source="user_mark")
             self._account_linked = True
             messagebox.showinfo(self.t("info"), self.t("link_account_marked"))
-            self._rebuild_gui()
+            self._render_account_link_controls(tok)
         except Exception as e:
             log(f"mark account linked error: {e}")
 
     def _unmark_account_linked(self):
-        """Settings: show link CTA again."""
+        """Settings: clear local mark (API remains source of truth when online)."""
         try:
-            from client_utils import set_account_linked
+            from client_utils import set_account_linked, refresh_account_link_status
+            tok = self.app.state.get("token", "") or ""
+            api_state = refresh_account_link_status(
+                tok, api_client=getattr(self.app, "api_client", None)
+            )
+            if api_state is True:
+                messagebox.showinfo(
+                    self.t("info"),
+                    self.t("link_account_api_still_linked"),
+                )
+                self._render_account_link_controls(tok)
+                return
             set_account_linked(False, source="user_unmark")
             self._account_linked = False
             messagebox.showinfo(self.t("info"), self.t("link_account_unmarked"))
-            self._rebuild_gui()
+            self._render_account_link_controls(tok)
         except Exception as e:
             log(f"unmark account linked error: {e}")
 
@@ -3436,6 +3502,18 @@ class ModernGUI:
             self._refresh_active_sessions()
             if hasattr(self, "_refresh_remote_desktop_status"):
                 self._refresh_remote_desktop_status()
+
+        # Account link status from API (~60s)
+        ticks_per_account = max(1, int(60000 / self._refresh_ms))
+        if not hasattr(self, "_account_link_tick"):
+            self._account_link_tick = 0
+        self._account_link_tick += 1
+        if self._account_link_tick >= ticks_per_account:
+            self._account_link_tick = 0
+            try:
+                self._sync_account_link_from_api(force_ui=False)
+            except Exception:
+                pass
 
         try:
             if self.root and self.root.winfo_exists():

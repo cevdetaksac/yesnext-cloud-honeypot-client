@@ -1002,61 +1002,163 @@ def _account_link_pref_path() -> str:
     return os.path.join(_programdata_client_dir(), "account_link.json")
 
 
-def is_account_linked() -> bool:
-    """True when this agent was marked linked to a YesNext Account (local + optional API)."""
+def load_account_link_pref() -> dict:
+    """Local cache of last known Account link status (API is source of truth when online)."""
     try:
         path = _account_link_pref_path()
         if os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            if isinstance(data, dict) and data.get("linked"):
-                return True
+            if isinstance(data, dict):
+                return data
     except Exception:
         pass
-    return False
+    return {}
 
 
-def set_account_linked(linked: bool = True, *, source: str = "user") -> None:
-    """Persist Account↔Client link state (survives upgrades; ProgramData)."""
+def is_account_linked() -> bool:
+    """True when API (or local cache) says this client is linked to a YesNext Account."""
+    try:
+        data = load_account_link_pref()
+        return bool(data.get("linked"))
+    except Exception:
+        return False
+
+
+def get_linked_account_email() -> str:
+    """Cached account email from last successful API status (may be masked)."""
+    try:
+        data = load_account_link_pref()
+        email = data.get("email") or data.get("email_masked") or ""
+        return str(email) if email else ""
+    except Exception:
+        return ""
+
+
+def set_account_linked(
+    linked: bool = True,
+    *,
+    source: str = "user",
+    email: str = "",
+    email_masked: str = "",
+    account_id=None,
+    raw: Optional[dict] = None,
+) -> None:
+    """Persist Account↔Client link state (ProgramData cache)."""
     try:
         path = _account_link_pref_path()
+        prev = load_account_link_pref()
         payload = {
             "linked": bool(linked),
             "source": source,
             "updated_at": time.time(),
+            "email": email or prev.get("email") or "",
+            "email_masked": email_masked or prev.get("email_masked") or "",
+            "account_id": account_id if account_id is not None else prev.get("account_id"),
         }
+        if not linked:
+            payload["email"] = email or ""
+            payload["email_masked"] = email_masked or ""
+            payload["account_id"] = account_id
+        if isinstance(raw, dict):
+            # Keep a small non-secret snapshot for UI (no tokens/hashes)
+            payload["server_name"] = raw.get("server_name") or prev.get("server_name")
+            payload["client_id"] = raw.get("client_id") or prev.get("client_id")
+            payload["linked_at"] = raw.get("linked_at") or prev.get("linked_at")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
     except OSError:
         pass
 
 
+def parse_account_link_payload(resp: Optional[dict]) -> Optional[bool]:
+    """Extract account_linked from API JSON.
+
+    Returns True/False when the payload explicitly carries link state;
+    None when the response has no account-link fields (legacy / unrelated).
+    """
+    if not isinstance(resp, dict):
+        return None
+    linked = None
+    for key in (
+        "account_linked", "linked", "has_account", "is_linked",
+        "linked_to_account", "has_account_membership",
+    ):
+        if key in resp:
+            linked = bool(resp.get(key))
+            break
+    acct = resp.get("account")
+    if linked is None and isinstance(acct, dict):
+        if acct.get("linked") is False:
+            linked = False
+        elif acct.get("email") or acct.get("email_masked") or acct.get("id"):
+            linked = True
+    if linked is None and "accounts" in resp and isinstance(resp.get("accounts"), list):
+        linked = len(resp["accounts"]) > 0
+    return linked
+
+
+def apply_account_link_from_payload(resp: Optional[dict], *, source: str = "api") -> Optional[bool]:
+    """Update local cache from API payload. Returns linked bool or None if unknown."""
+    linked = parse_account_link_payload(resp)
+    if linked is None:
+        return None
+    email = ""
+    email_masked = ""
+    account_id = None
+    acct = resp.get("account") if isinstance(resp, dict) else None
+    if isinstance(acct, dict):
+        email = str(acct.get("email") or "")
+        email_masked = str(acct.get("email_masked") or "")
+        account_id = acct.get("id")
+    if not email:
+        email = str((resp or {}).get("email") or "")
+    if not email_masked:
+        email_masked = str((resp or {}).get("email_masked") or "")
+    set_account_linked(
+        linked,
+        source=source,
+        email=email,
+        email_masked=email_masked,
+        account_id=account_id,
+        raw=resp if isinstance(resp, dict) else None,
+    )
+    return linked
+
+
 def refresh_account_link_status(token: str = "", api_client=None) -> Optional[bool]:
     """Ask cloud whether this client token is linked to an Account.
 
+    Source of truth when API answers with account_linked (or equivalent).
     Returns True/False when cloud answers; None when endpoint missing / unknown.
-    On True, persists local linked flag.
     """
     tok = (token or "").strip()
     if not tok:
         return None
     try:
-        # Prefer dedicated agent endpoint when cloud ships it
         resp = None
-        if api_client is not None and hasattr(api_client, "api_request"):
+        if api_client is not None and hasattr(api_client, "get_account_status"):
+            resp = api_client.get_account_status(tok)
+        elif api_client is not None and hasattr(api_client, "api_request"):
+            # Dedicated endpoint first
             resp = api_client.api_request(
                 "GET", "agent/account-status",
                 params={"token": tok},
+                token=tok,
                 timeout=8,
                 verbose_logging=False,
             )
-            if resp is None:
-                resp = api_client.api_request(
+            # Fallback: client_status may embed account_linked (P1)
+            if resp is None or parse_account_link_payload(resp) is None:
+                cs = api_client.api_request(
                     "GET", "client_status",
                     params={"token": tok},
+                    token=tok,
                     timeout=8,
                     verbose_logging=False,
                 )
+                if parse_account_link_payload(cs) is not None:
+                    resp = cs
         else:
             import requests
             from client_constants import API_URL
@@ -1071,35 +1173,29 @@ def refresh_account_link_status(token: str = "", api_client=None) -> Optional[bo
                         verify=resolve_tls_verify(),
                     )
                     if r.status_code == 404:
-                        continue
-                    if r.status_code == 200:
-                        resp = r.json()
+                        # Route missing vs client missing — try next path on bare Not Found
+                        try:
+                            detail = (r.json() or {}).get("detail", "")
+                        except Exception:
+                            detail = ""
+                        if path == "agent/account-status" and str(detail).lower() in (
+                            "not found", "", "none"
+                        ):
+                            continue
+                        if path == "agent/account-status":
+                            continue
+                        break
+                    if 200 <= r.status_code < 300:
+                        data = r.json()
+                        if path == "client_status" and parse_account_link_payload(data) is None:
+                            continue
+                        resp = data
                         break
                 except Exception:
                     continue
-        if not isinstance(resp, dict):
-            return None
-        linked = None
-        for key in (
-            "account_linked", "linked", "has_account", "is_linked",
-            "linked_to_account", "has_account_membership",
-        ):
-            if key in resp:
-                linked = bool(resp.get(key))
-                break
-        acct = resp.get("account")
-        if linked is None and isinstance(acct, dict):
-            linked = bool(acct.get("email") or acct.get("id") or acct.get("linked"))
-        if linked is None and isinstance(resp.get("accounts"), list):
-            linked = len(resp["accounts"]) > 0
-        if linked is True:
-            set_account_linked(True, source="api")
-            return True
-        if linked is False:
-            return False
+        return apply_account_link_from_payload(resp, source="api")
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ===== CONFIG SYSTEM FINALIZED =====

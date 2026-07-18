@@ -746,3 +746,429 @@ class UpdateManager:
                 log("Update watchdog will stop with main process")
         except Exception as e:
             log(f"Update watchdog stop error: {e}")
+
+
+# ── Dashboard remote command: self_update / check_update ───────────
+
+_ALLOWED_UPDATE_HOST_SUFFIXES = (
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
+
+
+def _normalize_version_tag(tag: str) -> str:
+    return str(tag or "").strip().lstrip("vV").strip()
+
+
+def _is_allowed_update_url(url: str) -> bool:
+    """Only official GitHub release hosts for this repo."""
+    try:
+        from urllib.parse import urlparse
+        from client_constants import GITHUB_OWNER, GITHUB_REPO
+        p = urlparse(str(url or "").strip())
+        if p.scheme not in ("https",):
+            return False
+        host = (p.hostname or "").lower()
+        if not any(host == s or host.endswith("." + s) for s in _ALLOWED_UPDATE_HOST_SUFFIXES):
+            return False
+        path = (p.path or "").lower()
+        # github.com/.../releases/download/... or CDN object URLs
+        if "github.com" in host:
+            needle = f"/{GITHUB_OWNER.lower()}/{GITHUB_REPO.lower()}/"
+            if needle not in path:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _current_installed_version() -> str:
+    try:
+        from client_constants import VERSION
+        return _normalize_version_tag(VERSION)
+    except Exception:
+        return ""
+
+
+def check_update_availability(params: Optional[dict] = None, api_client=None) -> dict:
+    """Compare installed vs latest (no install). For remote `check_update`."""
+    params = params or {}
+    installed = _current_installed_version()
+    latest = _normalize_version_tag(params.get("tag") or "")
+    download_url = (params.get("download_url") or "").strip()
+
+    try:
+        from client_utils import create_update_manager
+        mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+        info = mgr.check_for_updates()
+        if not latest:
+            latest = _normalize_version_tag(info.get("latest_version") or "")
+        if not download_url:
+            download_url = (info.get("installer_url") or info.get("download_url") or "").strip()
+        if info.get("error") and not latest:
+            return {
+                "success": False,
+                "ok": False,
+                "error": "check_failed",
+                "detail": str(info.get("error")),
+                "update_available": False,
+                "installed": installed,
+                "latest": latest or "",
+            }
+    except Exception as e:
+        if not latest:
+            return {
+                "success": False,
+                "ok": False,
+                "error": "check_failed",
+                "detail": str(e),
+                "update_available": False,
+                "installed": installed,
+                "latest": "",
+            }
+
+    # Optional cloud public endpoint fallback
+    if not latest or not download_url:
+        try:
+            cloud = _resolve_latest_from_cloud(api_client)
+            if cloud:
+                latest = latest or _normalize_version_tag(cloud.get("tag") or cloud.get("version"))
+                download_url = download_url or (cloud.get("download_url") or "").strip()
+        except Exception:
+            pass
+
+    available = False
+    if latest and installed:
+        try:
+            from client_utils import create_update_manager
+            mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+            available = mgr._compare_versions(latest, installed) > 0
+        except Exception:
+            available = latest != installed
+    elif latest and not installed:
+        available = True
+
+    return {
+        "success": True,
+        "ok": True,
+        "update_available": bool(available),
+        "installed": installed,
+        "latest": latest,
+        "tag": f"v{latest}" if latest else "",
+        "download_url": download_url if available else "",
+        "message": "update_available" if available else "already_current",
+    }
+
+
+def _resolve_latest_from_cloud(api_client=None) -> Optional[dict]:
+    """Best-effort GET /api/public/latest-release."""
+    try:
+        import requests
+        from client_constants import API_URL
+        from client_security_utils import resolve_tls_verify
+        base = str(API_URL).rstrip("/")
+        url = f"{base}/public/latest-release"
+        if api_client and hasattr(api_client, "api_request"):
+            resp = api_client.api_request("GET", "public/latest-release", timeout=8)
+            if isinstance(resp, dict) and (resp.get("download_url") or resp.get("tag")):
+                return resp
+        r = requests.get(url, timeout=8, verify=resolve_tls_verify())
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        log(f"[SELF-UPDATE] cloud latest-release: {e}")
+    return None
+
+
+def run_self_update_command(params: Optional[dict] = None, api_client=None) -> dict:
+    """
+    Dashboard `self_update` — immediate silent install (independent of schedule).
+
+    Returns result dict for POST /api/commands/result.
+    May set restart_required=True after helper is launched (caller should exit).
+    """
+    params = dict(params or {})
+    force = bool(params.get("force", False))
+    tag = _normalize_version_tag(params.get("tag") or "")
+    download_url = (params.get("download_url") or "").strip()
+    expected_size = params.get("size")
+    try:
+        expected_size = int(expected_size) if expected_size is not None else None
+    except (TypeError, ValueError):
+        expected_size = None
+    installer_name = (params.get("installer_name") or "cloud-client-installer.exe").strip()
+    from_version = _current_installed_version()
+
+    log(
+        f"[SELF-UPDATE] begin force={force} tag={tag or '?'} "
+        f"from={from_version} triggered_by={params.get('triggered_by', '')}"
+    )
+
+    try:
+        from client_lifecycle import report_now
+        report_now(
+            "self_update_begin",
+            "dashboard_self_update",
+            {"from_version": from_version, "tag": tag, "force": force},
+            severity="info",
+            api_client=api_client,
+            token=None,
+            log_func=log,
+        )
+    except Exception:
+        pass
+
+    # Resolve URL/tag if cloud omitted them
+    if not download_url or not tag:
+        try:
+            from client_utils import create_update_manager
+            mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+            info = mgr.check_for_updates()
+            if not tag:
+                tag = _normalize_version_tag(info.get("latest_version") or "")
+            if not download_url:
+                download_url = (info.get("installer_url") or info.get("download_url") or "").strip()
+            if expected_size is None:
+                try:
+                    expected_size = int(info.get("installer_size") or 0) or None
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"[SELF-UPDATE] GitHub resolve failed: {e}")
+
+    if not download_url or not tag:
+        cloud = _resolve_latest_from_cloud(api_client)
+        if cloud:
+            tag = tag or _normalize_version_tag(cloud.get("tag") or cloud.get("version"))
+            download_url = download_url or (cloud.get("download_url") or "").strip()
+            if expected_size is None:
+                try:
+                    expected_size = int(cloud.get("size") or 0) or None
+                except Exception:
+                    pass
+
+    if not download_url:
+        _lifecycle_fail(api_client, "download_url_missing", from_version, tag)
+        return {
+            "success": False,
+            "ok": False,
+            "error": "download_failed",
+            "detail": "download_url_missing",
+            "from_version": from_version,
+            "to_version": tag,
+            "tag": f"v{tag}" if tag else "",
+        }
+
+    if not _is_allowed_update_url(download_url):
+        _lifecycle_fail(api_client, "url_not_allowed", from_version, tag)
+        return {
+            "success": False,
+            "ok": False,
+            "error": "download_failed",
+            "detail": "url_not_allowed",
+            "from_version": from_version,
+            "to_version": tag,
+            "tag": f"v{tag}" if tag else "",
+        }
+
+    # Skip if already on target (unless force)
+    if tag and from_version and tag == from_version and not force:
+        log(f"[SELF-UPDATE] already_current {from_version}")
+        return {
+            "success": True,
+            "ok": True,
+            "message": "already_current",
+            "from_version": from_version,
+            "to_version": from_version,
+            "tag": f"v{from_version}",
+        }
+
+    from client_utils import (
+        is_update_in_progress,
+        acquire_update_lock,
+        release_update_lock,
+        touch_update_lock,
+        pause_competing_updaters,
+        heal_update_machinery,
+        stage_installer_for_update,
+        launch_safe_update_install,
+    )
+    import tempfile
+    import shutil
+
+    try:
+        heal_update_machinery(log_func=log)
+    except Exception:
+        pass
+
+    if is_update_in_progress():
+        _lifecycle_fail(api_client, "busy", from_version, tag)
+        return {
+            "success": False,
+            "ok": False,
+            "error": "busy",
+            "detail": "another_update_in_progress",
+            "from_version": from_version,
+            "to_version": tag,
+            "tag": f"v{tag}" if tag else "",
+        }
+
+    acquire_update_lock("dashboard-self-update")
+    pause_competing_updaters()
+
+    temp_dir = tempfile.mkdtemp(prefix="honeypot_self_update_")
+    installer_path = os.path.join(temp_dir, installer_name or "cloud-client-installer.exe")
+    staged = None
+
+    try:
+        from client_utils import create_update_manager
+        mgr = create_update_manager(GITHUB_OWNER, GITHUB_REPO, log)
+
+        def _prog(pct):
+            if pct % 10 == 0:
+                touch_update_lock()
+                log(f"[SELF-UPDATE] download {pct}%")
+
+        downloaded = None
+        try:
+            downloaded = mgr.download_installer(download_url, _prog)
+        except Exception as e:
+            log(f"[SELF-UPDATE] download_installer: {e}")
+
+        if downloaded and os.path.isfile(downloaded):
+            try:
+                shutil.copy2(downloaded, installer_path)
+            except Exception:
+                installer_path = downloaded
+        else:
+            if not download_installer_file(download_url, installer_path):
+                release_update_lock(resume_updaters=True)
+                _lifecycle_fail(api_client, "download_failed", from_version, tag)
+                return {
+                    "success": False,
+                    "ok": False,
+                    "error": "download_failed",
+                    "detail": "installer_download_failed",
+                    "from_version": from_version,
+                    "to_version": tag,
+                    "tag": f"v{tag}" if tag else "",
+                }
+
+        touch_update_lock()
+        actual_size = os.path.getsize(installer_path) if os.path.isfile(installer_path) else 0
+        if expected_size and expected_size > 0 and actual_size > 0:
+            # Allow 2% tolerance (CDN / compression metadata)
+            if abs(actual_size - expected_size) > max(1024 * 64, int(expected_size * 0.02)):
+                release_update_lock(resume_updaters=True)
+                _lifecycle_fail(api_client, "size_mismatch", from_version, tag)
+                return {
+                    "success": False,
+                    "ok": False,
+                    "error": "download_failed",
+                    "detail": f"size_mismatch expected={expected_size} got={actual_size}",
+                    "from_version": from_version,
+                    "to_version": tag,
+                    "tag": f"v{tag}" if tag else "",
+                }
+
+        staged = stage_installer_for_update(installer_path, version=tag or "latest")
+        if not staged or not os.path.isfile(staged):
+            release_update_lock(resume_updaters=True)
+            _lifecycle_fail(api_client, "stage_failed", from_version, tag)
+            return {
+                "success": False,
+                "ok": False,
+                "error": "install_failed",
+                "detail": "stage_failed",
+                "from_version": from_version,
+                "to_version": tag,
+                "tag": f"v{tag}" if tag else "",
+            }
+
+        # Soft GUI: if interactive session, show after; else daemon-only
+        show_gui = False
+        try:
+            from client_helpers import has_interactive_user_session
+            show_gui = bool(has_interactive_user_session())
+        except Exception:
+            show_gui = False
+
+        ok = launch_safe_update_install(
+            staged,
+            silent=True,
+            show_gui_after=show_gui,
+            expect_exit_pid=os.getpid(),
+            elevate=True,
+        )
+        if not ok:
+            release_update_lock(resume_updaters=True)
+            _lifecycle_fail(api_client, "launch_helper_failed", from_version, tag)
+            return {
+                "success": False,
+                "ok": False,
+                "error": "install_failed",
+                "detail": "launch_helper_failed",
+                "from_version": from_version,
+                "to_version": tag,
+                "tag": f"v{tag}" if tag else "",
+            }
+
+        try:
+            from client_lifecycle import report_now
+            report_now(
+                "self_update_ok",
+                "helper_launched",
+                {"from_version": from_version, "to_version": tag, "show_gui": show_gui},
+                severity="info",
+                api_client=api_client,
+                token=None,
+                log_func=log,
+            )
+        except Exception:
+            pass
+
+        log(f"[SELF-UPDATE] helper launched → {tag} (restart_required)")
+        return {
+            "success": True,
+            "ok": True,
+            "message": "update_started",
+            "from_version": from_version,
+            "to_version": tag,
+            "tag": f"v{tag}" if tag else "",
+            "restart_required": True,
+        }
+
+    except Exception as e:
+        try:
+            release_update_lock(resume_updaters=True)
+        except Exception:
+            pass
+        _lifecycle_fail(api_client, str(e), from_version, tag)
+        return {
+            "success": False,
+            "ok": False,
+            "error": "install_failed",
+            "detail": str(e),
+            "from_version": from_version,
+            "to_version": tag,
+            "tag": f"v{tag}" if tag else "",
+        }
+
+
+def _lifecycle_fail(api_client, reason: str, from_version: str, tag: str) -> None:
+    try:
+        from client_lifecycle import report_now
+        report_now(
+            "self_update_failed",
+            reason,
+            {"from_version": from_version, "to_version": tag},
+            severity="error",
+            api_client=api_client,
+            token=None,
+            log_func=log,
+        )
+    except Exception:
+        pass

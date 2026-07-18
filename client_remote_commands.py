@@ -19,7 +19,7 @@ Supported commands:
   block_ip, unblock_ip, clear_firewall, logoff_user, disable_account,
   enable_account, reset_password, kill_process, stop_service, disable_service,
   emergency_lockdown, lift_lockdown, list_sessions, list_processes,
-  snapshot, collect_diagnostics
+  snapshot, collect_diagnostics, self_update, check_update
 
 Security layers:
   - Command whitelist (ALLOWED_COMMANDS)
@@ -59,7 +59,8 @@ try:
     MAX_COMMANDS_PER_MINUTE = max(10, int(_MAX_RPM))
 except Exception:
     MAX_COMMANDS_PER_MINUTE = 30
-COMMAND_EXPIRY_SECONDS = 300  # 5 minutes
+COMMAND_EXPIRY_SECONDS = 300  # 5 minutes (default)
+SELF_UPDATE_EXPIRY_SECONDS = 1800  # 30 minutes (dashboard self_update TTL)
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -74,6 +75,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "collect_diagnostics",
     "remote_stream_start", "remote_stream_stop", "remote_input",
     "remote_send_sas",
+    "self_update", "check_update",
 }
 
 # High-frequency IR commands — skip global cmd/min rate limit
@@ -92,6 +94,7 @@ _IR_URGENT_COMMANDS = frozenset({
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",
     "clear_firewall",
+    "self_update",  # dashboard "Şimdi güncelle" — don't wait on calendar
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
@@ -286,7 +289,19 @@ class RemoteCommandExecutor:
                         log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')}")
 
                     # Report (async — must not delay next IR cmd)
-                    self._report_result(cmd, result)
+                    # self_update: sync report then exit so helper can install
+                    if result.get("restart_required") and cmd_type == "self_update":
+                        self._report_result_sync(cmd, result)
+                        log("[REMOTE-CMD] self_update — exiting for installer helper")
+                        time.sleep(1.2)
+                        try:
+                            from client_self_protection import disarm_for_update
+                            disarm_for_update(reason="dashboard_self_update")
+                        except Exception:
+                            pass
+                        os._exit(0)
+                    else:
+                        self._report_result(cmd, result)
 
                 if need_health_refresh:
                     self._async_health_refresh()
@@ -413,23 +428,44 @@ class RemoteCommandExecutor:
 
         def _send():
             try:
-                cmd_id = cmd.get("command_id", "")
-                cmd_type = cmd.get("command_type", "")
-                executed_at = datetime.now(timezone.utc).isoformat()
-                payload = {
-                    "token": token,
-                    "command_id": cmd_id,
-                    "status": "completed" if result.get("success") else "failed",
-                    "result": result,
-                    "executed_at": executed_at,
-                    "execution_time_ms": result.get("execution_time_ms", 0),
-                    "signature": sign_command(token, cmd_id, cmd_type, executed_at),
-                }
-                self.api_client.api_request("POST", "commands/result", data=payload)
+                self._post_command_result(cmd, result, token)
             except Exception as e:
                 log(f"[REMOTE-CMD] Result report error: {e}")
 
         threading.Thread(target=_send, daemon=True).start()
+
+    def _report_result_sync(self, cmd: dict, result: dict, timeout: float = 8.0):
+        """Synchronous result report (needed before process exit on self_update)."""
+        if not self.api_client:
+            return
+        token = self.token_getter()
+        if not token:
+            return
+        try:
+            self._post_command_result(cmd, result, token)
+        except Exception as e:
+            log(f"[REMOTE-CMD] Sync result report error: {e}")
+
+    def _post_command_result(self, cmd: dict, result: dict, token: str):
+        cmd_id = cmd.get("command_id", "")
+        cmd_type = cmd.get("command_type", "")
+        executed_at = datetime.now(timezone.utc).isoformat()
+        status = result.get("status")
+        if not status:
+            status = "completed" if result.get("success") else "failed"
+        # Prefer prompt-shaped payload fields inside result
+        payload = {
+            "token": token,
+            "command_id": cmd_id,
+            "status": status,
+            "result": result,
+            "executed_at": executed_at,
+            "execution_time_ms": result.get("execution_time_ms", 0),
+            "signature": sign_command(token, cmd_id, cmd_type, executed_at),
+        }
+        if result.get("error") and status == "failed":
+            payload["error"] = result.get("error")
+        self.api_client.api_request("POST", "commands/result", data=payload)
 
     # ── Validation ────────────────────────────────────────────────
 
@@ -448,17 +484,33 @@ class RemoteCommandExecutor:
         if cmd_type not in ALLOWED_COMMANDS:
             return f"Unknown command: {cmd_type}"
 
-        # 2. Expired?  API may send issued_at, requested_at, or created_at
-        issued_at = cmd.get("issued_at") or cmd.get("requested_at") or cmd.get("created_at") or ""
-        if issued_at:
+        # 2. Expired?
+        # Prefer cloud expires_at when present (self_update TTL = 30 min)
+        expires_at = cmd.get("expires_at") or ""
+        if expires_at:
             try:
-                issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - issued).total_seconds()
-                if age > COMMAND_EXPIRY_SECONDS:
+                exp = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > exp:
                     self._stats["commands_expired"] += 1
-                    return f"Command expired ({int(age)}s old, max {COMMAND_EXPIRY_SECONDS}s)"
+                    return "Command expired (past expires_at)"
             except (ValueError, TypeError):
                 pass
+        else:
+            issued_at = cmd.get("issued_at") or cmd.get("requested_at") or cmd.get("created_at") or ""
+            if issued_at:
+                try:
+                    issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+                    age = (datetime.now(timezone.utc) - issued).total_seconds()
+                    max_age = (
+                        SELF_UPDATE_EXPIRY_SECONDS
+                        if cmd_type in ("self_update", "check_update")
+                        else COMMAND_EXPIRY_SECONDS
+                    )
+                    if age > max_age:
+                        self._stats["commands_expired"] += 1
+                        return f"Command expired ({int(age)}s old, max {max_age}s)"
+                except (ValueError, TypeError):
+                    pass
 
         # 3. Protected target checks — accept both "parameters" and "params"
         params = cmd.get("parameters") or cmd.get("params") or {}
@@ -1241,6 +1293,34 @@ class RemoteCommandExecutor:
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _cmd_check_update(self, params: dict) -> dict:
+        """Compare installed vs latest — no install."""
+        try:
+            from client_updater import check_update_availability
+            return check_update_availability(params, api_client=self.api_client)
+        except Exception as e:
+            return {
+                "success": False,
+                "ok": False,
+                "error": "check_failed",
+                "detail": str(e),
+                "update_available": False,
+            }
+
+    def _cmd_self_update(self, params: dict) -> dict:
+        """Dashboard 'Şimdi güncelle' — immediate silent self-update."""
+        try:
+            from client_updater import run_self_update_command
+            return run_self_update_command(params, api_client=self.api_client)
+        except Exception as e:
+            log(f"[REMOTE-CMD] self_update error: {e}")
+            return {
+                "success": False,
+                "ok": False,
+                "error": "install_failed",
+                "detail": str(e),
+            }
 
     # ── Fallback Helpers ──────────────────────────────────────────
 

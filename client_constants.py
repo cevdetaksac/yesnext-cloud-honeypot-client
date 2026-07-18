@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.10"  # GUI snappy: no IPC on UI thread, defer motors/prewarm, PERF logs
+VERSION = "4.5.11"  # Dashboard self_update / check_update remote commands
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")

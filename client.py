@@ -2494,8 +2494,22 @@ class CloudHoneypotClient:
 
         self.start_single_instance_server()
 
+        # Prefer frontend if daemon already answers (avoid dual motor / GUI stutter)
+        if not getattr(self, "frontend_only", False) and not getattr(self, "daemon_is_active", False):
+            try:
+                from client_daemon_ipc import ping
+                if ping(timeout=0.5):
+                    self.frontend_only = True
+                    self.daemon_is_active = True
+                    log("[IPC] Daemon PING in build_gui — frontend_only (skip motor stacks)")
+            except Exception:
+                pass
+
         # Background services - skip if daemon is running (UI-only mode)
-        if not getattr(self, 'daemon_is_active', False):
+        ui_only = bool(
+            getattr(self, "frontend_only", False) or getattr(self, "daemon_is_active", False)
+        )
+        if not ui_only:
             threading.Thread(target=self.heartbeat_loop, daemon=True).start()
             try:
                 threading.Thread(target=self.report_open_ports_loop, daemon=True).start()
@@ -2513,11 +2527,14 @@ class CloudHoneypotClient:
             start_watchdog_if_needed(WATCHDOG_TOKEN_FILE, log)
         except Exception as e:
             log(f"watchdog start error: {e}")
-        # Hourly update checker
-        try:
-            self.start_update_watchdog()
-        except Exception as e:
-            log(f"update watchdog thread error: {e}")
+        # Hourly update checker — daemon owns this in frontend mode
+        if not ui_only:
+            try:
+                self.start_update_watchdog()
+            except Exception as e:
+                log(f"update watchdog thread error: {e}")
+        else:
+            log("🔄 UI-only mode: Skipping update watchdog (daemon handles this)")
 
         # Language from Windows UI (first run) or saved user preference
         self.lang = resolve_app_language()

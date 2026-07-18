@@ -33,9 +33,18 @@ if TRY_TRAY:
 
 # ===================== TRAY MANAGEMENT ===================== #
 
+# Cached tray images — reopening .ico on every health tick causes UI stutter
+_TRAY_ICON_CACHE = {}
+
+
 def tray_make_image(active: bool) -> Image.Image:
-    """Load appropriate tray icon based on protection status"""
+    """Load appropriate tray icon based on protection status (cached)."""
     try:
+        key = bool(active)
+        cached = _TRAY_ICON_CACHE.get(key)
+        if cached is not None:
+            return cached
+
         from client_utils import get_resource_path
         
         # Determine icon file based on state
@@ -47,8 +56,11 @@ def tray_make_image(active: bool) -> Image.Image:
         # Try to load from file system first
         if os.path.exists(icon_file):
             from PIL import Image
-            log(f"Loading tray icon: {icon_file}")
-            return Image.open(icon_file)
+            img = Image.open(icon_file)
+            # Copy so pystray mutations cannot corrupt cache
+            img = img.copy()
+            _TRAY_ICON_CACHE[key] = img
+            return img
         
         # Fallback to programmatic generation
         from PIL import Image, ImageDraw
@@ -61,8 +73,7 @@ def tray_make_image(active: bool) -> Image.Image:
         # Draw background circle
         center = size // 2
         radius = int(size * 0.4)
-        draw.ellipse([center - radius, center - radius, 
-                      center + radius, center + radius], 
+        draw.ellipse([center - radius, center - radius, center + radius, center + radius], 
                      fill=bg_color)
         
         # Draw simplified cloud shape
@@ -72,6 +83,7 @@ def tray_make_image(active: bool) -> Image.Image:
                       center + cloud_radius, center + cloud_radius],
                      fill=cloud_color)
         
+        _TRAY_ICON_CACHE[key] = img
         return img
         
     except Exception as e:
@@ -136,6 +148,13 @@ class TrayManager:
                 mode = self.app_instance.get_protection_mode()
         except Exception:
             mode = "full" if is_active else "inactive"
+
+        # Skip disk/PIL work when nothing changed (health check calls this often)
+        prev = getattr(self, "_tray_last_state", None)
+        new_state = (bool(is_active), str(mode))
+        if prev == new_state and self.tray_icon:
+            return
+        self._tray_last_state = new_state
 
         # Update tray icon
         if TRY_TRAY and self.tray_icon:

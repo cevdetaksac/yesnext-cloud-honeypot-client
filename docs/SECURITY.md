@@ -4,8 +4,10 @@
 
 | Version | Supported |
 |---------|-----------|
-| 4.4.x   | Yes       |
-| < 4.4   | Upgrade recommended (TLS, token handling fixes) |
+| **4.5.66+** | Yes (production floor — see contract `FLEET.md`) |
+| 4.5.x | Yes |
+| 4.4.x | Upgrade recommended |
+| < 4.4 | Upgrade required |
 
 ## Reporting a Vulnerability
 
@@ -18,7 +20,14 @@ Please include:
 
 We aim to respond within **72 hours**.
 
-## Threat Model
+## Shared contract (SoT)
+
+Command HMAC, destructive-command dashboard confirmation, Bearer auth:
+
+- [`../../honeypot-contract/api/03-control-websocket.md`](../../honeypot-contract/api/03-control-websocket.md)
+- [`../../honeypot-contract/api/01-auth.md`](../../honeypot-contract/api/01-auth.md)
+
+## Threat Model (client-local)
 
 ### Assets
 - Client API token (`token.dat`, DPAPI-encrypted)
@@ -30,11 +39,11 @@ We aim to respond within **72 hours**.
 - **Central API** → trusted when TLS verification is enabled
 - **Local machine users** → may decrypt `LOCAL_MACHINE` DPAPI tokens
 
-### Client Protections (v4.4+)
+### Client Protections
 - TLS certificate verification enabled by default (`api.tls_verify`)
-- Bearer token in `Authorization` header (canonical); `?token=` only if `api.legacy_token_query=true` (rollback)
+- Bearer token in `Authorization` header; `?token=` only if `api.legacy_token_query=true` (rollback)
 - Sensitive field redaction in application logs
-- HMAC command signing (`security.command_signing`)
+- HMAC command signing (`security.command_signing`) — contract `api/03`
 - Command whitelist, expiry, rate limits, protected resources
 
 ## Token Handling
@@ -42,10 +51,6 @@ We aim to respond within **72 hours**.
 - Tokens are stored with Windows DPAPI (`CRYPTPROTECT_LOCAL_MACHINE`)
 - Never commit `token.dat`, `client.log`, or `watchdog.token`
 - Rotate token via dashboard if logs may have been exposed
-
-## Remote Commands
-
-Destructive commands (`reset_password`, `emergency_lockdown`, `disable_account`) require dashboard confirmation on the server side. Client enforces whitelist + protected targets.
 
 ## Responsible Disclosure
 

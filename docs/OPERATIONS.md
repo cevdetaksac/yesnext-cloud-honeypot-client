@@ -1,13 +1,8 @@
 # Operations Guide
 
-## Deployment Phases
+## Shared contract
 
-| Phase | Version | Contents | Deploy |
-|-------|---------|----------|--------|
-| 1 | 4.4.0 | TLS, token headers, log redaction, SECURITY.md | Client installer |
-| 2 | 4.4.0 | Tests, CI pipeline | GitHub Actions |
-| 3 | 4.4.0 | HTTP/SMB honeypots, bind_address, webhooks | Client + config |
-| 4 | 4.4.0 | Modern UI | Client installer |
+API / agent davranış SoT: [`../../honeypot-contract`](../../honeypot-contract) (`VERSION` ≥ **1.1.2**, `FLEET.md`).
 
 ## Build & Release
 
@@ -28,30 +23,28 @@ Publish via GitHub Releases (`cevdetaksac/yesnext-cloud-honeypot-client`).
 
 ## SIEM Integration
 
-Client sends events to central API. For SIEM export:
-
-1. **API webhooks** — configure `notifications.webhook_url` in `client_config.json`
-2. **Local logs** — `%APPDATA%\YesNext\CloudHoneypotClient\threats.log`
-3. **Windows Event Log** — v4 EventLog watcher forwards to API `/api/alerts/urgent`
-
-Forward `threats.log` via your log agent (Winlogbeat, NXLog, etc.).
-
-## Linux Notes
-
-`client_firewall.py` supports Linux (ipset/iptables). Honeypot decoys are Windows-focused; Linux agent is firewall-only today.
+1. **Central API** — urgent/batch alerts (`POST /api/alerts/urgent` …) — contract `agent/threat-engine.md`
+2. **Optional local webhook** — `notifications.webhook_url` in `client_config.json`
+3. **Local logs** — `%APPDATA%\YesNext\CloudHoneypotClient\threats.log` (or ProgramData paths)
+4. Forward via Winlogbeat / NXLog as needed
 
 ## Token Rotation
 
 If `client.log` was exposed:
 
 1. Revoke token in dashboard
-2. Delete `%APPDATA%\YesNext\CloudHoneypotClient\token.dat`
+2. Delete ProgramData `token.dat` (`%ProgramData%\YesNext\CloudHoneypotClient\`)
 3. Restart client to re-register
 
-## Backend Coordination (v4.4)
+## Backend / fleet defaults (current)
 
-Enable on server when ready:
+Contract defaults (not “future work”):
 
-- `Authorization: Bearer` header support
-- Set client `api.legacy_token_query: false`
-- Command HMAC signing (see `client_security_utils.sign_command`)
+- `Authorization: Bearer` — agent API’de `?token=` yok
+- `api.legacy_token_query: false`
+- Command HMAC — `security.command_signing` (default true); see contract `api/03-control-websocket.md`
+- Destructive IR — dashboard confirmation on cloud
+
+## Linux Notes
+
+`client_firewall.py` supports Linux (ipset/iptables). Honeypot decoys are Windows-focused; Linux agent is firewall-only today.

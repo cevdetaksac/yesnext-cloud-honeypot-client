@@ -27,7 +27,7 @@ Yoksa: kullanıcıya clone/submodule etmesini söyle; uydurma API yazma.
 
 ## SoT
 
-- Fleet matrix: `FLEET.md` · Production floor: client ≥ **4.5.66** · Contract `VERSION` **1.1.1+**
+- Fleet matrix: `FLEET.md` · Production floor: client ≥ **4.5.66** · Contract `VERSION` **1.1.2+**
 - `agent/CLIENT.md`, `register-protection.md`, `ransomware-shield.md`, `remote-input.md`
 - `api/08-architecture.md`, `api/09-threat-intel.md`, `api/03-control-websocket.md`
 - Client `docs/api/*` stub’dır — düzenleme sadece `honeypot-contract` içinde

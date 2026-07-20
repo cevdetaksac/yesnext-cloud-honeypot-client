@@ -5,8 +5,8 @@ Cloud Honeypot Client
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 
 Son Sürüm Değişiklikleri
-- Tam liste: [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (v4.5.44 güncel)
-- Cloud API sözleşmeleri: [`docs/`](docs/README.md)
+- Tam liste: [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (v4.5.66 güncel)
+- Cloud API sözleşmeleri: [`../honeypot-contract`](../honeypot-contract) (`docs/` stub + pointer)
 
 Özellikler
 - Ters tünel: Seçili portları TLS üzerinden sunucuya taşır.

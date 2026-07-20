@@ -1800,7 +1800,12 @@ def _update_helper_staging_dir() -> str:
 
 
 def stage_update_install_helper() -> Optional[str]:
-    """Copy update-and-install.ps1 to ProgramData so INSTDIR overwrite cannot break it."""
+    """Copy update-and-install.ps1 to ProgramData so INSTDIR overwrite cannot break it.
+
+    Windows PowerShell 5.1 mis-parses UTF-8 scripts that contain em-dashes (U+2014)
+    when saved without BOM — the try/catch block then fails to parse and the helper
+    never runs (launcher start only). Always stage ASCII-normalized text.
+    """
     import shutil
 
     src_candidates = [
@@ -1823,10 +1828,29 @@ def stage_update_install_helper() -> Optional[str]:
         return None
     dst = os.path.join(_update_helper_staging_dir(), "update-and-install.ps1")
     try:
-        shutil.copy2(src, dst)
-        return dst
+        raw = open(src, "r", encoding="utf-8", errors="replace").read()
+        # Normalize typographic dashes/quotes that break PS 5.1 UTF-8 parsing
+        for bad, good in (
+            ("\u2014", "-"),
+            ("\u2013", "-"),
+            ("\u2018", "'"),
+            ("\u2019", "'"),
+            ("\u201c", '"'),
+            ("\u201d", '"'),
+            ("\u2026", "..."),
+            ("\u00a0", " "),
+        ):
+            raw = raw.replace(bad, good)
+        raw = raw.encode("ascii", errors="replace").decode("ascii")
+        with open(dst, "w", encoding="ascii", newline="\n") as fh:
+            fh.write(raw)
+        return dst if os.path.isfile(dst) else None
     except OSError:
-        return src if os.path.isfile(src) else None
+        try:
+            shutil.copy2(src, dst)
+            return dst
+        except OSError:
+            return src if os.path.isfile(src) else None
 
 
 def _shell_execute_runas(file_path: str, params: str = "", *, show_cmd: int = 0) -> int:
@@ -1990,9 +2014,11 @@ def launch_safe_update_install(
                     new = fh.read()
                 if not new:
                     return False
-                if launch_token in new:
+                if launch_token in new and "update-and-install start" in new:
                     return True
-                if "launcher start" in new or "update-and-install start" in new:
+                # Require real helper start — launcher-only was a false positive when
+                # update-and-install.ps1 failed to parse (Unicode em-dash vs PS 5.1).
+                if "update-and-install start" in new:
                     return True
             except Exception:
                 return False

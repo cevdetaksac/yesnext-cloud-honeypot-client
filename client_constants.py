@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.53"  # Frameless detail popups (no double title/close); helper-log updater
+VERSION = "4.5.54"  # Fix update-and-install.ps1 ASCII (PS 5.1 em-dash parse break)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

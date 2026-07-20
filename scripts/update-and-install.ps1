@@ -97,7 +97,7 @@ function Stop-HoneypotTasks {
 }
 
 function Restore-HoneypotTasks {
-    # Re-enable core tasks — MUST run after every update (success OR fail).
+    # Re-enable core tasks - MUST run after every update (success OR fail).
     # Stop-HoneypotTasks disables these; leaving them disabled = no daemon forever.
     $names = @(
         "CloudHoneypot-SilentUpdater",
@@ -366,13 +366,13 @@ $timeoutSec = [Math]::Max(60, [int]$InstallerTimeoutSec)
 Write-UpLog "Starting installer (timeout=${timeoutSec}s)..."
 try {
     # Interactive: show NSIS UI. Silent: /S args above.
-    # Do NOT use -Wait alone — a hung NSIS (Defender nsExec / mid-install Exec)
+    # Do NOT use -Wait alone - a hung NSIS (Defender nsExec / mid-install Exec)
     # blocked self-update forever with log stuck on "Starting installer (wait)...".
     $p = Start-Process -FilePath $InstallerPath -ArgumentList $argList -PassThru
     if (-not $p) {
         Fail-Update 4 "ERROR: Installer failed to start (null process)"
     }
-    Write-UpLog "Installer PID=$($p.Id) — waiting up to ${timeoutSec}s..."
+    Write-UpLog "Installer PID=$($p.Id) - waiting up to ${timeoutSec}s..."
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     $finished = $false
     while ((Get-Date) -lt $deadline) {
@@ -384,7 +384,7 @@ try {
         try { $p.Refresh() } catch {}
     }
     if (-not $finished) {
-        Write-UpLog "ERROR: Installer hung after ${timeoutSec}s — killing PID $($p.Id) + children"
+        Write-UpLog "ERROR: Installer hung after ${timeoutSec}s - killing PID $($p.Id) + children"
         try { & taskkill.exe /F /T /PID $p.Id 2>$null | Out-Null } catch {}
         try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
         # Old NSIS may have started daemon mid-install; clear before Fail-Update restart
@@ -430,7 +430,7 @@ try {
     $ct = Start-Process -FilePath $exe -ArgumentList "--create-tasks" -PassThru -WindowStyle Hidden
     if ($ct) {
         if (-not $ct.WaitForExit(120000)) {
-            Write-UpLog "WARN: --create-tasks hung — killing"
+            Write-UpLog "WARN: --create-tasks hung - killing"
             try { Stop-Process -Id $ct.Id -Force -ErrorAction SilentlyContinue } catch {}
             Restore-HoneypotTasks
         } elseif ($ct.ExitCode -ne 0) {
@@ -446,11 +446,11 @@ try {
 Clear-UpdateLock
 try { Write-UpdateUiStatus -Phase "done" -Detail "install_complete" } catch {}
 
-# CRITICAL: Stop-HoneypotTasks disabled Background+Watchdog — always restore + start motor
+# CRITICAL: Stop-HoneypotTasks disabled Background+Watchdog - always restore + start motor
 [void](Ensure-DaemonMotor -ExePath $exe)
 
 if (-not $Silent) {
-    # Interactive NSIS path — visible onboarding/GUI
+    # Interactive NSIS path - visible onboarding/GUI
     Write-UpLog "Launching GUI..."
     try {
         Start-Process -FilePath $exe -ArgumentList "--show-gui" -WorkingDirectory $InstallDir
@@ -469,12 +469,12 @@ if (-not $Silent) {
         } catch {}
     }
     if ($wantTray) {
-        Write-UpLog "Interactive session — starting Tray after silent update..."
+        Write-UpLog "Interactive session - starting Tray after silent update..."
         try {
             schtasks /change /tn "CloudHoneypot-Tray" /enable 2>$null | Out-Null
             schtasks /run /tn "CloudHoneypot-Tray" 2>$null | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                Write-UpLog "WARN: CloudHoneypot-Tray /run failed (exit=$LASTEXITCODE) — trying --mode=tray"
+                Write-UpLog "WARN: CloudHoneypot-Tray /run failed (exit=$LASTEXITCODE) - trying --mode=tray"
                 Start-Process -FilePath $exe -ArgumentList "--mode=tray" -WorkingDirectory $InstallDir
             }
         } catch {

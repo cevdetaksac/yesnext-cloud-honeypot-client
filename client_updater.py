@@ -1283,9 +1283,7 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             if os.path.isfile(log_path):
                 with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
                     tail = fh.read()[-2400:]
-                helper_ok = (
-                    "launcher start" in tail or "update-and-install start" in tail
-                )
+                helper_ok = "update-and-install start" in tail
             if not helper_ok:
                 release_update_lock(resume_updaters=True)
                 from client_update_ui import set_update_ui_status

@@ -1,3 +1,12 @@
+# v4.5.54
+
+## Fix: helper script never ran (Unicode broke PowerShell 5.1)
+- `update-and-install.ps1` contained em-dashes (U+2014). PS 5.1 UTF-8-without-BOM mis-parsed try/catch → launcher wrote `launcher start` then died; install never began.
+- Script is ASCII-only; staging normalizes dashes/quotes when copying to ProgramData.
+- Success now requires `update-and-install start` (not launcher-only).
+
+---
+
 # v4.5.53
 
 ## UI: detail popup double title bar

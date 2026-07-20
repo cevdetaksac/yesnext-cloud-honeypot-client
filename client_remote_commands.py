@@ -9,15 +9,16 @@ generalised successor of the existing pending-blocks pattern in
 client_firewall.py.
 
 Flow:
-  1. Poll GET /api/commands/pending?token=X  every ~1 second (IR/stream)
-  2. Coalesce duplicate remote_stream_start (latest wins; older → cancelled)
-  3. Validate command (type, expiry, protected targets)
-  4. Execute via AutoResponse / subprocess
-  5. Report result POST /api/commands/result
+  1. Prefer control WS push (wss://…/ws/agent/control) for instant commands
+  2. Fallback / safety: Poll GET /api/commands/pending (Bearer) 
+  3. Coalesce duplicate remote_stream_start (latest wins; older → cancelled)
+  4. Validate command (type, expiry, protected targets)
+  5. Execute via AutoResponse / subprocess
+  6. Report result POST /api/commands/result (+ WS command_result dual-send)
 
 Supported commands:
-  block_ip, unblock_ip, clear_firewall, logoff_user, disable_account,
-  enable_account, reset_password, kill_process, stop_service, disable_service,
+  block_ip, unblock_ip, clear_firewall, logoff_user, contain_user, disable_account,
+  disable_all_users, enable_account, reset_password, kill_process, stop_service, disable_service,
   emergency_lockdown, lift_lockdown, list_sessions, list_processes,
   snapshot, collect_diagnostics, self_update, check_update
 
@@ -51,9 +52,14 @@ except Exception:
     POLL_INTERVAL = 1
 try:
     from client_constants import REMOTE_CMD_IR_POLL_INTERVAL as _IR_POLL
-    IR_POLL_INTERVAL = max(1, int(_IR_POLL))
+    IR_POLL_INTERVAL = max(0.25, float(_IR_POLL))
 except Exception:
-    IR_POLL_INTERVAL = 1
+    IR_POLL_INTERVAL = 0.5
+try:
+    from client_constants import REMOTE_CMD_IR_STICKY_SECONDS as _IR_STICKY
+    IR_STICKY_SECONDS = max(5, float(_IR_STICKY))
+except Exception:
+    IR_STICKY_SECONDS = 45
 try:
     from client_constants import REMOTE_CMD_MAX_PER_MINUTE as _MAX_RPM
     MAX_COMMANDS_PER_MINUTE = max(10, int(_MAX_RPM))
@@ -67,6 +73,8 @@ CREATE_NO_WINDOW = 0x08000000
 ALLOWED_COMMANDS: Set[str] = {
     "block_ip", "unblock_ip", "clear_firewall",
     "logoff_user", "disable_account", "enable_account", "reset_password",
+    "contain_user",  # IR: logoff + password reset (+ optional disable) in one shot
+    "disable_all_users",  # IR panic: disable every local SAM user (excl. machine IDs)
     "kill_process", "block_process",
     "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
@@ -87,22 +95,23 @@ _STREAM_COMMANDS = frozenset({
 # Incident-response: always fast poll + no rate limit (breach containment)
 _IR_URGENT_COMMANDS = frozenset({
     "kill_process", "block_process",
-    "logoff_user",
+    "logoff_user", "contain_user",
     "block_ip", "unblock_ip",
-    "disable_account", "reset_password",
+    "disable_account", "disable_all_users", "reset_password",
     "stop_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",
     "clear_firewall",
-    "self_update",  # dashboard "Şimdi güncelle" — don't wait on calendar
+    "self_update", "check_update",  # dashboard update — same urgency as IR
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
 CRITICAL_POLL_INTERVAL = IR_POLL_INTERVAL
 
+# Only OS machine identities — never IR-block real users (incl. Administrator).
+# Compromised Administrator must be logoff + password-reset from dashboard instantly.
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
-    "ADMINISTRATOR", "DEFAULTACCOUNT", "GUEST",
 }
 
 PROTECTED_PROCESSES: Set[str] = {
@@ -118,7 +127,18 @@ PROTECTED_SERVICES: Set[str] = {
 # Commands that require dashboard-side confirmation before reaching here
 REQUIRES_CONFIRMATION: Set[str] = {
     "emergency_lockdown", "reset_password", "disable_account",
+    "disable_all_users", "contain_user",
 }
+
+# Hard-skip only (AGENT_DISABLE_ALL_USERS_PROMPT) — Administrator is NOT here
+_SKIP_DISABLE_ALWAYS: Set[str] = {
+    "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
+    "WDAGUTILITYACCOUNT", "DEFAULTACCOUNT",
+}
+
+# Concurrent disable_all_users lock
+_disable_all_lock = threading.Lock()
+_disable_all_busy = False
 
 
 # ── Remote Command Executor ──────────────────────────────────────
@@ -153,6 +173,11 @@ class RemoteCommandExecutor:
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
         self._next_poll_sleep = POLL_INTERVAL
+        self._ir_until = 0.0  # sticky fast-poll window after IR
+        self._exec_lock = threading.Lock()
+        self._seen_cmd_ids: Dict[str, float] = {}  # command_id → seen_at
+        self._seen_lock = threading.Lock()
+        self._control_ws = None
 
         # Remote desktop screen mirror (lazy init)
         self._remote_desktop = None
@@ -167,7 +192,9 @@ class RemoteCommandExecutor:
             "commands_failed": 0,
             "commands_rejected": 0,
             "commands_expired": 0,
+            "commands_deduped": 0,
             "poll_errors": 0,
+            "control_ws": False,
         }
 
         # Command history (last 50)
@@ -176,7 +203,7 @@ class RemoteCommandExecutor:
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def start(self):
-        """Start the polling thread."""
+        """Start HTTP poll + control WebSocket (push)."""
         if self._running:
             return
         self._running = True
@@ -186,12 +213,29 @@ class RemoteCommandExecutor:
             daemon=True,
         )
         self._poll_thread.start()
+        try:
+            from client_control_ws import AgentControlWebSocket
+            self._control_ws = AgentControlWebSocket(
+                api_client=self.api_client,
+                token_getter=self.token_getter,
+                on_command=lambda cmd: self.handle_incoming_command(cmd, source="ws"),
+            )
+            self._control_ws.start()
+        except Exception as e:
+            log(f"[REMOTE-CMD] control WS start failed (HTTP poll only): {e}")
+            self._control_ws = None
         log(f"[REMOTE-CMD] 🚀 Remote command executor started "
-            f"(poll={POLL_INTERVAL}s, IR={IR_POLL_INTERVAL}s)")
+            f"(poll={POLL_INTERVAL}s, IR={IR_POLL_INTERVAL}s, control_ws=on)")
 
     def stop(self):
-        """Stop polling and remote desktop stream."""
+        """Stop polling, control WS, and remote desktop stream."""
         self._running = False
+        try:
+            if self._control_ws:
+                self._control_ws.stop()
+        except Exception:
+            pass
+        self._control_ws = None
         try:
             if self._remote_desktop:
                 self._remote_desktop.stop(reason="executor_stop")
@@ -200,7 +244,13 @@ class RemoteCommandExecutor:
         log("[REMOTE-CMD] ✅ Stopped")
 
     def get_stats(self) -> dict:
-        return dict(self._stats)
+        st = dict(self._stats)
+        try:
+            if self._control_ws:
+                st["control_ws"] = self._control_ws.get_stats()
+        except Exception:
+            st["control_ws"] = False
+        return st
 
     def get_history(self) -> List[dict]:
         return list(self._history)
@@ -208,11 +258,10 @@ class RemoteCommandExecutor:
     # ── Polling Loop ──────────────────────────────────────────────
 
     def _poll_loop(self):
-        """Main polling loop — fetches and executes pending commands."""
+        """HTTP pending poll — safety net; primary path is control WS push."""
         while self._running:
             try:
                 commands = self._fetch_pending()
-                # Multiple remote_stream_start in one batch → keep latest only
                 commands, cancelled_starts = self._coalesce_stream_starts(commands)
                 for stale in cancelled_starts:
                     self._stats["commands_received"] += 1
@@ -226,12 +275,10 @@ class RemoteCommandExecutor:
                         "message": "Superseded by a newer remote_stream_start in the same poll batch",
                     })
 
-                # IR first in the same batch (kill/logoff before diagnostics)
                 commands = self._prioritize_commands(commands)
                 saw_ir = False
                 need_health_refresh = False
                 for cmd in commands:
-                    self._stats["commands_received"] += 1
                     cmd_type = cmd.get("command_type", "")
                     prio = str(cmd.get("priority", "") or "").lower()
                     is_ir = (
@@ -240,82 +287,190 @@ class RemoteCommandExecutor:
                     )
                     if is_ir:
                         saw_ir = True
-
-                    # Validate
-                    rejection = self._validate(cmd)
-                    if rejection:
-                        log(f"[REMOTE-CMD] ❌ Rejected: {cmd.get('command_type', '?')} — {rejection}")
-                        self._stats["commands_rejected"] += 1
-                        self._report_result(cmd, {
-                            "success": False,
-                            "error": rejection,
-                            "status": "rejected",
-                        })
-                        continue
-
-                    # Rate limit — never throttle IR / stream
-                    if (cmd_type not in _STREAM_COMMANDS
-                            and cmd_type not in _IR_URGENT_COMMANDS
-                            and not self._check_rate_limit()):
-                        log("[REMOTE-CMD] ⚠️ Rate limit — skipping command")
-                        self._stats["commands_rejected"] += 1
-                        continue
-
-                    # Execute
-                    result = self._execute(cmd)
-
-                    # Track
-                    if cmd_type not in _STREAM_COMMANDS and cmd_type not in _IR_URGENT_COMMANDS:
-                        self._cmd_timestamps.append(time.time())
-                    entry = {
-                        "command_type": cmd.get("command_type", ""),
-                        "command_id": cmd.get("command_id", ""),
-                        "parameters": cmd.get("parameters") or cmd.get("params") or {},
-                        "result": result,
-                        "executed_at": time.time(),
-                    }
-                    self._history.append(entry)
-
-                    if result.get("success"):
-                        self._stats["commands_executed"] += 1
-                        if cmd_type != "remote_input":
-                            log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')}")
-                        if cmd_type in ("kill_process", "logoff_user", "block_process",
-                                        "stop_service", "disable_service",
-                                        "emergency_lockdown"):
-                            need_health_refresh = True
-                    else:
-                        self._stats["commands_failed"] += 1
-                        log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')}")
-
-                    # Report (async — must not delay next IR cmd)
-                    # self_update: sync report then exit so helper can install
-                    if result.get("restart_required") and cmd_type == "self_update":
-                        self._report_result_sync(cmd, result)
-                        log("[REMOTE-CMD] self_update — exiting for installer helper")
-                        time.sleep(1.2)
-                        try:
-                            from client_self_protection import disarm_for_update
-                            disarm_for_update(reason="dashboard_self_update")
-                        except Exception:
-                            pass
-                        os._exit(0)
-                    else:
-                        self._report_result(cmd, result)
+                    outcome = self.handle_incoming_command(cmd, source="poll")
+                    if outcome.get("health_refresh"):
+                        need_health_refresh = True
 
                 if need_health_refresh:
                     self._async_health_refresh()
 
-                # Stay on IR poll cadence after urgent work (and always ≤ default)
-                self._next_poll_sleep = (
-                    IR_POLL_INTERVAL if saw_ir else POLL_INTERVAL
-                )
+                if saw_ir:
+                    self._ir_until = time.time() + IR_STICKY_SECONDS
+
+                # WS healthy → slower HTTP safety poll (Faz 1 dual delivery)
+                ws_hint = None
+                try:
+                    if self._control_ws:
+                        ws_hint = self._control_ws.poll_interval_hint()
+                except Exception:
+                    ws_hint = None
+                if saw_ir or time.time() < self._ir_until:
+                    self._next_poll_sleep = IR_POLL_INTERVAL
+                elif ws_hint:
+                    self._next_poll_sleep = max(float(ws_hint), float(POLL_INTERVAL))
+                else:
+                    self._next_poll_sleep = POLL_INTERVAL
 
             except Exception as e:
                 self._stats["poll_errors"] += 1
                 log(f"[REMOTE-CMD] Poll error: {e}")
 
             time.sleep(self._next_poll_sleep)
+
+    def _remember_command_id(self, cmd_id: str) -> bool:
+        """Return True if this command_id was already seen (dedup)."""
+        if not cmd_id:
+            return False
+        now = time.time()
+        with self._seen_lock:
+            # prune > 1h
+            stale = [k for k, ts in self._seen_cmd_ids.items() if now - ts > 3600]
+            for k in stale:
+                self._seen_cmd_ids.pop(k, None)
+            if cmd_id in self._seen_cmd_ids:
+                return True
+            self._seen_cmd_ids[cmd_id] = now
+            return False
+
+    def handle_incoming_command(self, cmd: dict, source: str = "poll") -> dict:
+        """Shared execute path for HTTP poll and control WS push.
+
+        Returns summary dict: {ok, skipped, health_refresh, ...}
+        """
+        out = {"ok": False, "skipped": False, "health_refresh": False, "source": source}
+        if not isinstance(cmd, dict):
+            return out
+
+        cmd_id = str(cmd.get("command_id") or cmd.get("id") or "")
+        cmd_type = str(cmd.get("command_type") or cmd.get("type") or "")
+        if cmd_type and not cmd.get("command_type"):
+            cmd = dict(cmd)
+            cmd["command_type"] = cmd_type
+        if cmd_id and not cmd.get("command_id"):
+            cmd = dict(cmd)
+            cmd["command_id"] = cmd_id
+
+        if cmd_id and self._remember_command_id(cmd_id):
+            self._stats["commands_deduped"] += 1
+            log(f"[REMOTE-CMD] dedup skip {cmd_type} id={cmd_id} source={source}")
+            out["skipped"] = True
+            return out
+
+        # Serialize execute so poll + WS never overlap
+        with self._exec_lock:
+            return self._run_one_command_locked(cmd, source)
+
+    def _run_one_command_locked(self, cmd: dict, source: str) -> dict:
+        out = {"ok": False, "skipped": False, "health_refresh": False, "source": source}
+        self._stats["commands_received"] += 1
+        cmd_type = cmd.get("command_type", "")
+        prio = str(cmd.get("priority", "") or "").lower()
+        is_ir = (
+            prio in ("critical", "high", "urgent")
+            or cmd_type in _IR_URGENT_COMMANDS
+        )
+
+        # Optional quick ack on WS before validate/execute
+        try:
+            cid = cmd.get("command_id", "")
+            if cid and self._control_ws and self._control_ws.connected:
+                self._control_ws.send_ack(str(cid), state="received")
+        except Exception:
+            pass
+
+        rejection = self._validate(cmd)
+        if rejection:
+            log(f"[REMOTE-CMD] ❌ Rejected: {cmd.get('command_type', '?')} — {rejection} ({source})")
+            self._stats["commands_rejected"] += 1
+            self._report_result(cmd, {
+                "success": False,
+                "error": rejection,
+                "status": "rejected",
+            })
+            return out
+
+        if (cmd_type not in _STREAM_COMMANDS
+                and cmd_type not in _IR_URGENT_COMMANDS
+                and not self._check_rate_limit()):
+            log(f"[REMOTE-CMD] ⚠️ Rate limit — skipping ({source})")
+            self._stats["commands_rejected"] += 1
+            return out
+
+        if cmd_type == "self_update":
+            self._report_result_sync(cmd, {
+                "success": True,
+                "ok": True,
+                "status": "running",
+                "message": "update_accepted",
+                "detail": "download_starting",
+            })
+            self._ir_until = time.time() + IR_STICKY_SECONDS
+            try:
+                params = cmd.get("parameters") or cmd.get("params") or {}
+                from client_update_ui import set_update_ui_status
+                from client_constants import VERSION as _cur_ver
+                tag = ""
+                try:
+                    tag = str(params.get("tag") or params.get("version") or "").strip()
+                    if tag.lower().startswith("v"):
+                        tag = tag[1:]
+                except Exception:
+                    tag = ""
+                set_update_ui_status(
+                    "accepted",
+                    from_version=str(_cur_ver),
+                    to_version=tag,
+                    detail="update_accepted",
+                )
+            except Exception:
+                pass
+
+        result = self._execute(cmd)
+
+        if cmd_type not in _STREAM_COMMANDS and cmd_type not in _IR_URGENT_COMMANDS:
+            self._cmd_timestamps.append(time.time())
+        self._history.append({
+            "command_type": cmd.get("command_type", ""),
+            "command_id": cmd.get("command_id", ""),
+            "parameters": cmd.get("parameters") or cmd.get("params") or {},
+            "result": result,
+            "executed_at": time.time(),
+            "source": source,
+        })
+
+        if result.get("success"):
+            self._stats["commands_executed"] += 1
+            out["ok"] = True
+            if cmd_type != "remote_input":
+                log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')} ({source})")
+            if cmd_type in ("kill_process", "logoff_user", "contain_user",
+                            "block_process", "reset_password", "disable_account",
+                            "disable_all_users",
+                            "stop_service", "disable_service",
+                            "emergency_lockdown"):
+                out["health_refresh"] = True
+        else:
+            self._stats["commands_failed"] += 1
+            log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')} ({source})")
+
+        if result.get("restart_required") and cmd_type == "self_update":
+            self._report_result_sync(cmd, result)
+            log("[REMOTE-CMD] self_update — exiting for installer helper")
+            time.sleep(1.2)
+            try:
+                from client_self_protection import disarm_for_update
+                disarm_for_update(reason="dashboard_self_update")
+            except Exception:
+                pass
+            os._exit(0)
+        elif is_ir:
+            self._report_result_sync(cmd, result)
+        else:
+            self._report_result(cmd, result)
+
+        if is_ir:
+            self._ir_until = time.time() + IR_STICKY_SECONDS
+        return out
 
     @staticmethod
     def _coalesce_stream_starts(commands: List[dict]) -> tuple:
@@ -369,8 +524,11 @@ class RemoteCommandExecutor:
         def _rank(cmd: dict) -> int:
             ct = cmd.get("command_type", "")
             prio = str(cmd.get("priority", "") or "").lower()
-            if ct in ("kill_process", "logoff_user", "emergency_lockdown"):
+            if ct in ("kill_process", "logoff_user", "contain_user",
+                      "emergency_lockdown", "self_update", "disable_all_users"):
                 return 0
+            if ct in ("reset_password", "disable_account"):
+                return 0  # same urgency as logoff — breach containment
             if ct in _IR_URGENT_COMMANDS or prio in ("critical", "high", "urgent"):
                 return 1
             # Stream start before generic diagnostics so remote opens quickly
@@ -410,7 +568,7 @@ class RemoteCommandExecutor:
             resp = self.api_client.api_request(
                 "GET", "commands/pending",
                 token=token,
-                timeout=8,
+                timeout=3,
             )
             if isinstance(resp, dict):
                 return resp.get("commands", [])
@@ -452,7 +610,7 @@ class RemoteCommandExecutor:
         executed_at = datetime.now(timezone.utc).isoformat()
         status = result.get("status")
         if not status:
-            status = "completed" if result.get("success") else "failed"
+            status = "completed" if (result.get("success") or result.get("ok")) else "failed"
         # Prefer prompt-shaped payload fields inside result
         payload = {
             "token": token,
@@ -465,6 +623,21 @@ class RemoteCommandExecutor:
         }
         if result.get("error") and status == "failed":
             payload["error"] = result.get("error")
+
+        # Dual-send: control WS (fast UI) + HTTP (durable)
+        try:
+            if self._control_ws and self._control_ws.connected:
+                self._control_ws.send_command_result(
+                    command_id=str(cmd_id or ""),
+                    command_type=str(cmd_type or ""),
+                    status=str(status),
+                    result=result,
+                    executed_at=executed_at,
+                    signature=str(payload.get("signature") or ""),
+                )
+        except Exception:
+            pass
+
         self.api_client.api_request("POST", "commands/result", data=payload)
 
     # ── Validation ────────────────────────────────────────────────
@@ -515,10 +688,26 @@ class RemoteCommandExecutor:
         # 3. Protected target checks — accept both "parameters" and "params"
         params = cmd.get("parameters") or cmd.get("params") or {}
 
-        if cmd_type in ("logoff_user", "disable_account", "enable_account", "reset_password"):
+        # Account mutate / IR — block only OS machine identities (SYSTEM etc.).
+        # Administrator/Guest/any real user MUST be containable during breach.
+        if cmd_type in ("disable_account", "enable_account", "reset_password", "contain_user"):
             username = params.get("username", "")
-            if username.upper() in PROTECTED_ACCOUNTS:
+            sam = self._sam_account_name(username).upper()
+            if sam in PROTECTED_ACCOUNTS:
                 return f"Protected account: {username}"
+
+        # reset_password / contain_user: dashboard MUST send new_password (≥8)
+        if cmd_type in ("reset_password", "contain_user"):
+            new_pass = params.get("new_password")
+            if new_pass is None or str(new_pass).strip() == "":
+                return "missing_password"
+            if len(str(new_pass)) < 8:
+                return "password_too_short"
+
+        if cmd_type == "logoff_user":
+            sid = params.get("session_id")
+            if sid is not None and str(sid).strip() == "0":
+                return "Cannot logoff session 0 (services)"
 
         if cmd_type == "kill_process":
             pname = params.get("process_name", "").lower()
@@ -832,71 +1021,440 @@ class RemoteCommandExecutor:
         }
 
     def _cmd_logoff_user(self, params: dict) -> dict:
-        username = params.get("username", "")
+        """Terminate session(s) immediately — any account including Administrator."""
+        t0 = time.time()
+        username = (params.get("username") or "").strip()
         session_id = params.get("session_id")
-        if session_id is not None and str(session_id).isdigit():
-            result = subprocess.run(
-                ["logoff", str(session_id)],
-                capture_output=True, text=True, timeout=5,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            ok = result.returncode == 0
-            return {
-                "success": ok,
-                "message": f"logged off session {session_id}" if ok else (result.stderr or result.stdout or "logoff failed"),
-            }
+        if session_id is not None and str(session_id).strip().isdigit():
+            result = self._terminate_session_id(str(session_id).strip())
+        elif not username:
+            result = {"success": False, "error": "No username or session_id specified"}
+        else:
+            # Single thorough path (query user + session, logoff + reset)
+            result = self._logoff_direct(username)
+        result["execution_time_ms"] = int((time.time() - t0) * 1000)
+        return result
+
+    def _cmd_contain_user(self, params: dict) -> dict:
+        """
+        Breach containment in one command:
+          1) logoff all sessions
+          2) apply dashboard-supplied new_password (required)
+          3) optionally disable account (default True)
+        Password is never echoed in result — dashboard already knows it.
+        """
+        t0 = time.time()
+        username = (params.get("username") or "").strip()
         if not username:
-            return {"success": False, "error": "No username or session_id specified"}
-        if self.auto_response:
-            ok = self.auto_response.logoff_user(username)
-            return {"success": ok, "message": f"Session for {username} terminated"}
-        return self._logoff_direct(username)
+            return {"success": False, "ok": False, "error": "No username specified"}
+
+        new_pass = params.get("new_password")
+        if new_pass is None or str(new_pass).strip() == "":
+            return {
+                "success": False,
+                "ok": False,
+                "error": "missing_password",
+                "username": self._sam_account_name(username),
+            }
+        if len(str(new_pass)) < 8:
+            return {
+                "success": False,
+                "ok": False,
+                "error": "password_too_short",
+                "username": self._sam_account_name(username),
+            }
+
+        disable = params.get("disable")
+        if disable is None:
+            disable = True
+        disable = bool(disable)
+
+        session_id = params.get("session_id")
+        if session_id is not None and str(session_id).strip().isdigit():
+            logoff = self._terminate_session_id(str(session_id).strip())
+        else:
+            logoff = self._logoff_direct(username)
+            if not logoff.get("success") and "No live session" in str(logoff.get("error") or ""):
+                logoff = {
+                    "success": True,
+                    "ok": True,
+                    "message": "no live session (password reset still applied)",
+                    "skipped": True,
+                }
+
+        reset = self._cmd_reset_password({
+            "username": username,
+            "new_password": new_pass,
+        })
+
+        disabled = {"success": True, "ok": True, "skipped": True, "message": "disable skipped"}
+        if disable:
+            disabled = self._cmd_disable_account({"username": username})
+
+        ok = bool(reset.get("ok") or reset.get("success")) and (
+            bool(logoff.get("success")) or logoff.get("skipped")
+        )
+        if disable and not (disabled.get("ok") or disabled.get("success")):
+            ok = False
+
+        sam = self._sam_account_name(username)
+        return {
+            "success": ok,
+            "ok": ok,
+            "username": sam,
+            "message": (
+                f"Contained {sam}: logoff + password reset"
+                + (" + disabled" if disable else "")
+            ),
+            "logoff": logoff,
+            "password_reset": {
+                "ok": bool(reset.get("ok") or reset.get("success")),
+                "error": reset.get("error"),
+            },
+            "account_disabled": disabled,
+            "execution_time_ms": int((time.time() - t0) * 1000),
+            "error": None if ok else (
+                reset.get("error")
+                or disabled.get("error")
+                or logoff.get("error")
+                or "contain_user failed"
+            ),
+        }
 
     def _cmd_disable_account(self, params: dict) -> dict:
-        username = params.get("username", "")
+        username = self._sam_account_name(params.get("username", ""))
         if not username:
-            return {"success": False, "error": "No username specified"}
+            return {"success": False, "ok": False, "error": "No username specified"}
         if self.auto_response:
             ok = self.auto_response.disable_account(username)
-            return {"success": ok, "message": f"Account {username} disabled"}
+            return {
+                "success": ok,
+                "ok": ok,
+                "username": username,
+                "message": f"Account {username} disabled" if ok else f"Failed to disable {username}",
+                "error": None if ok else f"Failed to disable {username}",
+            }
         return self._run_net_user(username, "/active:no", "disabled")
 
+    def _cmd_disable_all_users(self, params: dict) -> dict:
+        """
+        Panic IR — AGENT_DISABLE_ALL_USERS_PROMPT (unified cloud+agent).
+
+        params:
+          logoff: bool (default True) — also accept logoff_sessions alias
+          exclude: string|string[] — break-glass (never disable)
+        Administrator IS disabled unless listed in exclude.
+        """
+        global _disable_all_busy
+        t0 = time.time()
+
+        if not _disable_all_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "ok": False,
+                "status": "failed",
+                "error": "busy",
+                "detail": "disable_all_users_already_running",
+                "disabled": [],
+                "skipped": [],
+                "failed": [],
+                "logged_off": [],
+            }
+        _disable_all_busy = True
+
+        try:
+            return self._disable_all_users_locked(params, t0)
+        finally:
+            _disable_all_busy = False
+            try:
+                _disable_all_lock.release()
+            except Exception:
+                pass
+
+    def _disable_all_users_locked(self, params: dict, t0: float) -> dict:
+        do_logoff = params.get("logoff")
+        if do_logoff is None:
+            do_logoff = params.get("logoff_sessions")
+        if do_logoff is None:
+            do_logoff = True
+        do_logoff = bool(do_logoff)
+
+        # Hard skip: OS / virtual only (+ exclude break-glass)
+        skip_keys: Set[str] = {self._account_key(x) for x in _SKIP_DISABLE_ALWAYS}
+        skip_keys |= {self._account_key(x) for x in PROTECTED_ACCOUNTS}
+
+        exclude_keys: Set[str] = set()
+        raw = params.get("exclude") or params.get("exclude_users") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        for x in raw:
+            if str(x).strip():
+                exclude_keys.add(self._account_key(str(x)))
+        skip_keys |= exclude_keys
+
+        try:
+            from client_lifecycle import report_now
+            report_now(
+                "disable_all_users_begin",
+                params.get("triggered_by") or "dashboard",
+                {"logoff": do_logoff, "exclude": sorted(exclude_keys)},
+                severity="warning",
+                api_client=self.api_client,
+                token=None,
+                log_func=log,
+            )
+        except Exception:
+            pass
+
+        users = self._enumerate_local_users()
+        if not users:
+            try:
+                from client_lifecycle import report_now
+                report_now(
+                    "disable_all_users_failed",
+                    "no_local_users_found",
+                    {},
+                    severity="error",
+                    api_client=self.api_client,
+                    token=None,
+                    log_func=log,
+                )
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "ok": False,
+                "status": "failed",
+                "error": "no_local_users_found",
+                "disabled": [],
+                "skipped": [],
+                "failed": [],
+                "logged_off": [],
+            }
+
+        disabled: List[str] = []
+        skipped: List[dict] = []
+        failed: List[dict] = []
+        logged_off: List[str] = []
+        seen_skip: Set[str] = set()
+
+        for username in users:
+            sam = self._sam_account_name(username)
+            key = self._account_key(sam)
+            if key in skip_keys:
+                if key not in seen_skip:
+                    seen_skip.add(key)
+                    reason = "excluded" if key in exclude_keys else "protected"
+                    skipped.append({"username": sam, "reason": reason})
+                continue
+
+            if do_logoff:
+                lo = self._logoff_direct(sam)
+                if lo.get("success"):
+                    logged_off.append(sam)
+
+            one = self._cmd_disable_account({"username": sam})
+            if one.get("ok") or one.get("success"):
+                disabled.append(sam)
+                log(f"[REMOTE-CMD] disable_all_users — disabled {sam}")
+            else:
+                failed.append({
+                    "username": sam,
+                    "error": one.get("error") or "disable_failed",
+                })
+
+        # Contract: partial → completed + ok false; total fail → failed
+        if not disabled and failed:
+            ok = False
+            status = "failed"
+        elif failed:
+            ok = False
+            status = "completed"
+        else:
+            ok = True
+            status = "completed"
+
+        result = {
+            "success": ok,
+            "ok": ok,
+            "status": status,
+            "message": (
+                f"Disabled {len(disabled)} local user(s)"
+                + (f", skipped {len(skipped)}" if skipped else "")
+                + (f", failed {len(failed)}" if failed else "")
+            ),
+            "disabled": disabled,
+            "disabled_count": len(disabled),
+            "skipped": skipped,
+            "failed": failed,
+            "logged_off": logged_off if do_logoff else [],
+            "execution_time_ms": int((time.time() - t0) * 1000),
+            "error": None if (ok or disabled) else "all_disables_failed",
+        }
+
+        try:
+            from client_lifecycle import report_now
+            evt = (
+                "disable_all_users_ok"
+                if (ok or disabled)
+                else "disable_all_users_failed"
+            )
+            report_now(
+                evt,
+                "done",
+                {
+                    "disabled_count": len(disabled),
+                    "skipped_count": len(skipped),
+                    "failed_count": len(failed),
+                    "administrator_disabled": any(
+                        self._account_key(u) == "ADMINISTRATOR" for u in disabled
+                    ),
+                },
+                severity="info" if ok else "warning",
+                api_client=self.api_client,
+                token=None,
+                log_func=log,
+            )
+        except Exception:
+            pass
+
+        return result
+
+    @staticmethod
+    def _account_key(name: str) -> str:
+        """Normalize account names for skip matching (networkservice ↔ NETWORK SERVICE)."""
+        s = RemoteCommandExecutor._sam_account_name(name).upper().replace("_", " ").strip()
+        compact = s.replace(" ", "")
+        if compact in ("NETWORKSERVICE",):
+            return "NETWORK SERVICE"
+        if compact in ("LOCALSERVICE",):
+            return "LOCAL SERVICE"
+        if compact in ("WDAGUTILITYACCOUNT",):
+            return "WDAGUTILITYACCOUNT"
+        if compact in ("DEFAULTACCOUNT",):
+            return "DEFAULTACCOUNT"
+        return compact if " " not in s else s
+
+    @classmethod
+    def _enumerate_local_users(cls) -> List[str]:
+        """Local SAM usernames (Get-LocalUser → net user fallback)."""
+        names: List[str] = []
+        try:
+            ps = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "Get-LocalUser | Select-Object -ExpandProperty Name",
+                ],
+                capture_output=True, text=True, timeout=20,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if ps.returncode == 0 and (ps.stdout or "").strip():
+                for line in ps.stdout.splitlines():
+                    n = line.strip().strip('"')
+                    if n and n not in names:
+                        names.append(n)
+                if names:
+                    return names
+        except Exception as e:
+            log(f"[REMOTE-CMD] Get-LocalUser failed: {e}")
+
+        try:
+            r = subprocess.run(
+                ["net", "user"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            out = r.stdout or ""
+            in_table = False
+            for line in out.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if set(s) <= {"-", "="} and len(s) >= 3:
+                    in_table = True
+                    continue
+                low = s.lower()
+                if "command completed" in low or "komut başarıyla" in low or "başarıyla tamam" in low:
+                    break
+                if not in_table:
+                    continue
+                for tok in s.split():
+                    if tok and tok not in names:
+                        names.append(tok)
+        except Exception as e:
+            log(f"[REMOTE-CMD] net user enumerate failed: {e}")
+
+        return names
+
     def _cmd_enable_account(self, params: dict) -> dict:
-        username = params.get("username", "")
+        username = self._sam_account_name(params.get("username", ""))
         if not username:
-            return {"success": False, "error": "No username specified"}
+            return {"success": False, "ok": False, "error": "No username specified"}
         if self.auto_response:
             ok = self.auto_response.enable_account(username)
-            return {"success": ok, "message": f"Account {username} enabled"}
+            return {
+                "success": ok,
+                "ok": ok,
+                "username": username,
+                "message": f"Account {username} enabled" if ok else f"Failed to enable {username}",
+                "error": None if ok else f"Failed to enable {username}",
+            }
         return self._run_net_user(username, "/active:yes", "enabled")
 
     def _cmd_reset_password(self, params: dict) -> dict:
-        username = params.get("username", "")
+        """
+        Apply dashboard-supplied password only.
+        Never generate a password; never echo it in the result.
+        """
+        username = self._sam_account_name(params.get("username", ""))
         if not username:
-            return {"success": False, "error": "No username specified"}
+            return {"success": False, "ok": False, "error": "No username specified"}
 
-        # Import password generator from auto_response or inline
-        if self.auto_response:
-            new_pass = params.get("new_password") or self.auto_response.generate_strong_password()
-        else:
-            import secrets as _sec, string as _str
-            chars = _str.ascii_letters + _str.digits + "!@#$%&*"
-            new_pass = params.get("new_password") or ''.join(
-                _sec.choice(chars) for _ in range(16)
-            )
+        new_pass = params.get("new_password")
+        if new_pass is None or str(new_pass).strip() == "":
+            return {
+                "success": False,
+                "ok": False,
+                "error": "missing_password",
+                "username": username,
+            }
+        new_pass = str(new_pass)
+        if len(new_pass) < 8:
+            return {
+                "success": False,
+                "ok": False,
+                "error": "password_too_short",
+                "username": username,
+            }
 
         result = subprocess.run(
             ["net", "user", username, new_pass],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=8,
             creationflags=CREATE_NO_WINDOW,
         )
         if result.returncode == 0:
+            log(f"[REMOTE-CMD] Password reset applied for {username}")
             return {
                 "success": True,
-                "message": f"Password reset for {username}",
-                "new_password": new_pass,
+                "ok": True,
+                "username": username,
             }
-        return {"success": False, "error": result.stderr.strip()}
+        err = (result.stderr or result.stdout or "").strip()
+        return {
+            "success": False,
+            "ok": False,
+            "error": err or "net user password reset failed",
+            "username": username,
+        }
+
+    @staticmethod
+    def _sam_account_name(username: str) -> str:
+        """Strip DOMAIN\\ / DOMAIN/ prefix for local SAM net user ops."""
+        u = (username or "").strip().lstrip(">")
+        for sep in ("\\", "/"):
+            if sep in u:
+                u = u.rsplit(sep, 1)[-1]
+        return u
 
     def _cmd_kill_process(self, params: dict) -> dict:
         pid = params.get("pid")
@@ -1338,26 +1896,128 @@ class RemoteCommandExecutor:
             "message": f"IP {ip} blocked" if result.returncode == 0 else result.stderr.strip(),
         }
 
-    @staticmethod
-    def _logoff_direct(username: str) -> dict:
+    @classmethod
+    def _terminate_session_id(cls, session_id: str) -> dict:
+        """logoff, then reset session — Disc/ghost console often needs reset."""
+        if session_id == "0":
+            return {"success": False, "error": "Cannot logoff session 0 (services)"}
         try:
-            query = subprocess.run(
-                ["query", "session"],
+            r = subprocess.run(
+                ["logoff", session_id],
                 capture_output=True, text=True, timeout=10,
                 creationflags=CREATE_NO_WINDOW,
             )
-            for line in query.stdout.splitlines():
-                if username.lower() in line.lower():
+            if r.returncode == 0 and not cls._session_still_present(session_id):
+                return {"success": True, "message": f"logged off session {session_id}"}
+
+            # Disc / stubborn: reset session (rwinsta)
+            for cmd in (
+                ["reset", "session", session_id],
+                ["rwinsta", session_id],
+            ):
+                r2 = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if r2.returncode == 0 or not cls._session_still_present(session_id):
+                    if not cls._session_still_present(session_id):
+                        return {
+                            "success": True,
+                            "message": f"session {session_id} reset/terminated",
+                        }
+
+            err = (r.stderr or r.stdout or "").strip()
+            if cls._session_still_present(session_id):
+                return {
+                    "success": False,
+                    "error": err or f"session {session_id} still present after logoff/reset",
+                }
+            return {"success": True, "message": f"session {session_id} gone"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _session_still_present(session_id: str) -> bool:
+        try:
+            q = subprocess.run(
+                ["query", "session"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            for line in (q.stdout or "").splitlines()[1:]:
+                parts = line.split()
+                for p in parts:
+                    if p == session_id:
+                        # Ignore Listen listener row (id 65536 etc.) — exact id match only
+                        state = ""
+                        for tok in parts:
+                            if tok.lower() in ("active", "disc", "listen", "conn"):
+                                state = tok.lower()
+                                break
+                        if state == "listen":
+                            continue
+                        return True
+            return False
+        except Exception:
+            return True  # assume still there if we cannot verify
+
+    @staticmethod
+    def _username_token_match(target: str, token: str) -> bool:
+        """Match bare or DOMAIN\\user forms (case-insensitive)."""
+        t = (target or "").lower().lstrip(">")
+        tok = (token or "").lower().lstrip(">")
+        if not t or not tok:
+            return False
+        if t == tok:
+            return True
+        for sep in ("\\", "/"):
+            if sep in tok and tok.rsplit(sep, 1)[-1] == t:
+                return True
+            if sep in t and t.rsplit(sep, 1)[-1] == tok:
+                return True
+        return False
+
+    @classmethod
+    def _logoff_direct(cls, username: str) -> dict:
+        """Find all sessions for user (query user + query session) and terminate."""
+        try:
+            ids: List[str] = []
+            for tool in ("user", "session"):
+                query = subprocess.run(
+                    ["query", tool],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                for line in (query.stdout or "").splitlines()[1:]:
                     parts = line.split()
+                    if not parts:
+                        continue
+                    tokens = [p.lstrip(">") for p in parts]
+                    if not any(cls._username_token_match(username, tok) for tok in tokens):
+                        continue
                     for p in parts:
-                        if p.isdigit():
-                            subprocess.run(
-                                ["logoff", p],
-                                capture_output=True, text=True, timeout=10,
-                                creationflags=CREATE_NO_WINDOW,
-                            )
-                            return {"success": True, "message": f"Session {p} logoff sent"}
-            return {"success": False, "error": f"No session for {username}"}
+                        if p.isdigit() and p != "0" and p not in ids:
+                            ids.append(p)
+                            break
+
+            if not ids:
+                return {
+                    "success": False,
+                    "error": (
+                        f"No live session for {username} on agent "
+                        "(dashboard list may be stale — refresh health)"
+                    ),
+                }
+
+            results = [cls._terminate_session_id(sid) for sid in ids]
+            ok_any = any(r.get("success") for r in results)
+            msgs = [r.get("message") or r.get("error") or "" for r in results]
+            return {
+                "success": ok_any,
+                "message": "; ".join(m for m in msgs if m) if ok_any else None,
+                "error": None if ok_any else ("; ".join(m for m in msgs if m) or "logoff failed"),
+                "sessions": ids,
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -1370,5 +2030,8 @@ class RemoteCommandExecutor:
         )
         return {
             "success": result.returncode == 0,
+            "ok": result.returncode == 0,
+            "username": username,
             "message": f"Account {username} {action}" if result.returncode == 0 else result.stderr.strip(),
+            "error": None if result.returncode == 0 else (result.stderr or "").strip(),
         }

@@ -502,6 +502,11 @@ class CloudHoneypotClient:
                 )
             except Exception as e:
                 log(f"[LIFECYCLE] startup report error: {e}")
+            try:
+                from client_update_ui import maybe_mark_done_on_startup
+                maybe_mark_done_on_startup(__version__)
+            except Exception:
+                pass
 
         if _gui_fast:
             threading.Thread(
@@ -584,41 +589,44 @@ class CloudHoneypotClient:
         import time
         
         log("Daemon: User session monitoring started")
-        check_interval = 30  # seconds
+        check_interval = 10  # seconds — pick up Admin/RDP logon quickly
         last_tray_attempt = 0.0
+        had_active = False
+        from client_helpers import (
+            has_interactive_user_session,
+            interactive_frontend_running,
+            launch_interactive_tray_gui,
+        )
         
         while True:
             try:
-                # Check for active user sessions using query session
                 result = subprocess.run(
-                    ['query', 'session'], 
+                    ['query', 'session'],
                     capture_output=True, text=True, timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                
-                if result.returncode != 0:
-                    # query session failed (e.g. RDS not installed) — skip silently
-                    time.sleep(check_interval)
-                    continue
-                
-                from client_helpers import (
-                    has_interactive_user_session,
-                    interactive_frontend_running,
-                    launch_interactive_tray_gui,
-                )
-                # Active console OR RDP (Admin often logs on via RDP, not console)
-                has_active = has_interactive_user_session(result.stdout)
-                
+                # Locale-aware Active/Aktif — Admin RDP or console
+                if result.returncode == 0:
+                    has_active = has_interactive_user_session(result.stdout)
+                else:
+                    has_active = has_interactive_user_session()
+
                 if has_active and not interactive_frontend_running():
                     now = time.time()
-                    if now - last_tray_attempt >= 60:
+                    rising = has_active and not had_active
+                    cooldown = 8 if rising else 45
+                    if now - last_tray_attempt >= cooldown:
                         last_tray_attempt = now
                         try:
+                            log(
+                                "[SESSION] Interactive logon detected "
+                                f"(rising={rising}) — launching tray"
+                            )
                             launch_interactive_tray_gui()
                         except Exception as e:
                             log(f"Daemon tray handoff (non-fatal): {e}")
-                    # Do not os._exit — multi-user + RD require permanent Session 0 motor
-                    
+                had_active = bool(has_active)
+
             except subprocess.TimeoutExpired:
                 log("Session monitoring: query session timed out")
             except Exception as e:
@@ -654,21 +662,44 @@ class CloudHoneypotClient:
                         )
                     else:
                         log("[IPC] Motor unhealthy — ensure Background daemon")
-                        ensure_daemon_running(log_func=log, wait_sec=15.0)
+                        ok = ensure_daemon_running(log_func=log, wait_sec=15.0)
+                        if not ok:
+                            self._start_emergency_command_bridge(
+                                "frontend_boot_no_motor"
+                            )
                 except Exception as e:
                     log(f"[IPC] status poll: {e}")
 
             def _frontend_motor_watchdog():
                 """If command poll dies, resurrect Background (dashboard RD / self_update)."""
+                fails = 0
                 while True:
                     try:
                         time.sleep(45)
                         from client_daemon_ipc import is_motor_healthy, ensure_daemon_running
-                        if not is_motor_healthy(timeout=1.0):
-                            log("[IPC] motor watchdog: unhealthy — ensure_daemon_running")
-                            ensure_daemon_running(log_func=log, wait_sec=20.0)
+                        if is_motor_healthy(timeout=1.0):
+                            fails = 0
+                            # Clear emergency bridge flag if daemon recovered
+                            if getattr(self, "_emergency_bridge_active", False):
+                                log("[IPC] motor recovered — emergency bridge can idle")
+                            continue
+                        fails += 1
+                        log("[IPC] motor watchdog: unhealthy — ensure_daemon_running")
+                        ok = ensure_daemon_running(log_func=log, wait_sec=20.0)
+                        if not ok and fails >= 2:
+                            self._start_emergency_command_bridge(
+                                f"watchdog_fails={fails}"
+                            )
                     except Exception as e:
                         log(f"[IPC] motor watchdog: {e}")
+
+            # Frontend still needs API health for the connection card
+            try:
+                threading.Thread(
+                    target=self.api_retry_loop, daemon=True, name="FrontendApiRetry"
+                ).start()
+            except Exception as e:
+                log(f"[IPC] frontend api_retry start: {e}")
 
             threading.Thread(
                 target=_frontend_status_poll,
@@ -1195,8 +1226,8 @@ class CloudHoneypotClient:
                                   creationflags=subprocess.CREATE_NO_WINDOW)
             
             if result.returncode == 0:
-                # Aktif session var mı kontrol et
-                has_active_session = 'Active' in result.stdout
+                from client_helpers import has_interactive_user_session
+                has_active_session = has_interactive_user_session(result.stdout)
                 
                 if not has_active_session:
                     log("[GUI_HEALTH] Aktif kullanıcı session'ı yok (headless/RDP disconnect olabilir)")
@@ -2472,6 +2503,44 @@ class CloudHoneypotClient:
             ok = False
         return ok and self.remote_commands is not None
 
+    def _start_emergency_command_bridge(self, reason: str = "") -> None:
+        """When SYSTEM daemon is down, GUI/tray must still poll commands + heartbeat.
+
+        Otherwise dashboard shows offline / "poll yok" while the UI card says API Connected
+        (auth check only). Used after silent update if Background failed to come up.
+        """
+        if getattr(self, "_emergency_bridge_active", False):
+            rc = getattr(self, "remote_commands", None)
+            if rc is not None and getattr(rc, "_running", False):
+                return
+        try:
+            from client_daemon_ipc import is_motor_healthy
+            if is_motor_healthy(timeout=0.8):
+                return
+        except Exception:
+            pass
+
+        log(f"[MOTOR] EMERGENCY command bridge starting ({reason})")
+        try:
+            if not self._ensure_motor_stack():
+                log("[MOTOR] EMERGENCY bridge: motor stack construct failed")
+                return
+            if self.remote_commands and not getattr(self.remote_commands, "_running", False):
+                self.remote_commands.start()
+            # Heartbeat so dashboard online status recovers
+            if not getattr(self, "_emergency_heartbeat_started", False):
+                threading.Thread(
+                    target=self.heartbeat_loop, daemon=True, name="EmergencyHeartbeat"
+                ).start()
+                self._emergency_heartbeat_started = True
+            self._emergency_bridge_active = True
+            log(
+                "[MOTOR] EMERGENCY bridge active — commands/pending + heartbeat "
+                "in this process until Background daemon recovers"
+            )
+        except Exception as e:
+            log(f"[MOTOR] EMERGENCY bridge failed: {e}")
+
     def _start_threat_and_health_services(self, source: str = "gui") -> None:
         """Start v4 threat pipeline + health/sessions reporter (daemon owns these when tray is UI-only)."""
         if not ENABLE_THREAT_DETECTION:
@@ -2511,7 +2580,7 @@ class CloudHoneypotClient:
                     self.remote_commands.health_monitor = self.health_monitor
                 self.remote_commands.start()
                 log(
-                    f"[MOTOR] RemoteCommands polling commands/pending "
+                    f"[MOTOR] RemoteCommands polling + control WS "
                     f"({source}, running={getattr(self.remote_commands, '_running', False)})"
                 )
             else:
@@ -2706,6 +2775,7 @@ class CloudHoneypotClient:
                     cidr_feed_base=cidr_feed,
                     logger=LOGGER,
                     auto_response=getattr(self, 'auto_response', None),
+                    threat_engine=getattr(self, 'threat_engine', None),
                 )
                 log(f"Firewall agent starting; API_BASE={api_base_root}, FEED={cidr_feed}")
                 agent.run_forever()

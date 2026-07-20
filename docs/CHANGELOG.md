@@ -1,0 +1,1629 @@
+# v4.5.39
+
+## GUI: güncelleme durumu banner
+- Dashboard `self_update` komutu alındığında GUI üstünde uyarı bandı:
+  “Güncelleme talimatı alındı” → indirme % → kurulum → tamamlandı/başarısız.
+- Daemon (SYSTEM) → ProgramData `update_ui_status.json` → GUI poll (1 sn).
+- Toast + kalıcı üst banner; başarı ~12 sn sonra kapanır.
+
+---
+
+# v4.5.38
+
+## Engellenen = firewall (HP-BLOCK) source of truth
+- GUI no longer relies only on empty/stale `blocked_ips.json`.
+- On Engellenen refresh: live `netsh` scan → ProgramData store → table.
+- Numbered dashboard rules (`HP-BLOCK-1010`…) get RemoteIP via per-rule lookup when bulk list omits it.
+- Turkish/locale RemoteIP field parsing hardened.
+
+---
+
+# v4.5.37
+
+## Daemon always-on after update (root cause)
+
+Silent/interactive update helper previously **disabled** `CloudHoneypot-Background` + `Watchdog`, then often never re-enabled them on success → motor dead, dashboard “poll yok”.
+
+### Fix
+- After every install (success **and** fail): `Restore-HoneypotTasks` + `Ensure-DaemonMotor`
+- Prefer `schtasks /run CloudHoneypot-Background` (SYSTEM Session 0)
+- Wait/re-kick until control port `127.0.0.1:58632` answers
+- Then tray (if logon) — GUI is not the motor
+
+Includes 4.5.36 emergency GUI bridge as safety net.
+
+---
+
+# v4.5.36
+
+## Dashboard offline while GUI says Connected
+- GUI “API Bağlı” only meant auth worked; **commands/pending poll** is owned by SYSTEM daemon.
+- After silent update, if Background daemon is down → dashboard “çevrimdışı / poll yok”.
+- Fix: frontend motor watchdog starts **emergency command bridge** (poll + heartbeat) when daemon won’t come up.
+- Connection card: `API var · motor yok` when auth OK but motor/poll missing.
+- Silent helper: prefer `CloudHoneypot-Background` + wait for `:58632` before tray.
+
+---
+
+# Changelog — Cloud Honeypot Client
+
+Otomatik birleştirildi: eski elease_notes_v*.md dosyaları.
+Kaynak: GitHub Releases + bu dosya.
+
+---
+
+# v4.5.35
+
+## Silent self-update polish
+- Dashboard update sonrası görünen `timeout /t 120` CMD penceresi kaldırıldı (one-shot schtasks hemen siliniyor).
+- Sessiz güncelleme bitince: SYSTEM daemon + logon varsa **tray** (tam `--show-gui` penceresi yok).
+
+## Included from 4.5.34 (if not yet on host)
+- Firewall HP-BLOCK → Engellenen GUI + periyodik `sync-rules`
+- NSIS `/S` mid-install daemon Exec yok; helper installer timeout
+- Uzak masaüstü: helper probe 12s, WS öncesi JPEG kuyruğu
+
+---
+
+# v4.5.34
+
+## Firewall ↔ GUI ↔ API inventory
+- Engellenen listesi artık frontend-only GUI’de de `blocked_ips.json` (ProgramData) üzerinden doluyor (`threat_engine` şart değil).
+- Daemon ~15 dk’da bir (ve pending block/unblock sonrası) firewall taraması → store → `POST /api/agent/sync-rules`.
+- Store: dosya mtime cache yenileme; kuraldaki tüm RemoteIP’ler.
+
+## Silent self-update (önceki kısır döngü)
+- NSIS `/S` artık kurulum ortasında daemon başlatmıyor (helper restart eder).
+- Defender exclusion async; helper installer timeout (480s).
+- Staging: çift `cloud-client-installer-` prefix engellendi.
+
+## Uzak masaüstü
+- SYSTEM Session 0 → RDP oturumu helper probe timeout 3s → **12s**.
+- Helper zorunluyken Session-0 BitBlt fallback kaldırıldı (siyah ekran tuzağı).
+- JPEG’ler WS bağlanmadan önce kuyruğa alınır (probe kaybı yok).
+- Siyah karede input desktop yeniden attach + tscon hedef session.
+
+---
+
+# v4.5.32 — Silent self_update helper sertleştirme
+
+- `update_in_progress.lock` varken silent NSIS **daemon başlatmaz** (helper restart eder) — installer hang önlemi
+- SYSTEM helper: `schtasks /Create /RU SYSTEM` one-shot (DETACHED powershell kaybolmasın)
+- Staged installer adı: `cloud-client-installer-X.Y.Z.exe` (çift prefix yok)
+
+Not: Dashboard “Agent bekleniyor” — client zaten `running`/`completed` POST ediyor; UI status map cloud tarafında.
+
+---
+
+# v4.5.31 — Agent control WebSocket (komut push)
+
+- `wss://…/ws/agent/control` + Bearer — dashboard komutları anında
+- HTTP `commands/pending` poll emniyet ağı (WS ayaktayken ~30s)
+- `command_id` dedup (poll + WS çift teslimat)
+- Result: WS `command_result` + HTTP `commands/result` (dual)
+- `self_update` erken ACK aynı kanalda
+
+Cloud hub hazır değilse connect fail → reconnect; poll çalışmaya devam eder.
+
+---
+
+# v4.5.30 — Engellenen IP’ler ProgramData + firewall hydrate
+
+- `%ProgramData%\YesNext\CloudHoneypotClient\blocked_ips.json` — kalıcı envanter
+- Daemon açılışında `HP-BLOCK-*` taranır → store + AutoResponse/ThreatEngine hydrate
+- GUI Engellenen sekmesi store + firewall envanterinden dolar (RAM şişmeden yüzlerce IP)
+- API `sync-rules` ile eşzamanlı
+- Unblock/block store’u günceller
+
+---
+
+# v4.5.29 — IP Listeleri sekmelerinde sayı
+
+Aktivite / Engellenen / Whitelist sekme başlıklarında toplam:
+`Activity (3)`, `Blocked (12)`, `Whitelist (1)`.
+Refresh ve veri güncellemesinde sayılar anlık güncellenir.
+
+---
+
+# v4.5.28 — Agent API: Bearer auth (no query token)
+
+Token artık varsayılan olarak **sadece** `Authorization: Bearer` ile gider.
+
+- `api.legacy_token_query`: **false** (config + kod varsayılanı)
+- GET/POST: query’den `token` kaldırıldı; POST body `token` uyumluluk için duruyor
+- Remote Desktop WS: URL’de `?token=` yok; `Authorization: Bearer` header
+- Acil rollback: `client_config.json` → `"legacy_token_query": true`
+
+Cloud dual-read (Bearer → body → query) ile uyumlu; dashboard deep-link (`/dashboard?token=`) ayrı konu, değişmedi.
+
+---
+
+# v4.5.27 — Installer: Finish checkbox yok, otomatik başlat
+
+Kurulum bitince Finish ekranı / “Launch now” kutusu yok.
+Uygulama hemen açılır; installer `AutoCloseWindow` ile kapanır.
+Silent: daemon; interaktif: GUI (`--show-gui`).
+
+---
+
+# v4.5.26 — Logon’da tray (Admin / Türkçe Windows)
+
+## Sorun
+Kimse logon değilken Administrator ile girişte tray düşmüyordu.
+Türkçe Windows `query session` durumunda **Aktif** yazar; agent yalnızca İngilizce **Active** arıyordu → oturum “yok” sanılıp tray tetiklenmiyordu.
+
+## Düzeltme
+- Oturum algısı locale-aware: Active / Aktif / Aktiv / …
+- `query user` yedek kontrol
+- Daemon izleyici: 10 sn poll; logon rising-edge’de hemen tray
+- `schtasks /run` yetmezse SYSTEM → **CreateProcessAsUser** ile Active session’a `--mode=tray`
+- Tray LogonTrigger gecikmesi 15s → **5s**
+
+---
+
+# v4.5.25 — PIN kaldır yalnızca PIN varsa
+
+Ayarlar → Güvenlik: **PIN kaldır** menü öğesi sadece PIN tanımlıysa gösterilir.
+
+---
+
+# v4.5.24 — Ayarlar menüsü + i18n
+
+- Ayarlar popup: **Hesap / Güvenlik / Dil / Bakım** bölüm başlıkları
+- Bağlı durum rozeti (tıklanmaz); çift “My servers” kaldırıldı
+- Emoji kalabalığı azaltıldı
+- TR: `Sunucularım`, `Panel verisini temizle`, `Güvenlik duvarı…`
+- Hardcoded `Yükleniyor…` → `gui_loading`
+- Eksik TR loading_* anahtarları tamamlandı
+
+---
+
+# v4.5.23 — disable_all_users = unified AGENT_DISABLE_ALL_USERS_PROMPT
+
+- **Administrator dahil** disable (`exclude` yoksa)
+- Params: `logoff` (default true), `exclude` (break-glass)
+- Hard-skip: SYSTEM / LOCAL SERVICE / NETWORK SERVICE / WDAGUtilityAccount / DefaultAccount
+- `skipped`: `[{username, reason}]`
+- Kısmi: `completed` + `ok:false`; tam hata: `failed`
+
+---
+
+# v4.5.22 — disable_all_users ↔ cloud contract
+
+Cloud `AGENT_DISABLE_ALL_USERS_PROMPT.md` ile hizalandı:
+
+- `skip_protected` (default **true**) → Administrator / Guest skip
+- `logoff_sessions` (alias `logoff`)
+- `exclude` + `protected_accounts` skip listesine eklenir
+- `skipped` string[] (cloud örnekleriyle aynı)
+- Kısmi başarı → `ok: false`
+- Concurrent lock + lifecycle begin/ok/failed
+
+**Panik notu:** Cloud varsayılanı Administrator’ı **disable etmez**. Admin’i de kilitlemek için send’de:
+`skip_protected: false` ve `exclude` içinden `administrator` çıkarılmalı  
+(veya ayrı `disable_account` / `contain_user`).
+
+---
+
+# v4.5.21 — `disable_all_users` (panic IR)
+
+Panik: tüm yerel kullanıcıları tek komutta disable (Administrator dahil).  
+API/dashboard sözleşmesi: `AGENT_DISABLE_ALL_USERS_API_PROMPT.md`
+
+```json
+{ "command_type": "disable_all_users", "parameters": { "logoff": true, "exclude": [] } }
+```
+
+Recovery: `reset_password` + `enable_account` (hesap bazlı).
+
+---
+
+# v4.5.20 — reset_password: dashboard şifresi, echo yok
+
+## Akış
+1. Dashboard kullanıcıya yeni şifreyi sorar (≥8 karakter).
+2. `POST /api/commands/send` → `{ username, new_password }`
+3. Agent: `net user {username} {new_password}`
+4. Result (şifre **dönmez**):
+
+```json
+{
+  "command_id": "…",
+  "status": "completed",
+  "result": { "ok": true, "username": "attacker" }
+}
+```
+
+## Agent kuralları
+- `new_password` yoksa → `failed` + `missing_password` (kendi üretmez)
+- `< 8` karakter → `password_too_short`
+- `contain_user` aynı kural: `new_password` zorunlu, result’ta parola yok
+
+---
+
+# v4.5.19 — self_update anında ACK + fleet güncelleme sertleştirme
+
+## Teşhis (v4.5.18)
+GitHub’da `cloud-client-installer.exe` **downloadCount = 0** → sunucular indirmeye hiç geçmemiş.
+Yani sorun “yavaş kurulum” değil; komut ya **poll’a düşmemiş** ya da **URL resolve / kilit / size** aşamasında takılmış.
+
+## Client düzeltmeleri
+- `self_update` / `check_update`: IR poll + **erken ACK** (`status=running`, `update_accepted`) — dashboard “pending”de asılı kalmaz
+- `tag` varken GitHub API olmasa bile resmi release URL’si üretilir
+- `force=true`: takılı update lock temizlenir
+- Yanlış `size` artık güncellemeyi **engellemez** (sadece uyarı)
+- `self_update` öncelik sırası = kill/logoff ile aynı (0)
+
+## Dashboard — fleet komutu (önerilen payload)
+```json
+{
+  "command_type": "self_update",
+  "parameters": {
+    "tag": "4.5.19",
+    "download_url": "https://github.com/cevdetaksac/yesnext-cloud-honeypot-client/releases/download/v4.5.19/cloud-client-installer.exe",
+    "force": true
+  }
+}
+```
+`tag` + `download_url` gönderin; agent’ların GitHub API’ye ihtiyacı kalmaz.
+
+## Önkoşul
+- `self_update` handler: **≥ 4.5.11**
+- Motor `commands/pending` poll: **≥ 4.5.12**
+- Daha eski agent’lar remote update alamaz → manuel installer veya Task Scheduler silent update gerekir
+
+## Beklenen süre
+- Komut alınma: ~0.5–1 sn (motor ayaktaysa)
+- İndirme + sessiz kurulum: ağ hızına göre 30 sn–birkaç dk
+
+---
+
+# v4.5.18 — IR containment (Administrator dahil)
+
+Saldırı / sızma anında dashboard’un sunucuyu kurtarma aracı: saldırgan Administrator olsa bile **anında** müdahale.
+
+## Ne değişti
+- **Administrator / Guest / tüm kullanıcılar** için `logoff_user`, `reset_password`, `disable_account` serbest (koruma sadece SYSTEM / LOCAL SERVICE / NETWORK SERVICE).
+- Yeni IR komutu **`contain_user`**: tek komutta  
+  1) tüm oturumları logoff  
+  2) güçlü şifre ata (`new_password` dashboard’a döner)  
+  3) hesabı disable (varsayılan; `disable: false` ile atlanabilir)
+- IR sonuçları senkron + 0.5 sn poll (önceki sürümden).
+
+## Dashboard kullanımı
+```json
+{ "command_type": "contain_user", "parameters": { "username": "Administrator" } }
+```
+Opsiyonel: `"new_password": "..."`, `"disable": false`, `"session_id": 3`
+
+Ayrı ayrı da kullanılabilir: `logoff_user` → `reset_password` → `disable_account` (aynı poll batch’te hepsi öncelikli).
+
+## Güvenlik notu
+`contain_user` / `reset_password` / `disable_account` için dashboard tarafında onay diyaloğu önerilir (`REQUIRES_CONFIRMATION`). Token ele geçirilirse bu komutlar kritik — sunucu imza + onay şart.
+
+---
+
+# v4.5.17 — Logoff her hesap + anında IR tepkisi
+
+## Değişiklikler
+- **logoff_user**: `Administrator` dahil **tüm** kullanıcı hesapları logoff edilebilir (koruma yok). Tek istisna: session 0 (services).
+- IR komutları (`logoff`, `kill`, `block`, …) sonuçları **senkron** raporlanır — dashboard hemen görür.
+- IR sonrası **0.5 sn** poll + 45 sn sticky hızlı tarama.
+- Pending fetch timeout 3 sn; domain\user eşleşmesi iyileştirildi.
+
+## Not
+Disable / reset password hâlâ `Administrator` için korumalı; sadece oturum sonlandırma serbest.
+
+---
+
+# v4.5.16 — Remote logoff (Disc / ghost sessions)
+
+## Sorun
+Dashboard “Aktif Bağlı Kullanıcılar” listesinde kimse logon değilken eski Console satırları görünüyordu; uzaktan logoff çoğu zaman işe yaramıyordu.
+
+## Düzeltmeler
+- **logoff_user**: `Administrator` artık sadece hesap disable/reset’te korumalı; oturum sonlandırma (IR) serbest
+- Disc / inatçı oturumlar: `logoff` → `reset session` / `rwinsta`, sonra session hâlâ var mı doğrulama
+- Aynı kullanıcı için **tüm** session id’ler temizlenir (`query user` + `query session`)
+- Gerçek oturum yoksa net hata: dashboard listesi stale olabilir
+- Health: session 0 / services / Listen / kullanıcı adı boş satırlar raporlanmaz; sahte `login_time=now` kaldırıldı
+
+## Not
+Daemon + `RemoteCommandExecutor` çalışıyor olmalı (≥4.5.12 motor poll). Güncellemeden sonra logoff tekrar deneyin; liste boşalmazsa health report yenilenene kadar bekleyin.
+
+---
+
+# v4.5.15 — SYSTEM daemon WinError 183 fix
+
+**Hata:**  
+`[WinError 183] Halen varolan bir dosya oluşturulamaz: ...\systemprofile\AppData\Roaming\YesNext\CloudHoneypotClient`
+
+**Neden:** Session 0 SYSTEM, Roaming APPDATA altında `makedirs` (dosya/klasör çakışması).
+
+**Düzeltme:**
+- SYSTEM / Session 0 → `APP_DIR` = `%ProgramData%\YesNext\CloudHoneypotClient`
+- `makedirs` WinError 183’e dayanıklı (`_ensure_directory`)
+
+---
+
+# v4.5.14 — onedir (kendi klasörü)
+
+**Sorun:** `_MEI*` (TEMP veya ProgramData) → `LoadLibrary: Erişim engellendi`
+
+**Çözüm:** PyInstaller **onedir** — `python312.dll` artık  
+`C:\Program Files\YesNext\Cloud Honeypot Client\_internal\` altında sabit.
+
+- Runtime extract yok
+- Concurrent launch / AV TEMP kilidi yok
+- Installer `dist\honeypot-client\*` + `_internal` kurar
+
+---
+
+# v4.5.13 — PyInstaller TEMP Access denied fix
+
+**Hata:** `Failed to load Python DLL 'C:\WINDOWS\TEMP\_MEI*\python312.dll' — LoadLibrary: Erişim engellendi`
+
+**Neden:** Onefile extract `C:\WINDOWS\TEMP` altında; SYSTEM/Admin + AV / execute-from-TEMP politikası DLL yüklemeyi kesiyor.
+
+**Düzeltme:**
+- `runtime_tmpdir` → `%ProgramData%\YesNext\CloudHoneypotClient\runtime`
+- Installer bu klasörü + Defender exclusion oluşturur
+
+---
+
+# v4.5.12 — Remote komut / RD poll geri
+
+**Sorun:** GUI `:58632` portuna bind edip PING cevaplıyordu → herkes “daemon var” sanıyordu → `commands/pending` ve remote WS hiç açılmıyordu.
+
+**Düzeltme:**
+- STATUS: `daemon` / `motor_ok` / `remote_commands_running` gerçek motor bilgisi
+- Frontend **asla** kontrol portuna bind etmez
+- `is_motor_healthy()` — yalnızca PING yetmez
+- `ensure_daemon_running` → schtasks Background + motor_ok bekle
+- Daemon: RemoteCommands zorunlu construct + poll thread watchdog
+- Frontend: 45s motor watchdog
+
+---
+
+# v4.5.11 — Dashboard self_update
+
+- Remote komutlar: `self_update` + `check_update`
+- Dashboard **Şimdi güncelle** → pending poll → hemen silent install (takvim beklemez)
+- `force=false` + aynı sürüm → `already_current`
+- Sadece resmi GitHub release URL; update lock; lifecycle begin/ok/failed
+- `expires_at` / 30 dk TTL desteği; result sync sonra process exit
+
+---
+
+# v4.5.10 — GUI performans
+
+- UI thread'de **senkron daemon IPC yok** (protection mode cache + 5s background poller)
+- Pulse blink her 800ms IPC çağırmıyor (cache)
+- Frontend açılışta threat/Faz motor stack **kurulmuyor** (daemon zaten motor)
+- Prewarm 0.9s/1.6s → **8s/12s** (Status paint ile yarışmıyor)
+- IP tablo: değişmediyse rebuild yok; max 60 satır
+- Session `query` UI thread dışı
+- `[PERF]` logları: page_build, nav, dashboard, ip_table, protection_mode, daemon ping
+
+---
+
+# v4.5.9 — Logon'da tray otomatik
+
+- Tray görevi `Users` yerine **Authenticated Users** (Administrator / RDP dahil)
+- Daemon oturum izleyici: yalnızca console değil, **Active RDP** de tray başlatır
+- Sessiz update sonrası etkileşimli oturum varsa Tray de tetiklenir
+- Watchdog: daemon varken tray yoksa Logon Tray görevini çalıştırır
+
+---
+
+# v4.5.8 — Hizli sekme gecisi
+
+- Tiklamada senkron sayfa build yok (once goster, idle'da doldur)
+- Services/Threat acilistan sonra arka planda prewarm
+- Threat panelleri 3 dilimde build (UI donmaz)
+- Threat'e her donuste security intel yeniden taranmiyor
+
+---
+
+# v4.5.7 — Lazy GUI pages
+
+- Shell (sidebar + ust bar) hemen acilir
+- Sayfa widgetlari ilk ziyarette build edilir (status / threat / services)
+- Veriler adim adim yuklenir (attack count, IP tablo, security intel…)
+- Threat/Services acilista build edilmez
+- Frontend modda motor + agir API hâlâ SYSTEM daemon'da; GUI sadece goruntuleme/IPC
+
+Ayrica 4.5.6'dan: RDP buton guncellemesi Tk main thread'e alindi.
+
+---
+
+# v4.5.6 — Hizli acilis (snappy GUI)
+
+Olculen: `Building main GUI` → pencere/tray **15–36 sn** suruyordu.
+
+**Kaldirilan engeller:**
+- Task Scheduler XML refresh her acilista (artik sadece VERSION degisince)
+- schtasks aktivasyon dongusu GUI'de arka plana alindi
+- Lifecycle API + exe SHA hash UI thread'den cikti
+- ipify / attack-count senkron cagrilar kaldirildi
+- Tray menu `refresh_account_link_status` (API) tray baslatmadan once calismiyordu
+- RDP netstat probe acilista yok
+- PIN dialog build'i bloklamaz; once pencere, sonra PIN
+- Tray `after(50)` ile first paint sonrasina alindi
+
+---
+
+# v4.5.5 — PIN popup stack fix
+
+Tray ikonuna tekrar tiklayinca `wait_window` event loop'u islerken yeni PIN
+pencereleri aciliyordu.
+
+- Tek aktif PIN dialog; tekrar tiklayinca mevcut pencere one gelir
+- `show_window` busy guard
+- Pencere zaten acik + unlock ise PIN sormadan focus
+
+---
+
+# v4.5.4 — TLS CA / guncelleme alert duzeltmesi
+
+**Sorun:** PyInstaller `Temp\_MEI*\certifi\cacert.pem` yolu RDP/TEMP temizliginde kaybolunca:
+- API "Baglanti Yok"
+- Guncelleme kontrolu kirmizi alert: `Could not find a suitable TLS CA certificate bundle`
+
+**Cozum:**
+- `cacert.pem` ProgramData altina kalici kopyalanir
+- `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` bu yola isaret eder
+- Runtime hook + `resolve_tls_verify()` her HTTPS cagrisinda gecerli bundle kullanir
+- GitHub update check/download `verify=` ile ayni bundle'i kullanir
+
+---
+
+# v4.5.3 — GUI stutter / kasma
+
+- Tray ikonu her health tick'te diskten yeniden aciliyordu → cache + ayni state skip
+- GUI, daemon gelmeden motor (firewall 30s, open-ports, update watchdog) baslatiyordu → build_gui'de erken PING + frontend skip
+- Frontend modda update watchdog GUI'de tekrar baslamasin
+
+---
+
+# v4.5.2 — Silent auto-update recovery
+
+**Kok neden:** `--silent-update-check` (Task Scheduler SilentUpdater) indirme basinda `schtasks /end CloudHoneypot-SilentUpdater` cagirarak **kendini olduruyordu**. Sonuc:
+- `update_in_progress.lock` takili kaliyordu
+- Watchdog / SilentUpdater / Background **disable** kalabiliyordu
+- Install helper hic baslamiyordu (ProgramData'da `update-install.log` yok)
+- Agentler eski surumde mahsur kaliyordu
+
+**Duzeltmeler:**
+- SilentUpdater / Updater artik update akisinda `/end` edilmiyor (sadece disable)
+- Installer `ProgramData\...\update\` altina stage ediliyor (TEMP yolu kalkti)
+- Stale lock: olu PID → otomatik temizlenir
+- Basarisiz helper: gorevler tekrar enable + daemon restart
+- SilentUpdater tetikleyicisi CalendarTrigger (15 dk) + `network_required=false`
+- Her silent-check basinda `heal_update_machinery()` (kilit + gorev recovery)
+
+---
+
+# v4.5.1 — GUI acilis hotfix
+
+- Kontrol portu mesgulse GUI artik **sessizce kapanmiyor** (`sys.exit` kaldirildi)
+- Kurulum sonrasi GUI hemen acilir; daemon arka planda baslatilir (20sn blok yok)
+- `--show-gui` registry LastMode artik `gui` (yanlis `daemon` yazmiyordu)
+- Onceki: port mesgul / SHOW path → pencere gelmiyordu
+
+---
+
+# v4.5.0 — SYSTEM daemon motor + multi GUI frontend
+
+- **SYSTEM Session 0 daemon** kalici motor: threat, firewall, honeypot, Remote Desktop, API
+- **GUI** frontend-only: coklu kullanici ayni anda acabilir; daemon'i oldurmez
+- IPC: `127.0.0.1:58632` — PING / STATUS / HONEYPOT START|STOP|LIST
+- Daemon logon olunca artik `os._exit` yapmaz (tray handoff soft)
+- `status.json` → `%ProgramData%\YesNext\CloudHoneypotClient\` (paylasimli)
+- Dashboard prompt: `AGENT_SYSTEM_DAEMON_FRONTEND_API_PROMPT.md`
+
+---
+
+# v4.4.53 — Multi-user GUI stabil + masaustu kisayol opt-in
+
+- **Cok kullanicili RDP:** Tray task `StopExisting` -> `IgnoreNew` (ikinci logon birinci GUI'yi oldurmez)
+- **MemoryRestart:** sadece Session 0 daemon; interactive GUI'ye dokunmaz
+- **Singleton steal:** baska oturumda interactive client varsa kill yok
+- **QUIT** olayi lifecycle log'a yazilir
+- Installer: **Desktop Shortcut** varsayilan **kapali** (kullanici isaretlerse eklenir)
+
+---
+
+# v4.4.52 — Desktop shortcut checkbox + Guest disable
+
+- Installer Components: **Desktop Shortcut** secenegi (varsayilan isaretli); kaldirirsan masaustune kisayol eklenmez
+- Start Menu kisayolu her zaman olusur
+- **Guest** artik Pasife Al ile kapatilabilir (PROTECTED listeden cikarildi)
+
+---
+
+# v4.4.51 — Watchdog 2m + MemoryRestart fix + lifecycle API
+
+- **Watchdog:** 15 dk -> **2 dk** (cokme sonrasi hizli kaldirma)
+- **MemoryRestart:** yanlis InstallPath duzeltildi (`Cloud Honeypot Client`); exe yoksa Background task fallback
+- Script artik `INSTDIR\scripts\memory_restart.ps1` ( _MEIPASS degil )
+- **Lifecycle log:** `%ProgramData%\YesNext\CloudHoneypotClient\lifecycle.log`
+- API: `POST /api/alerts/lifecycle` (kuyruk + flush) — prompt: `AGENT_LIFECYCLE_ALERTS_API_PROMPT.md`
+
+---
+
+# v4.4.50 — Port izleme ≠ honeypot bait
+
+- Header/tray: honeypot kapalıyken bile EventLog/threat açıksa **Port İzleme Aktif**
+- Gerçek port brute-force (RDP 3389 vb.) kurallar aktifken bait’siz de bildir/engelle
+- API kuralı yoksa yerel `DEFAULT_BLOCK_RULES` (servis başı 3 fail / Network 10)
+- Aktif servis detayında port izleme açıklaması
+- Dashboard seed API: `AGENT_DEFAULT_BLOCK_RULES_API_PROMPT.md`
+
+---
+
+# v4.4.49 — Remote keyboard fix (Unicode) + CAD SendSAS
+
+- **Klavye:** tek karakter (`a`, `ğ`, `@`, `€`…) artık `KEYEVENTF_UNICODE` `SendInput` — QWERTY VK map yok
+- **SendInput** 64-bit güvenli INPUT union (önceki bozuk struct klavyeyi sessizce düşürüyordu)
+- `type_text`, `escape`/`enter`/`ctrl+c` vb. korunuyor
+- Log: `[remote-input] t=input event=… key=…`
+- **CAD:** `remote_send_sas` → `sas.dll` `SendSAS(0)` (sentetik ctrl+alt+del değil)
+
+---
+
+# v4.4.48 — Remote Desktop session picker
+
+- `remote_stream_start` artık `session_id` / `username` / `monitor` dinliyor
+- 0 interaktif oturum → `NO_INTERACTIVE_SESSION` (streaming yalanı yok)
+- Varsayılan: Console Active → Console → Active RDP → ilk
+- Farklı WTS session → `CreateProcessAsUser` helper ile o masaüstü
+- Result + WS meta: `session_id`, `username`
+
+---
+
+# v4.4.47 — Remote command coalesce + faster IP update
+
+- **Remote Desktop:** Aynı poll batch’inde birden fazla `remote_stream_start` varsa yalnızca **en yenisi** uygulanır; eskiler `cancelled` / `SUPERSEDED` olarak raporlanır
+- **Poll docstring** güncellendi (1s IR/stream)
+- **WAN IP:** Public IP cache **5 dk → 60 sn**; ağ değişince `update-ip` daha hızlı
+
+---
+
+# v4.4.46 — Faster silent update checks
+
+- Silent update poll: **30 dk → 15 dk** (Task Scheduler + in-process watchdog)
+- Startup: first check ~**90 sn** after launch (previously waited a full interval)
+- Config floor lowered to **5 dk** (`updates.check_interval_minutes`)
+- No-update poll is a small GitHub `releases/latest` GET only; installer downloads only when a newer version exists
+
+---
+
+# v4.4.45 — Update: client must be closable
+
+Self-protect artık güncelleme sırasında kapanmayı engellemez:
+
+- `disarm_for_update()` — DACL kaldırılır, `HoneypotClientGuard` kapatılır
+- GUI + silent update çıkışında disarm + QUIT
+- `prepare_client_for_installer` her zaman disarm eder
+- Update lock varken QUIT asla ignore edilmez (startup grace bypass)
+- `graceful_exit` önce self-protect’i indirir
+
+---
+
+# v4.4.44 — Log / runtime fixes
+
+- **Firewall:** `HTTPAdapter` import fixed (`client_firewall.py`) — agent no longer fails on startup
+- **Reconcile:** tunnel-status payload’taki `pending_tunnel_commands` listesi artık servis sanılmıyor; crash yok
+- **Self-protect:** `PROCESS_TERMINATE` için `win32con` kullanılıyor (DACL katmanı çalışır)
+- **Tray:** aktif servis yokken spam WARNING kaldırıldı (iş istasyonunda normal)
+
+---
+
+# v4.4.43 — Session 0 GUI fix
+
+Kurulum sonrası süreç çalışıyor ama pencere görünmüyordu: client Session 0 (SYSTEM) içinde Tk GUI açıyordu; kullanıcı masaüstünde (Session 1) görünmez.
+
+- Session 0’da GUI açılmaz; interactive `CloudHoneypot-Tray` / `--show-gui` oturumuna devredilir
+- Daemon, çalışan GUI’yi çalmaz (Watchdog yarışı engellendi)
+- Watchdog: herhangi bir client örneği varsa yeni daemon başlatmaz
+- SHOW: Session 0 her zaman `NOGUI` döner (yanlış “pencere açıldı” cevabı yok)
+- Tray görevi argümanı: `--show-gui`
+
+---
+
+# v4.4.38 — Setup Finish'te Python DLL / _MEI hatasi
+
+## Sorun
+- Finish → Launch: once `--create-tasks` sonra hemen `--show-gui`
+- PyInstaller onefile iki kez `%TEMP%\_MEI*` aciyordu → `Failed to load Python DLL ... python312.dll`
+
+## Fix
+- Interactive finish: tek `ExecShell --show-gui` (task'lar app init'te)
+- Silent: tek `--mode=daemon` (create-tasks cift launch yok)
+- Kill sonrasi 2s bekle (_MEI temizlik)
+
+---
+
+# v4.4.37 — Uygulama ici hesaba bagla
+
+## Yenilik
+- "Hesaba bagla" popup: e-posta + sifre
+- Once `POST /api/agent/link-account` (API prompt: `AGENT_ACCOUNT_LINK_INAPP_API_PROMPT.md`)
+- Yoksa web fallback: `/account/login` + `/account/link-server`
+- Tray menusu ayni popup'i acar; "Web'de ac" hala var
+
+## Not
+- Sifre saklanmaz; basarida e-posta cache + account-status sync
+
+---
+
+# v4.4.36 — GUI tray'e inmiyordu
+
+## Sorun
+- `force_gui_onboarding.flag` token olsa bile tray minimize'i engelliyordu
+- `--show-gui` bayragi kalici kilitleyebiliyordu
+
+## Fix
+- Token varsa onboarding bitmis sayilir → tray'e izin + bayrak temizlenir
+- `--show-gui` artik kalici force flag yazmaz
+
+---
+
+# v4.4.35 — "Installer'i simdi calistir?" sonrasi installer acilmiyordu
+
+## Sorun
+- Evet sonrasi helper once kendi process'ine QUIT gonderiyordu
+- Uygulama installer baslamadan kapaninca NSIS hic acilmiyordu
+- Gizli powershell yolu da log uretmeden sessiz kaliyordu
+
+## Fix
+- Interaktif guncelleme: NSIS installer'i **dogrudan gorunur** ac (UAC/SW_SHOWNORMAL)
+- Self-QUIT yarisi kaldirildi; client installer acildiktan sonra cikar
+- Silent path helper'i ayri kaldi (arka plan guncelleme)
+
+---
+
+# v4.4.34 — Kurulum sonrasi GUI acilmiyordu
+
+## Sorun
+- Eski/gizli `honeypot-client` ornegi singleton mutex'i tutuyordu
+- `--show-gui` DACL yuzunden kapatamayip **exit code 2** ile cikiyordu
+- Finish page GUI'yi acamiyordu
+
+## Fix
+- Calisan ornege once `SHOW` gonder (pencereyi one getir, yeni process gerekmez)
+- Steal basarisizsa `kill-honeypot.ps1 -Force` + taskkill
+- Control socket log storm (WinError 10038) duzeltildi
+- Installer finish: launch oncesi kill + `--create-tasks`
+
+---
+
+# v4.4.33 — Token kimligi: ProgramData + asla rastgele yenilenmez
+
+## Sorun
+- Token `%APPDATA%` altindaydi; SYSTEM daemon ile kullanici GUI farkli dosya okuyup yeni `/register` yapiyordu
+- Load/decrypt fail → otomatik yeni token (API'de eski "silindi" gibi)
+
+## Fix (client)
+- Canonical token: `%ProgramData%\YesNext\CloudHoneypotClient\token.dat`
+- Eski AppData / SystemProfile / token.txt → bir kez migrate
+- Dosya varken veya okunamazken **yeni register yok**
+- Kayit kilidi (cift register engeli)
+- `/register` body: `machine_id` / `hwid` (Windows MachineGuid)
+- Mevcut token uzerine farkli token yazma engeli
+
+## API (ayri)
+- `AGENT_TOKEN_IMMUTABLE_API_PROMPT.md` → register upsert by machine_id
+
+---
+
+# v4.4.32 — GUI guncelleme: indirme sonrasi installer acilmiyordu
+
+## Fix
+- UAC artik `ShellExecuteW runas` ile GUI prosesinden aciliyor (gizli powershell UAC'yi yutuyordu)
+- Indirme bitince hemen "Installer'i calistir?" soruluyor; Evet → helper + hizli exit
+- Helper basarisiz/UAC iptal → dogrudan installer fallback
+- `update-and-install.ps1` hizlandirildi (kisa grace, hizli kill, 0.8s settle)
+- Bloklayan "helper basladi" messagebox kaldirildi (exit gecikiyordu)
+
+---
+
+# v4.4.31 — Hizli installer kill
+
+## Fix
+- PRE-KILL / kill artik tek hizli gecis: taskkill + SeDebug, max 3 kisa tur
+- NSIS artik kill scriptini 15 kez tekrar calistirmiyor; process yoksa skip
+- Settle sureleri kisaltildi (~15s+ -> ~1-2s tipik)
+
+---
+
+# v4.4.30 — Installer PRE-KILL fix
+
+## Fix
+- `scripts/kill-honeypot.ps1` UTF-8 em-dash (`—`) Windows PowerShell'de string'i kırıyordu → `Unexpected token ')'`
+- Script artık ASCII-only; installer PRE-KILL parse hatası giderildi
+
+---
+
+# v4.4.29 — Hesap bağlılığı API’den
+
+## Değişiklikler
+- `GET /api/agent/account-status?token=` (fallback: `client_status` içindeki `account_linked`)
+- API yanıtı source of truth: `true`/`false` local cache’i günceller
+- Heartbeat yanıtında `account_linked` varsa otomatik sync
+- Üst bar: bağlıysa e-posta rozeti; ~60 sn + link sonrası poll
+- Manuel işaretleme yalnızca API yokken offline fallback
+
+---
+
+# v4.4.28 — Hesaba bağlı CTA + i18n
+
+## Hesaba bağla
+- Bağlıysa üst barda CTA yerine **Hesaba bağlı** rozeti.
+- Ayarlar → **Zaten bağlı — işaretle** (mevcut bağlı sunucular için).
+- Link sonrası onay sorusu; Evet → CTA gizlenir.
+- ProgramData `account_link.json` (güncellemede kalır).
+
+## i18n
+- Güncelleme diyaloglarındaki sabit TR metinler `client_lang.json` (TR/EN).
+- Token etiketi `lbl_token` ile dil uyumlu.
+
+---
+
+# v4.4.27 — Güvenli güncelleme akışı (DLL / _MEI hatası)
+
+## Sorun
+Çalışan onefile EXE kapanmadan üzerine yazılınca PyInstaller `_MEI…\python312.dll` yüklenemiyordu.
+Kullanıcı düzeyinde kill, DACL self-protect yüzünden çoğu zaman başarısızdı.
+
+## Yeni akış
+1. İndirme biter → `update-and-install.ps1` (elevated, ayrı süreç) başlar  
+2. Uygulama kendisi çıkar (QUIT)  
+3. Helper SeDebug ile kalan süreçleri öldürür ve **süreç yoksa** kurar  
+4. Installer WAIT → `--create-tasks` → `--show-gui`  
+
+Log: `%ProgramData%\YesNext\CloudHoneypotClient\update-install.log`
+
+---
+
+# v4.4.26 — Sistem dili + güncelleme kill koruması + ilk kurulum GUI
+
+## Dil
+- İlk açılışta Windows arayüz diline göre (TR/EN).
+- Kullanıcı dil değiştirirse ProgramData’da saklanır; güncellemede kaybolmaz.
+
+## Güncelleme ortasında kapanma
+- `kill-honeypot.ps1` artık `update_in_progress.lock` varsa (indirme) öldürmez (`-Force` yalnızca installer).
+- MemoryRestart da aynı kilidi kontrol eder.
+
+## İlk kurulum → GUI görünür
+- Tray görevi çalışan GUI’yi çalmaz (soft singleton).
+- Installer `%ProgramData%` onboarding bayrağı + Tray/Background end.
+- `--show-gui` / onboarding’de pencere zorunlu görünür; tray minimize engellenir.
+
+---
+
+# v4.4.25 — Onboarding GUI + hesap bağlantısı + self-process proof
+
+## Non-silent kurulum
+- Silent değilse pencere tray’e gizlenmez; kullanıcı token / dashboard kaydı yapabilsin.
+- `force_gui_onboarding.flag` (ProgramData) + token yokken pencere zorunlu görünür.
+- Token kopyala / Hesaba bağla / Dashboard açıldıktan sonra tray minimize serbest.
+
+## Hesap / çoklu sunucu (Account)
+- Üst barda **Hesaba bağla** + token kopyala (Link server talimatı).
+- Tray: Dashboard aç, Hesaba bağla, Token’ı kopyala, sunucu adı.
+
+## Self-process (HMAC)
+- Her `health/report` → `agent_runtime` / `self_process` (pid, exe_path, proof).
+- Kendi satır: `is_agent_self` + `self_proof`; isim taklidi → `name_spoof_candidate`.
+- `kill_process` kendi PID → self-refuse (isme göre blanket protect yok).
+
+---
+
+# v4.4.24 — Güncelleme indirme “imha” düzeltmesi + daha sık kontrol
+
+## Sorun
+GUI “Güncellemeleri Denetle” ile indirirken uygulama kapanıyordu.
+
+**Kök neden:** `update_in_progress.lock` kullanıcı `APPDATA` altındaydı.  
+`CloudHoneypot-SilentUpdater` **SYSTEM** olarak çalışıp kilidi görmüyor → indirme ortasında `kill-honeypot` / QUIT.
+
+## Düzeltmeler
+- Kilit artık **ProgramData** (makine geneli) — GUI + SYSTEM aynı dosya
+- İndirme sırasında kilit heartbeat (15 sn)
+- Silent update: kilidi **indirmeden önce** alır; süreç öldürme **yalnızca indirme bitince**
+- İndirme sırasında SilentUpdater + MemoryRestart + Watchdog **durdurulur**
+- Sürüm kontrolü: **30 dk** (Task Scheduler SilentUpdater PT30M + in-process watchdog)
+- Mevcut kurulumlarda startup’ta SilentUpdater aralığı yenilenir
+
+## Config
+```json
+"updates": {
+  "auto_check": true,
+  "check_interval_minutes": 30
+}
+```
+
+---
+
+# v4.4.23 — Uzak masaüstü siyah ekran (RDP disconnected / input desktop)
+
+Dashboard kanıtı (`/api/remote/status`): `has_frame:false`, `live:false` — viewer WS açık ama agent JPEG göndermiyor.
+
+## Kök neden
+RDP oturumu **Disconnected** iken (veya thread input desktop’ta değilken) GDI/ImageGrab **siyah** bitmap döner; client kareyi bilerek göndermez → dashboard “Yayın başlatılıyor…”.
+
+## Düzeltme
+- Capture thread: `OpenInputDesktop` + `SetThreadDesktop`
+- Session state log (Active / Disconnected)
+- Disconnected / siyah karede bir kez `tscon <sid> /dest:console` (masaüstü yeniden çizilsin)
+- Probe karesini WS kuyruğuna da koy; WS bağlanınca son iyi kareyi tekrar gönder
+- HTTP probe başarısızsa `frames_sent` yalan söylemesin
+
+## Not
+`tscon … /dest:console` fiziksel konsolu kısa süre agent oturumuna alabilir — uzak masaüstü için gerekli trade-off.
+
+---
+
+# v4.4.22 — Aylarca uptime: RAM / thread koruması
+
+Saldırı trafiği altında sınırsız büyüyebilecek yapılar ve thread fırtınası giderildi.
+
+## Kritik
+- Honeypot rate-limiter: idle key eviction + max 10k key
+- Honeypot accept: max **48** concurrent handler / servis (fazlası drop)
+- `unique_ips` set: max **5000** (MemoryGuard trim)
+- Alert batch: API down iken hard-cap **1000** (eski drop)
+- Dedup map: hard-cap **20k** + her flush’ta temizlik
+- Urgent/auto-block API raporları: bounded pool (8 worker / 64 pending)
+- Auto-response `_blocks`: max **500** in-memory
+- Threat IP pool LRU: blocked IP’ler de evict edilebilir
+- GDI capture: `finally` ile HDC/HBITMAP sızıntısı yok; log spam azaltıldı
+- FP tuner: stale IP’ler gerçekten siliniyor
+- MemoryGuard: honeypot limiter + unique_ips + auto blocks kayıtlı
+
+## Beklenen
+Aylarca açık sunucuda RAM’in saldırı yoğunluğunda kontrolsüz şişmemesi; process kitlenmesi riskinin düşmesi.
+
+---
+
+# v4.4.21 — Daha hızlı IR (kill / logoff)
+
+Sızma anında dashboard’dan gelen `kill_process` / `logoff_user` 10 sn poll yüzünden geç uygulanıyordu.
+
+## Değişiklikler
+- Komut poll: **10s → 1s** (`threat_detection.command_poll_interval`)
+- IR komutları rate-limit dışı: kill, logoff, block_ip, disable_account, stop_service, lockdown…
+- Aynı poll batch’inde kill/logoff **önce** çalışır
+- Health report kill/logoff yolunu **bloklamaz** (async)
+- `taskkill` / `logoff` timeout 5s
+
+## Beklenen
+Dashboard → Kill/Logoff → agent ≤ ~1 sn içinde uygular.
+
+---
+
+# v4.4.20 — `clear_firewall` remote command
+
+Dashboard Hesap → Bakım “Firewall bloklarını temizle” artık `clear_firewall` kuyruğa atıyor; agent işlemezse `HP-BLOCK-*` Windows’ta kalıyordu.
+
+## Değişiklikler
+- `command_type: clear_firewall` handler (`ALLOWED_COMMANDS` + `_cmd_clear_firewall`)
+- Tüm `HP-BLOCK-`, `HONEYPOT_BLOCK*`, `HONEYPOT_BLOCK_REMOTE*`, legacy prefix’leri sil
+- Yerel blok cache boşalt + `sync-rules []` + `clear-data` scopes=`blocks`
+- `params.ips[]` için isim şablonlarıyla yedek silme
+- `priority: critical` / clear_firewall sonrası poll **≤ 2 sn**
+- `DataCleanupManager` remote executor’a bağlandı
+
+## Acceptance
+- Dashboard firewall temizle → ≤ 60 sn Windows’ta honeypot block kuralı kalmaz
+- `POST /api/commands/result` success + `rules_removed`
+
+---
+
+# v4.4.19 — RDP session=2 capture fix (err 1314)
+
+Log örneği:
+`pid_session=2 console=1` + `WTSQueryUserToken(1) failed err=1314` + `ImageGrab failed`
+
+**Sorun:** Agent RDP oturumundayken (session 2) helper yanlışlıkla **physical console (1)** için token istiyordu → privilege yok (1314).
+
+## Düzeltme
+- Token helper **yalnızca Session 0**’da çalışır; session>0 ise atlanır
+- GDI: BitBlt fail → desktop window DC; brightness log
+- ImageGrab: bbox / primary / all_screens varyantları
+
+---
+
+# v4.4.18 — Siyah ekran: CAPTURE_NO_DESKTOP + Session 0 helper
+
+`AGENT_REMOTE_BLACK_SCREEN_PROMPT.md` uyumu:
+
+Kanıt (`frames_sent=0`, `screen 0×0`, `streaming=true`) için:
+
+- **Dürüst start:** probe capture; `screen/capture` 0 veya siyah/tiny JPEG → `success:false`, `error: CAPTURE_NO_DESKTOP` (streaming yalanı yok)
+- **Siyah / &lt;1500B kare gönderme** (API “Frame too small”)
+- **10 sn frames_sent=0** → stream fail + stop
+- **Session 0:** `CreateProcessAsUser` + `--rd-capture-once` ile interaktif session’dan JPEG
+- Probe sonrası ilk HTTP keyframe hemen basılır
+
+Acceptance: başarılı start’ta `screen.w/h > 0`, birkaç saniyede `frames_sent` artar.
+
+---
+
+# v4.4.17 — Uzak masaüstü siyah ekran düzeltmesi
+
+Dashboard’da siyah görüntü için client tarafı sertleştirildi:
+
+- **GDI BitBlt** birincil yakalama (ImageGrab yedek)
+- **Session 0 / yanlış oturum** uyarısı (servis oturumunda capture çoğu zaman siyah)
+- **Siyah kare tespiti** + log
+- **JPEG magic** doğrulama (`FFD8…FFD9`)
+- **Thread-safe WebSocket**: kareler kuyrukla WS thread’inden gönderilir (bozuk binary önlenir)
+- **HTTP keyframe** her N karede (WS kopsa / proxy binary düşürse dashboard cache dolu kalsın)
+
+Log örnekleri: `first frame ok`, `Nearly-black frame`, `Session ok`.
+
+---
+
+# v4.4.16 — Tam süreç listesi (Notepad++ görünür)
+
+`AGENT_PROCESSES_FULL_LIST_PROMPT.md`:
+
+- `top_processes` / `top_cpu_processes` artık **80–150 unique PID** (eskiden dashboard’da ~10 top-CPU)
+- Birleşim: top 80 CPU + top 40 RAM + **interactive session uygulamaları** (0% CPU dahil) + şüpheli
+- `top_cpu_processes` alias’ı artık kısaltılmıyor (15 satır bug’ı)
+- Acceptance: Notepad++ açıkken ≤60 sn içinde dashboard listesinde
+
+Log: `processes collected: N` / `report ok — … processes=N`
+
+---
+
+# v4.4.15 — Uzak masaüstü akıcı WebSocket
+
+`AGENT_REMOTE_DESKTOP_PROMPT.md` uyumu:
+
+- **WebSocket birincil:** `wss://…/ws/remote/agent?token=` — hello + meta JSON + binary JPEG
+- **HTTP fallback:** `POST /api/remote/frame` + `GET /api/remote/inputs` (~300 ms) WS yokken
+- Hedef **~6 fps** (max 10), JPEG q≈35, kare ≤ ~320 KB
+- Girdi: `mousedown` / `move` / `mouseup` (sürükle), `wheel`, `click`, `dblclick`, `type_text`, `key`
+- UI rozeti: WebSocket (yeşil) / HTTP fallback (turuncu)
+
+---
+
+# v4.4.14 — Uzak masaüstü durum paneli
+
+- Tehdit sekmesinde **Uzak Masaüstü** kartı: Hazır / Yayın aktif / Kullanılamıyor
+- FPS, çözünürlük, kare/girdi sayıları; yayın başlayınca toast
+- Yerel **Durdur** (acil kesim) — başlatma yalnızca Dashboard’dan
+- Repo: `DASHBOARD_CLEANUP_API_PROMPT.md` (temizlik API dashboard prompt’u)
+
+---
+
+# v4.4.13 — Login’liyken oturum raporu hiç başlamıyordu
+
+**Kök neden:** `CloudHoneypot-Background` (`--mode=daemon`) kullanıcı oturumu görünce GUI’ye geçiyor ama `start_delayed_api_sync()` çağrılmıyordu. Tray de cmdline’da `--mode=daemon` görüp health’i atlıyordu → **kimse `active_sessions` göndermiyordu**.
+
+## Düzeltme
+- Daemon→GUI (logon) path’inde `start_delayed_api_sync()` eklendi
+- Tray UI-only health fallback (4.4.12) + daemon health (4.4.11) korunuyor
+
+---
+
+# v4.4.12 — Tray UI-only da oturum raporlasın
+
+v4.4.11 daemon’a HealthMonitor ekledi; pratikte tray hâlâ “daemon var” deyip health’i atlıyor, daemon logu da görünmeyebiliyor → oturum yine gitmiyordu.
+
+## Düzeltme
+- Tray UI-only: ServiceManager/firewall atlanır, **HealthMonitor + RemoteCommands mutlaka başlar**
+- Daemon path (4.4.11) korunur
+- Log: `Faz 3 started (tray-ui: …)` + `report ok — sessions=N`
+
+---
+
+# v4.4.11 — Aktif oturumlar daemon’da raporlanmıyordu
+
+**Sorun:** Daemon + Tray (UI-only) mimarisinde `HealthMonitor` hiç başlatılmıyordu. Tray “daemon halleder” diye atlıyor, daemon ise health/sessions kodunu hiç çalıştırmıyordu. Sonuç: giriş yapmış olsanız bile dashboard’da **Aktif Bağlı Kullanıcılar = 0**.
+
+## Düzeltme
+- `run_daemon()` artık Threat + RemoteCommands + **HealthMonitor** başlatıyor
+- İlk health report hemen gönderiliyor (`force_report`)
+- Log: `report ok — sessions=N processes=M`
+
+---
+
+# v4.4.10 — Güncelleme indirme yarış durumu düzeltmesi
+
+**Sorun:** "Güncellemeleri Denetle" ile indirme ~%20–%25 iken tüm client örnekleri kapanıyor, indirme yarıda kesiliyordu.
+
+**Kök neden:** `CloudHoneypot-SilentUpdater` (veya saatlik watchdog) kendi indirmesini bitirince `prepare_client_for_installer()` çağırıp QUIT + `kill-honeypot.ps1` ile **tüm** `honeypot-client` süreçlerini öldürüyordu — GUI indirmesi de dahil.
+
+## Düzeltmeler
+- İndirme sırasında `update_in_progress.lock` kilidi
+- Silent updater / watchdog kilit varken atlanır
+- İndirme başında yalnızca SilentUpdater/Updater görevleri durdurulur (Background/Tray öldürülmez)
+- Süreç kill yalnızca installer kullanıcı tarafından başlatılınca
+- Installer önce `Start-Process`, sonra kill (Start-Process kaçmasın)
+
+---
+
+# v4.4.9 — Uzak Masaüstü (ekran aynası MVP)
+
+Dashboard **Koruma → Uzak Masaüstü** için agent tarafı.
+
+## Komutlar
+- `remote_stream_start` — JPEG capture loop (fps/quality/max_width)
+- `remote_stream_stop` — yayını kes
+- `remote_input` — click / dblclick / type_text / key
+
+## Upload
+- `POST /api/remote/frame` (multipart `file`)
+- Fallback: `POST /api/remote/frame-json` (base64)
+
+## Güvenlik / limit
+- Yayın yalnızca komut sonrası
+- 5 dk idle (input yok) → otomatik stop
+- Input rate limit ~20/sn
+- `ctrl+alt+del` OS tarafından engelli (atlanır)
+
+## Acceptance
+- [x] start → frame upload
+- [x] click / type_text
+- [x] stop
+- [x] Pillow ImageGrab (user session desktop)
+
+---
+
+# v4.4.8 — V4 update gaps + sessions/processes + stale blocks
+
+## CLIENT_V4_UPDATE_PROMPT — kapatılan boşluklar
+
+| Madde | Önce | Şimdi |
+|--------|------|--------|
+| Commands poll | 5s | **10s** |
+| events/batch | 60s / max 50 / zayıf summary | **120s / 500** + category + full summary; fail’de buffer korunur |
+| Urgent | fire-forget | **3 retry / 30s** + `actions_requested` |
+| Urgent cooldown | critical 60s | **5 dk** (threat_type+IP) |
+| Config sync | 2 dk | **5 dk** + auto_block limits + channels |
+| Health report | const 300 (runtime 60) | **60** |
+| Canary check | 10s | **30s** + config paths |
+| Remote cmds | eksik start/restart / lockdown alias | **eklendi** |
+| Protected accounts | SYSTEM… | + **ADMINISTRATOR** |
+| Silent hours TZ | local | **Europe/Istanbul** (zoneinfo) |
+
+## Önceki 4.4.8 işleri (aynı sürüm)
+
+- `active_sessions` + zengin `top_processes`
+- `pending-unblocks` batch ACK
+- Bakım/temizlik menüsü (clear-data)
+
+## Kalan riskler
+
+- Event channel değişince subscription restart gerekir (uygulandı)
+- `signed`/WinVerifyTrust hâlâ yok (opsiyonel)
+- Canary Public Desktop yolu görünür olabilir — config’ten kapatılabilir
+
+---
+
+# v4.4.7 — Bakım / Temizlik (local + firewall + dashboard)
+
+## Özet
+
+Dashboard’da eski saldırı/KPI verisi kalmasın diye istemci **yerel + firewall + sunucu** temizliğini sırayla destekler. Ayarlar menüsünden çalıştırılır; otomatik limitler arka planda HP-BLOCK kural sayısını ve IP havuzunu sınırlar.
+
+## Client
+
+- `DataCleanupManager` (`client_cleanup.py`)
+  - Yerel: IP pool, session stats, alert dedup, `threats.log`
+  - Firewall: tüm `HP-BLOCK-*` + `sync-rules([])` + `clear-data` scopes=`blocks`
+  - Sunucu: `POST /api/agent/clear-data`
+  - Tam bakım: local → firewall → server
+- Ayarlar menüsü: 4 temizlik eylemi + onay diyalogları
+- Auto limit: max 500 firewall kuralı, max 8000 IP pool (`cleanup.*` config)
+
+## Backend (zorunlu — dashboard temizliği için)
+
+Detay: [`API_CLEAR_DATA_PROMPT.md`](API_CLEAR_DATA_PROMPT.md)
+
+```
+POST /api/agent/clear-data
+{ "token", "scopes": ["attacks","blocks","alerts","threat_summary","all"], "reason" }
+```
+
+`POST /api/agent/sync-rules` boş `blocks: []` ile **replace** (listeyi sıfırla).
+
+Endpoint yoksa client yerel/firewall temizliği yine yapılır; sunucu adımı kullanıcıya uyarı döner.
+
+---
+
+# v4.4.6 — Installer process kill fix
+
+Self-protection DACL + `HoneypotClientGuard` görevi installer'ın `taskkill`'ini engelliyordu / yeniden başlatıyordu.
+
+## Düzeltmeler
+- **QUIT control socket:** Installer önce `127.0.0.1:58632` üzerinden `QUIT` gönderir — süreç kendini kapatır (DACL bypass)
+- **SeDebugPrivilege kill:** `scripts/kill-honeypot.ps1` ile admin TerminateProcess (DACL'yi aşar)
+- **HoneypotClientGuard:** Task Scheduler temizliği artık `HoneypotClient*` wildcard'ını da siler
+- **Stop flags:** `CloudHoneypotClient\watchdog.token` dahil tüm watchdog yolları
+
+---
+
+# v4.4.5 — API sözleşme hizalaması (dashboard sync)
+
+AGENT_CLIENT_REVIEW_PROMPT.md referans alınarak üretim loglarındaki uyumsuzluklar giderildi.
+
+## Düzeltmeler
+
+| # | Sorun | Düzeltme |
+|---|--------|----------|
+| 1 | Auto-block path `v4/auto-block` | Kanonik `POST /api/alerts/auto-block` |
+| 2 | Urgent `auto_response` / float score | `auto_response_taken: string[]`, `threat_score: int`, ISO timestamp |
+| 3 | Attack payload | `ip` alias eklendi; credential → urgent'e password aktarımı |
+| 4 | Health field adları | `disk_io_*_bytes_sec`, `network_bytes_*_sec`, `open_connections` |
+| 5 | Tunnel status | `listen_port` + `port` birlikte gönderiliyor |
+| 6 | events/batch | `batch_id` + kanonik event şeması |
+| 7 | API 422 | Schema `detail` loglanıyor; 2xx kabul |
+| 8 | Open ports | `process` adı (pid üzerinden) |
+| 9 | Installer kill | 5 turlu watchdog-safe process kill |
+
+## Breaking changes
+Yok — sunucu toleranslı alias'lar korunuyor; client kanonik forma geçti.
+
+---
+
+# v4.4.4 — Sidebar hizalama
+
+- **Sidebar nav:** İkon + metin düzeni sabitlendi (sabit ikon sütunu, metin sütunu)
+- **Tema değişkenleri:** Sidebar layout değerleri `client_gui_theme.py` içine taşındı (design tokens)
+
+---
+
+# v4.4.3 — GUI, API & güncelleme akışı
+
+- **API bağlantı:** GET isteklerinde `?token=` query parametresi artık her zaman ekleniyor
+- **Dashboard link:** `?token={full_token}` formatına geri döndü
+- **Sidebar:** Nav butonları hizalı container içinde yeniden düzenlendi
+- **Güncelleme UX:** İlerleme penceresi anında açılır; installer indirme sonrası kullanıcı onayıyla başlar
+- **Installer:** Çalışan client örnekleri kurulum başında hızlıca kapatılır
+
+---
+
+# v4.4.2 — Auto-update fix
+
+- Silent updater now uses `installer_url` from GitHub API (was broken: looked for `download_url`)
+- Weekly updater Task Scheduler task fixed (`--silent-update-check` instead of invalid `--mode=updater`)
+
+**Note:** Clients on v4.4.0/v4.4.1 need one manual update (GUI → Güncellemeleri Denetle) to receive this fix; after that auto-update works every 2 hours.
+
+---
+
+# v4.4.1 — Tray, Performance & Debug
+
+**Date:** 2026-07-08
+
+## Tray
+- Thread-safe `show_window()` / `minimize_to_tray()` (Tk main thread)
+- Windows `SetForegroundWindow` for reliable foreground focus
+- Removed session health auto-hide (prevented reopen from tray)
+- `TrayManager.notify()` for alert balloons
+
+## Performance
+- Dashboard refresh: 10s default (config: `ui.dashboard_refresh_seconds`)
+- Lazy security intel: scans only when Threat Center tab is active
+- IP table refresh only on Dashboard tab
+- `FalsePositiveTuner.start()` periodic cleanup loop
+- Non-blocking CPU sampling in PerformanceOptimizer
+
+## Debug
+- `--debug` CLI flag (verbose logs, skip consent, skip admin elevation)
+- `debug.*` config section unified with `logging.debug_mode`
+- DEBUG badge in title bar when active
+
+## Watchdog
+- Restart with `--show-gui` so window is visible after crash recovery
+
+---
+
+# v4.4.0 — Security, Honeypots & Modern UI
+
+**Date:** 2026-07-08
+
+## Security
+- TLS certificate verification enabled by default (`api.tls_verify`)
+- Bearer token in `Authorization` header; legacy query param optional
+- Log redaction for tokens and passwords
+- HMAC command signing for remote commands
+- `SECURITY.md` added
+
+## Features
+- HTTP honeypot (login form decoy, port 80)
+- SMB honeypot (minimal negotiate probe, port 445)
+- Configurable `services.bind_address`
+- Webhook notifications (`notifications.webhook_url`)
+- Installer SHA-256 verification option
+
+## UI
+- Sidebar navigation (replaces tabs)
+- New slate/emerald design system (`client_gui_theme.py`)
+- Wider default window (1100×720)
+
+## Quality
+- Unit tests (`tests/`)
+- GitHub Actions CI
+- Pre-commit secret check script
+- `OPERATIONS.md` deployment guide
+
+## Migration
+1. Update `client_config.json` or reinstall (config merged on upgrade)
+2. Revoke old tokens if `client.log` was exposed
+3. Backend: enable Bearer auth when ready; set `api.legacy_token_query: false`
+
+---
+
+# v4.0.7 — Auto-Response Fix: Honeypot Attackers Now Auto-Blocked
+
+**Release Date:** 2025-01-20
+**Priority:** 🔴 Critical Fix
+
+## Problem
+
+Honeypot saldırganları tespit ediliyor ve dashboard'da görünüyordu ama:
+- Windows Firewall'a blok kuralı **eklenmiyordu**
+- API'ye saldırı IP'si **bildirilmiyordu**
+- Saldırgan engellenmeden bağlantılarına devam edebiliyordu
+
+## Root Causes
+
+### 1. Standalone Alert — Empty Auto-Response
+`ThreatEngine.process_event()` içinde honeypot credential 90 skor alıyor (critical) ama standalone alert dalı `auto_response=[]` gönderiyordu. AlertPipeline boş auto_response görünce `block_ip` çağırmıyordu.
+
+**Fix:** `honeypot_credential` event'leri veya `critical` severity durumlarında `auto_response = ["block_ip", "notify_urgent"]` set ediliyor.
+
+### 2. Score Degradation — FAILED_LOGON_TYPES Bug
+`honeypot_credential` yanlışlıkla `FAILED_LOGON_TYPES` set'ine eklenmişti. 10+ honeypot hit'inde burst detection tetikleniyor ve skor 90'dan 40'a **düşürülüyordu** (warning seviyesine → auto_response tetiklenmiyordu).
+
+**Fix:** `honeypot_credential` artık `FAILED_LOGON_TYPES`'ta değil. Her honeypot hit sabit 90 skor alıyor.
+
+### 3. Event Field Mapping — target_service/target_port
+Honeypot credential event'leri `service` ve `port` key'lerini kullanıyordu ama `_emit_alert` ve `IPContext.add_event` sadece `target_service` ve `target_port` arıyordu. Alert'lerde servis/port bilgisi boş kalıyordu.
+
+**Fix:** Fallback eklendi: `event.get("target_service", "") or event.get("service", "")`
+
+### 4. Missing Alert Title
+`_build_title` içinde `honeypot_credential` event type'ı için title tanımlı değildi.
+
+**Fix:** `"honeypot_credential": "🍯 Honeypot Credential Captured"` eklendi.
+
+## Changed Files
+
+| File | Change |
+|------|--------|
+| `client_threat_engine.py` | Standalone alert auto_response fix, FAILED_LOGON_TYPES fix, field mapping fallback, honeypot title |
+| `client_constants.py` | VERSION → 4.0.7 |
+
+## Expected Behavior After Fix
+
+1. **İlk honeypot hit:** Skor 90 → severity `critical` → `auto_response=["block_ip", "notify_urgent"]`
+2. **AlertPipeline:** `_execute_auto_response` → `AutoResponse.block_ip()` → Windows Firewall inbound block rule
+3. **API:** `POST /api/alerts/urgent` + `POST /api/alerts/auto-block` ile bildirim
+4. **3+ hit (10 dk içinde):** `honeypot_brute_force` correlation rule → aynı blok aksiyonu
+5. **Skor 90'da sabit kalıyor** — burst logic'e takılmıyor
+
+## Test Checklist
+- [ ] Honeypot'a bağlanan ilk IP anında firewall'a bloklanmalı
+- [ ] Dashboard'da "🍯 Honeypot Credential Captured" alert görünmeli
+- [ ] API'de alerts/urgent ve alerts/auto-block endpoint'lerine bildirim gitmeli
+- [ ] Tekrarlayan saldırılarda skor 40'a düşmemeli
+
+---
+
+# 🚀 Cloud Honeypot Client v4.0.0 — Advanced Threat Detection & Auto-Response
+
+**Release Date:** February 9, 2026
+
+## 🏗️ Architecture — 4-Fazlı Tehdit Algılama Sistemi
+
+v4.0.0, honeypot istemcisine gerçek zamanlı tehdit algılama, otomatik yanıt, ransomware koruması ve performans optimizasyonu yetenekleri ekler. **10 yeni modül** ile toplam ~5.000+ satır yeni kod eklendi.
+
+---
+
+## ⚡ Faz 1 — Real-Time Threat Detection
+
+### Windows Event Log Watcher (`client_eventlog.py`)
+- **EvtSubscribe** push-based real-time event monitoring
+- 5 kanal izleme: Security, System, Application, RDP (2 kanal)
+- ~25 Event ID takibi (4624/4625/4648/4672/4688/4697/4720/4732/1102 vb.)
+- XPath tabanlı verimli sunucu tarafı filtreleme
+- Otomatik hesap/IP/logon-type filtreleme (SYSTEM, DWM-, machine accounts)
+
+### Threat Detection Engine (`client_threat_engine.py`)
+- IP bazlı bağlam havuzu (IPContext) — kümülatif tehdit skoru
+- **THREAT_SCORES** sözlüğü ile 20+ olay tipi skorlaması
+- 4 korelasyon kuralı:
+  - 🔓 Brute Force → Successful Login
+  - 🌙 RDP After Hours (00:00-06:00)
+  - 🕸️ Lateral Movement (2+ servise erişim)
+  - 💀 Post-Exploitation (login → service/user creation)
+- Z-score decay ile otomatik skor azalması
+- 24 saat inaktif IP cleanup
+
+### Alert Pipeline (`client_alerts.py`)
+- Severity tabanlı routing (critical → urgent API, high → normal, warning → batch)
+- Cooldown sistemi ile alert flood önleme
+- Deque tabanlı alert geçmişi (son 200)
+
+---
+
+## 🛡️ Faz 2 — Automated Response & Remote Commands
+
+### Auto Response (`client_auto_response.py`)
+- `block_ip` — netsh advfirewall ile IP engelleme (süreli/süresiz)
+- `unblock_ip` — IP engeli kaldırma
+- `logoff_user` — Aktif oturum sonlandırma
+- `disable_account` / `enable_account` — Hesap yönetimi
+- `emergency_lockdown` — Tüm trafiği engelle, sadece management IP'ye izin ver
+
+### Remote Command Executor (`client_remote_commands.py`)
+- Dashboard'dan 14 uzak komut desteği
+- 5 saniyelik polling ile komut bekleme
+- **ALLOWED_COMMANDS** whitelist güvenlik katmanı
+- Korumalı hesaplar/süreçler/servisler (SYSTEM, lsass.exe vb.)
+- 5 dakika komut expiry süresi
+- Rate limiting (10 komut/dakika)
+
+### Silent Hours Guard (`client_silent_hours.py`)
+- 5 mod: Disabled, Night Only, Outside Working, Always, Custom
+- Gece-yarısı geçen saat aralıkları desteği
+- Hafta sonu tüm gün sessiz mod
+- IP + Subnet whitelist
+- Otomatik aksiyonlar: block_ip + logoff + disable_account
+
+---
+
+## 🧬 Faz 3 — Advanced Protection
+
+### Ransomware Shield (`client_ransomware_shield.py`)
+- **Katman 1 — Canary Files**: 45 tuzak dosya (3 klasör × 5 dosya × 3 konum), SHA-256 integrity check
+- **Katman 2 — File System Watchdog**: Toplu rename/modify tespiti
+- **Katman 3 — Suspicious Process Detector**: 9 regex pattern (vssadmin delete shadows, bcdedit, cipher /w vb.)
+- **Katman 4 — VSS Monitor**: Shadow Copy sayısı izleme, silme tespiti
+- Skor 100 → Emergency alert + süreç öldürme
+
+### System Health Monitor (`client_system_health.py`)
+- 9 sistem metriği izleme (CPU, RAM, Disk, I/O, Network, Process count, Connections)
+- **AnomalyDetector**: Hareketli ortalama + z-score > 3.0 anomali tespiti
+- Korelasyon: CPU + Disk I/O spike → kripto madenci şüphesi
+- 5 dakikada bir API'ye health snapshot raporu
+
+### Process Self-Protection (`client_self_protection.py`)
+- **Katman 1 — Task Scheduler**: Süreç ölürse otomatik yeniden başlatma
+- **Katman 2 — DACL Koruması**: `SetProcessShutdownParameters` + DACL ile taskkill engelleme
+- **Katman 3 — Safe Last Breath**: Süreç sonlandırılırken güvenli aksiyon
+  - Aktif tehdit varsa → sadece şüpheli IP engellenir
+  - Tehdit yoksa → firewall'a dokunulmaz (sunucu brick olmaz)
+  - ⚠️ Tasarım prensibi: "Primum non nocere"
+
+---
+
+## ⚙️ Faz 4 — Polish & Production
+
+### Performance Optimizer (`client_performance.py`)
+- Adaptif throttling: CPU ≥85% → 2x, ≥95% → 4x interval artışı
+- Event rate limiting: 50/s max, queue overflow koruması
+- Module interval adjuster callback sistemi
+- ASCII sparkline trend verileri (deque maxlen=360, ~3 saat)
+
+### False Positive Tuner (`client_performance.py`)
+- Per-event-type cooldown sistemi (failed_logon: 60s, burst: 300s vb.)
+- FP_SCORE_ADJUSTMENTS: Sık FP üreten olaylar için skor çarpanları
+- Auto-whitelist learning: 50+ event + max_score<10 → güvenilir IP
+- Stale cooldown entry cleanup
+
+### GUI Enhancements
+- 📊 **Threat Dashboard**: threat_level, events/hour, tracked IPs kartları
+- 🧬 **Faz 3 Cards**: Ransomware Shield, CPU/RAM, Protection status
+- 📜 **Live Threat Feed**: Son 200 satır, scrollable
+- ⚡ **Quick Response Buttons**: Block IP, Logoff, Disable, Snapshot
+- 🔇 **Silent Hours Indicator**: Aktif/pasif gösterge
+- 📋 **Command History**: Son 50 komut, scrollable
+- 👥 **Active Sessions**: `query session` + yenile butonu
+- 📈 **Trend Mini-Charts**: ASCII sparklines (▁▂▃▄▅▆▇█)
+
+---
+
+## 🔌 API Endpoints (Backend Gerekli)
+
+| Method | Endpoint | Açıklama |
+|--------|----------|----------|
+| POST | `/api/alerts/urgent` | Kritik alert gönderimi |
+| POST | `/api/events/batch` | Toplu event raporlama |
+| POST | `/api/alerts/auto-block` | Otomatik IP block bildirimi |
+| GET | `/api/commands/pending` | Bekleyen komutları çek |
+| POST | `/api/commands/result` | Komut sonucu raporla |
+| GET | `/api/threats/config` | Tehdit config çek |
+| POST | `/api/alerts/silent-hours` | Sessiz saat ihlali bildirimi |
+| POST | `/api/health/report` | Sistem sağlık raporu |
+| GET | `/api/threats/summary` | Tehdit özeti çek |
+| PUT | `/api/notifications/preferences` | Bildirim tercihleri güncelle |
+| POST | `/api/alerts/ransomware` | Ransomware alert bildirimi |
+| POST | `/api/alerts/self-protection` | Süreç koruma bildirimi |
+
+---
+
+## 📦 Yeni Dosyalar
+
+| Dosya | Satır | Açıklama |
+|-------|-------|----------|
+| `client_eventlog.py` | ~442 | Windows Event Log Watcher |
+| `client_threat_engine.py` | ~657 | Threat Detection Engine |
+| `client_alerts.py` | ~402 | Alert Pipeline |
+| `client_auto_response.py` | ~517 | Automated Response |
+| `client_remote_commands.py` | ~579 | Remote Command Executor |
+| `client_silent_hours.py` | ~401 | Silent Hours Guard |
+| `client_ransomware_shield.py` | ~552 | Ransomware Shield |
+| `client_system_health.py` | ~393 | System Health Monitor |
+| `client_self_protection.py` | ~400 | Process Self-Protection |
+| `client_performance.py` | ~419 | Performance Optimizer + FP Tuner |
+
+---
+
+## 🐛 Bug Fixes
+
+| Sorun | Çözüm |
+|-------|-------|
+| ProcessProtection constructor TypeError | `alert_pipeline`, `api_client` parametreleri eklendi, `api_url` otomatik türetilir |
+| RansomwareShield `threat_engine` kabul etmiyor | Constructor'a `threat_engine` kwarg eklendi |
+| SystemHealthMonitor `threat_engine` kabul etmiyor | Constructor'a `threat_engine` kwarg eklendi |
+
+---
+
+## ⚠️ Notlar
+
+- Tüm modüller backend API hazır olmadan da çalışır (graceful fallback)
+- try/except ile API hataları sessizce yutulur — servis kesintisi olmaz
+- SilentHoursGuard ve FalsePositiveTuner pasif bileşenlerdir (daemon thread yok)
+- Minimum Python 3.9+, Önerilen: Python 3.12
+- Gerekli paketler: `requirements.txt` dosyasına bakınız
+
+---
+
+# 🚀 Cloud Honeypot Client v3.1.0 - UI Polish & Reliability
+
+**Release Date:** February 8, 2026
+
+## 🎨 GUI Improvements
+
+### Dark Mode & Layout
+- **Unified top bar**: PC/IP, Token, version, Dashboard, Settings, Help — all in one compact row
+- **Custom dark popup menus**: Settings and Help dropdowns now use CTkToplevel dark popups instead of tk.Menu
+- **Popup toggle fix**: Menus now properly reopen after first use (replaced FocusOut with global click-away)
+- **Service card icon alignment**: Fixed RDP/MSSQL icon extra spacing caused by emoji variation selectors
+- **Fixed icon widths**: All service cards now have consistent icon column width (30px, centered)
+
+### Protection Status
+- **Accurate header badge**: "Koruma Aktif" (green) shows immediately on startup when services are running — no more 5-second delay
+- **Faster pulse blink**: Status dot now blinks every 800ms (was 5 seconds tied to dashboard refresh)
+
+## 🔄 Service Auto-Restore
+
+- **Persistent service state**: Services that were running before app close/update are now automatically restarted on next launch
+- **Background restore**: Services restart in a background thread so GUI doesn't freeze
+- **Consent-aware**: Auto-restore only activates if user consent is accepted
+- **Per-service logging**: Each restored service logs success/failure individually
+
+## 🌐 API Connection Status
+
+- **Real-time tracking**: Dashboard "API Connection" card now reflects actual API call success/failure (`_last_api_ok` flag)
+- **Instant disconnect detection**: If API becomes unreachable, status switches to "Disconnected" (red) within one polling cycle
+- **No false positives**: Previously showed "Connected" forever after first successful call
+
+## 📦 Installer Improvements
+
+### Finish Page
+- **Launch checkbox**: "Launch Cloud Honeypot Client now" checkbox on finish page (checked by default)
+- **De-elevated launch**: App launches as current user (not admin) via `explorer.exe` — prevents session/elevation issues
+- **No ghost window**: Fixed issue where GUI would flash and disappear into tray after install
+
+### Encoding Fix
+- **ASCII-safe finish page**: Replaced Turkish characters with English text in NSIS finish page (NSIS processes .nsi as ACP/ANSI, corrupting Turkish chars like ı, ş, ü, ö, ç, ğ)
+
+## 🐛 Bug Fixes
+
+| Issue | Fix |
+|-------|-----|
+| Popup menu won't reopen after first use | Replaced `<FocusOut>` with global `<Button-1>` + `_active_popup` tracking |
+| Header shows "Koruma Pasif" despite active services | Set header status immediately after service cards build |
+| All services reset on every GUI startup | Replaced `write_status([], False)` with `_restore_saved_services()` |
+| API status always "Connected" after first success | Track `_last_api_ok` per API call, update dashboard in real-time |
+| Installer finish page Turkish chars corrupted | Use English-only text for NSIS finish page defines |
+| App launches as admin from installer | Use `explorer.exe` for de-elevated launch via custom NSIS function |
+| RDP/MSSQL service card icons misaligned | Remove variation selectors from emojis + fixed 30px icon width |
+
+## 📋 Technical Details
+
+- **Commits**: 7 commits in this release
+- **Files changed**: `client_gui.py`, `client.py`, `installer.nsi`, `client_constants.py`
+- **Compatibility**: Windows 10/11, Python 3.12.6, CustomTkinter 5.2.2
+
+---
+
+# 🚀 Cloud Honeypot Client v2.8.5 - Performance Optimized
+
+**Release Date:** December 8, 2025
+
+## 📊 Performance Improvements
+
+Bu sürüm uygulamanın performansını ve akıcılığını önemli ölçüde artıran kapsamlı optimizasyonlar içerir.
+
+### 🔴 Kritik İyileştirmeler
+
+| Sorun | Çözüm | İyileştirme |
+|-------|-------|-------------|
+| Attack count için her 10sn'de yeni thread | Thread reuse sistemi | **~8,640 thread/gün tasarrufu** |
+| File heartbeat her 10sn I/O | 60sn'ye optimize edildi | **%83 dosya I/O azaltma** |
+| `gc.collect()` GUI thread'inde | Kaldırıldı | **50-200ms donmalar önlendi** |
+| HEARTBEAT_INTERVAL çift tanım | FILE/API olarak ayrıldı | **Bug düzeltildi** |
+
+### 🟡 Orta Öncelikli İyileştirmeler
+
+| Sorun | Çözüm | İyileştirme |
+|-------|-------|-------------|
+| Public IP her 60sn HTTP çağrısı | 5 dakika cache sistemi | **%80 HTTP azaltma** |
+| İki ayrı tunnel loop (sync + watchdog) | Tek loop'a birleştirildi | **1 thread tasarrufu** |
+| GUI IP güncelleme spam | Sadece değişince güncelle | **Gereksiz render önlendi** |
+| Log spam | Sadece önemli olaylar | **I/O azaltma** |
+
+### 🐛 Bug Fixes
+
+- **Tray Mode Bug**: Tray modunda pencere kendiliğinden açılma sorunu düzeltildi
+- `minimized_to_tray` flag sistemi eklendi
+- `refresh_gui()` artık tray moduna saygı gösteriyor
+
+## 📈 Optimizasyon Metrikleri
+
+| Metrik | v2.8.4 | v2.8.5 | İyileştirme |
+|--------|--------|--------|-------------|
+| Thread oluşturma/gün | ~8,640 | ~0 | **%100** |
+| Dosya I/O/gün | ~17,280 | ~1,440 | **%92** |
+| HTTP IP çağrısı/gün | 1,440 | 288 | **%80** |
+| GUI health check | 30sn | 60sn | **%50** |
+| Attack count poll | 10sn | 15sn | **%33** |
+| Dashboard sync | 30sn | 45sn | **%33** |
+
+## ⏱️ Yeni Timing Değerleri
+
+```python
+FILE_HEARTBEAT_INTERVAL = 60    # (was 10s)
+API_HEARTBEAT_INTERVAL = 60     # API heartbeat
+ATTACK_COUNT_REFRESH = 15       # (was 10s)
+DASHBOARD_SYNC_INTERVAL = 45    # (was 30s)
+DASHBOARD_SYNC_CHECK = 10       # (was 5s)
+WATCHDOG_INTERVAL = 15          # (was 10s)
+IP_CACHE_DURATION = 300         # 5 min (NEW)
+```
+
+## 🔄 Otomatik Güncelleme
+
+Client'ler bu sürümü otomatik olarak alacaktır:
+
+- **GUI/Tray Mode**: Her 1 saatte bir güncelleme kontrolü
+- **Daemon Mode**: Task Scheduler ile her 2 saatte bir (oturum açık olmasa bile)
+- **Silent Update**: Arka planda sessiz güncelleme desteği
+
+## 📦 Modül Güncellemeleri
+
+- `client_helpers.py`: IP cache sistemi eklendi
+- `client_networking.py`: Tunnel loop'lar birleştirildi
+- `client_constants.py`: Timing sabitleri optimize edildi
+- `client.py`: GUI refresh ve tray mode iyileştirmeleri
+
+## ⬆️ Upgrade Notes
+
+Bu sürüm geriye dönük uyumludur. Mevcut kurulumlar otomatik olarak güncellenir.
+
+---
+
+**Full Changelog**: v2.8.4...v2.8.5
+

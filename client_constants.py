@@ -36,7 +36,9 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.15"  # SYSTEM daemon: APP_DIR=ProgramData (fix WinError 183 on systemprofile Roaming)
+VERSION = "4.5.39"  # GUI top banner for dashboard self_update status
+
+
 CLIENT_VERSION = VERSION  # Main version constant
 __version__ = VERSION  # Export for compatibility
 APP_NAME = get_from_config("application.name", "Cloud Honeypot Client")
@@ -405,10 +407,11 @@ AUTO_RESPONSE_MAX_BLOCKS_PER_DAY = 200    # Max firewall blocks per day
 AUTO_RESPONSE_DEFAULT_BLOCK_HOURS = 24    # Default block duration (hours)
 
 # Remote Command Executor — polling & security
-# IR (kill/logoff/block): default 1s — breach response must not wait 10s
-REMOTE_CMD_POLL_INTERVAL = int(get_from_config(
-    "threat_detection.command_poll_interval", 1))
-REMOTE_CMD_IR_POLL_INTERVAL = 1           # Fast poll while IR cmds active
+# IR (kill/logoff/block): sub-second poll — dashboard must feel instant
+REMOTE_CMD_POLL_INTERVAL = max(1, int(get_from_config(
+    "threat_detection.command_poll_interval", 1)))
+REMOTE_CMD_IR_POLL_INTERVAL = 0.5         # Fast poll while IR / after IR burst
+REMOTE_CMD_IR_STICKY_SECONDS = 45         # Stay on IR cadence after urgent cmd
 REMOTE_CMD_EXPIRY_SECONDS = 300           # Commands expire after 5 minutes
 REMOTE_CMD_MAX_PER_MINUTE = 30            # Rate limit for non-IR cmds (IR exempt)
 
@@ -517,6 +520,7 @@ __all__ = [
     'AUTO_RESPONSE_MAX_BLOCKS_PER_HOUR', 'AUTO_RESPONSE_MAX_BLOCKS_PER_DAY',
     'AUTO_RESPONSE_DEFAULT_BLOCK_HOURS',
     'REMOTE_CMD_POLL_INTERVAL', 'REMOTE_CMD_IR_POLL_INTERVAL',
+    'REMOTE_CMD_IR_STICKY_SECONDS',
     'REMOTE_CMD_EXPIRY_SECONDS', 'REMOTE_CMD_MAX_PER_MINUTE',
     'SILENT_HOURS_ENABLED', 'SILENT_HOURS_DEFAULT_MODE',
     'SILENT_HOURS_NIGHT_START', 'SILENT_HOURS_NIGHT_END',

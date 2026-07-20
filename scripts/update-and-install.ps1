@@ -28,7 +28,10 @@ param(
 
     [int]$GraceWaitSec = 20,
 
-    [int]$KillRounds = 4
+    [int]$KillRounds = 4,
+
+    # NSIS /S must never hang the orchestrator forever (Defender / file lock / old Exec-daemon).
+    [int]$InstallerTimeoutSec = 480
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -94,7 +97,8 @@ function Stop-HoneypotTasks {
 }
 
 function Restore-HoneypotTasks {
-    # Re-enable core tasks after aborted update so agents are not stuck forever
+    # Re-enable core tasks — MUST run after every update (success OR fail).
+    # Stop-HoneypotTasks disables these; leaving them disabled = no daemon forever.
     $names = @(
         "CloudHoneypot-SilentUpdater",
         "CloudHoneypot-Updater",
@@ -106,23 +110,100 @@ function Restore-HoneypotTasks {
     foreach ($n in $names) {
         schtasks /change /tn $n /enable 2>$null | Out-Null
     }
-    Write-UpLog "Scheduled tasks re-enabled (recovery)"
+    Write-UpLog "Scheduled tasks re-enabled (Background + Watchdog + updaters)"
+}
+
+function Ensure-DaemonMotor {
+    # Guarantee SYSTEM Session-0 motor is up (dashboard poll / heartbeat).
+    param([string]$ExePath = "")
+    Restore-HoneypotTasks
+    $started = $false
+    try {
+        schtasks /change /tn "CloudHoneypot-Background" /enable 2>$null | Out-Null
+        schtasks /change /tn "CloudHoneypot-Watchdog" /enable 2>$null | Out-Null
+        schtasks /run /tn "CloudHoneypot-Background" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $started = $true
+            Write-UpLog "Ensure-DaemonMotor: CloudHoneypot-Background /run ok"
+        }
+    } catch {
+        Write-UpLog "Ensure-DaemonMotor: Background /run error: $($_.Exception.Message)"
+    }
+    if (-not $started -and $ExePath -and (Test-Path -LiteralPath $ExePath)) {
+        try {
+            Start-Process -FilePath $ExePath -ArgumentList "--mode=daemon","--silent" -WorkingDirectory (Split-Path $ExePath) -WindowStyle Hidden
+            $started = $true
+            Write-UpLog "Ensure-DaemonMotor: Start-Process daemon fallback"
+        } catch {
+            Write-UpLog "Ensure-DaemonMotor: Start-Process failed: $($_.Exception.Message)"
+        }
+    }
+    $ready = $false
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $iar = $tcp.BeginConnect("127.0.0.1", 58632, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(300) -and $tcp.Connected) {
+                $ready = $true
+                $tcp.Close()
+                break
+            }
+            $tcp.Close()
+        } catch {}
+        # Re-kick Background halfway if still silent
+        if ($i -eq 20 -and -not $ready) {
+            schtasks /run /tn "CloudHoneypot-Background" 2>$null | Out-Null
+            Write-UpLog "Ensure-DaemonMotor: re-kick Background (no :58632 yet)"
+        }
+    }
+    Write-UpLog "Ensure-DaemonMotor: ready=$ready (control :58632)"
+    return $ready
+}
+
+function Write-UpdateUiStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [string]$Detail = "",
+        [string]$ErrorText = "",
+        [string]$FromVersion = "",
+        [string]$ToVersion = ""
+    )
+    try {
+        $dir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $path = Join-Path $dir "update_ui_status.json"
+        $prev = $null
+        if (Test-Path -LiteralPath $path) {
+            try { $prev = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json } catch {}
+        }
+        if (-not $FromVersion -and $prev -and $prev.from_version) { $FromVersion = [string]$prev.from_version }
+        if (-not $ToVersion -and $prev -and $prev.to_version) { $ToVersion = [string]$prev.to_version }
+        $obj = [ordered]@{
+            phase         = $Phase
+            from_version  = $FromVersion
+            to_version    = $ToVersion
+            detail        = $Detail
+            error         = $ErrorText
+            updated_at    = [double]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
+        }
+        ($obj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $path -Encoding UTF8 -Force
+    } catch {}
 }
 
 function Fail-Update([int]$Code, [string]$Message) {
     Write-UpLog $Message
-    Clear-UpdateLock
-    Restore-HoneypotTasks
-    # Best-effort: restart daemon so protection continues on old build
     try {
-        $exe = Join-Path ${env:ProgramFiles} "YesNext\Cloud Honeypot Client\honeypot-client.exe"
-        if (-not (Test-Path -LiteralPath $exe)) {
-            $exe = Join-Path ${env:ProgramFiles} "YesNext\CloudHoneypotClient\honeypot-client.exe"
-        }
-        if (Test-Path -LiteralPath $exe) {
-            Start-Process -FilePath $exe -ArgumentList "--mode=daemon","--silent" -WindowStyle Hidden
-        }
+        Write-UpdateUiStatus -Phase "failed" -Detail $Message -ErrorText $Message
     } catch {}
+    Clear-UpdateLock
+    $exe = Join-Path ${env:ProgramFiles} "YesNext\Cloud Honeypot Client\honeypot-client.exe"
+    if (-not (Test-Path -LiteralPath $exe)) {
+        $exe = Join-Path ${env:ProgramFiles} "YesNext\CloudHoneypotClient\honeypot-client.exe"
+    }
+    [void](Ensure-DaemonMotor -ExePath $exe)
     exit $Code
 }
 
@@ -239,6 +320,7 @@ if (-not (Test-Path -LiteralPath $InstallerPath)) {
 }
 
 Set-UpdateLock "installing"
+try { Write-UpdateUiStatus -Phase "installing" -Detail "helper_install_start" } catch {}
 Write-StopFlags
 Write-UpLog "Stopping/disabling scheduled tasks..."
 Stop-HoneypotTasks
@@ -273,14 +355,39 @@ if ($Silent) {
     $argList = @("/S", "/NCRC")
 }
 
-Write-UpLog "Starting installer (wait)..."
+$timeoutSec = [Math]::Max(60, [int]$InstallerTimeoutSec)
+Write-UpLog "Starting installer (timeout=${timeoutSec}s)..."
 try {
     # Interactive: show NSIS UI. Silent: /S args above.
-    $p = Start-Process -FilePath $InstallerPath -ArgumentList $argList -PassThru -Wait
+    # Do NOT use -Wait alone — a hung NSIS (Defender nsExec / mid-install Exec)
+    # blocked self-update forever with log stuck on "Starting installer (wait)...".
+    $p = Start-Process -FilePath $InstallerPath -ArgumentList $argList -PassThru
+    if (-not $p) {
+        Fail-Update 4 "ERROR: Installer failed to start (null process)"
+    }
+    Write-UpLog "Installer PID=$($p.Id) — waiting up to ${timeoutSec}s..."
+    $finished = $p.WaitForExit($timeoutSec * 1000)
+    if (-not $finished) {
+        Write-UpLog "ERROR: Installer hung after ${timeoutSec}s — killing PID $($p.Id) + children"
+        try { & taskkill.exe /F /T /PID $p.Id 2>$null | Out-Null } catch {}
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+        # Old NSIS may have started daemon mid-install; clear before Fail-Update restart
+        Stop-HoneypotProcesses
+        Fail-Update 7 "ERROR: installer_timeout after ${timeoutSec}s"
+    }
     $code = $p.ExitCode
     Write-UpLog "Installer exit code: $code"
 } catch {
     Fail-Update 4 "ERROR: Installer failed to start: $($_.Exception.Message)"
+}
+
+# Old installers Exec'd daemon under /S; stop them so --create-tasks / relaunch is clean
+$mid = @(Get-HoneypotPids)
+if ($mid.Count -gt 0) {
+    Write-UpLog "Post-install: stopping NSIS-spawned honeypot (PIDs=$($mid -join ','))..."
+    Enable-SeDebugPrivilege
+    Stop-HoneypotProcesses
+    Start-Sleep -Milliseconds 400
 }
 
 if ($InstallDir -eq "") {
@@ -304,15 +411,30 @@ if ($size -lt 1000000) {
 
 Write-UpLog "Creating scheduled tasks..."
 try {
-    Start-Process -FilePath $exe -ArgumentList "--create-tasks" -Wait -WindowStyle Hidden
+    $ct = Start-Process -FilePath $exe -ArgumentList "--create-tasks" -PassThru -WindowStyle Hidden
+    if ($ct) {
+        if (-not $ct.WaitForExit(120000)) {
+            Write-UpLog "WARN: --create-tasks hung — killing"
+            try { Stop-Process -Id $ct.Id -Force -ErrorAction SilentlyContinue } catch {}
+            Restore-HoneypotTasks
+        } elseif ($ct.ExitCode -ne 0) {
+            Write-UpLog "WARN: --create-tasks exit=$($ct.ExitCode)"
+            Restore-HoneypotTasks
+        }
+    }
 } catch {
     Write-UpLog "WARN: --create-tasks failed: $($_.Exception.Message)"
     Restore-HoneypotTasks
 }
 
 Clear-UpdateLock
+try { Write-UpdateUiStatus -Phase "done" -Detail "install_complete" } catch {}
 
-if ($ShowGuiAfter -or -not $Silent) {
+# CRITICAL: Stop-HoneypotTasks disabled Background+Watchdog — always restore + start motor
+[void](Ensure-DaemonMotor -ExePath $exe)
+
+if (-not $Silent) {
+    # Interactive NSIS path — visible onboarding/GUI
     Write-UpLog "Launching GUI..."
     try {
         Start-Process -FilePath $exe -ArgumentList "--show-gui" -WorkingDirectory $InstallDir
@@ -320,22 +442,28 @@ if ($ShowGuiAfter -or -not $Silent) {
         Write-UpLog "WARN: GUI launch failed: $($_.Exception.Message)"
     }
 } else {
-    Write-UpLog "Silent mode - starting daemon..."
-    try {
-        Start-Process -FilePath $exe -ArgumentList "--mode=daemon","--silent" -WorkingDirectory $InstallDir -WindowStyle Hidden
-    } catch {
-        Write-UpLog "WARN: daemon launch failed: $($_.Exception.Message)"
+    # Silent update: if someone is logged on, start tray (not full GUI window).
+    $wantTray = [bool]$ShowGuiAfter
+    if (-not $wantTray) {
+        try {
+            $q = & query session 2>$null | Out-String
+            if ($q -match '(?i)(console|rdp-tcp).*\s+Active') {
+                $wantTray = $true
+            }
+        } catch {}
     }
-    # If someone is already interactively logged on, also bring tray onto their desktop
-    try {
-        $q = & query session 2>$null | Out-String
-        if ($q -match '(?i)(console|rdp-tcp)\S*\s+\S+\s+\d+\s+Active') {
-            Write-UpLog "Interactive session present - starting Tray..."
+    if ($wantTray) {
+        Write-UpLog "Interactive session — starting Tray after silent update..."
+        try {
             schtasks /change /tn "CloudHoneypot-Tray" /enable 2>$null | Out-Null
             schtasks /run /tn "CloudHoneypot-Tray" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-UpLog "WARN: CloudHoneypot-Tray /run failed (exit=$LASTEXITCODE) — trying --mode=tray"
+                Start-Process -FilePath $exe -ArgumentList "--mode=tray" -WorkingDirectory $InstallDir
+            }
+        } catch {
+            Write-UpLog "WARN: Tray handoff after silent update: $($_.Exception.Message)"
         }
-    } catch {
-        Write-UpLog "WARN: Tray handoff after silent update: $($_.Exception.Message)"
     }
 }
 

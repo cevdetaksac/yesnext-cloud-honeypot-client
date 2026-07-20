@@ -63,7 +63,10 @@ def is_session_zero() -> bool:
 
 
 def has_interactive_user_session(query_stdout: Optional[str] = None) -> bool:
-    """True if any Active console/RDP session with id > 0 exists (not services/Session 0)."""
+    """True if any Active console/RDP session with id > 0 exists (not services/Session 0).
+
+    Locale-aware: EN Active, TR Aktif, DE Aktiv, ES Activo, IT Attivo, …
+    """
     try:
         import subprocess
         stdout = query_stdout
@@ -76,27 +79,111 @@ def has_interactive_user_session(query_stdout: Optional[str] = None) -> bool:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
-                return False
+                # Fallback: query user (also localized)
+                result = subprocess.run(
+                    ["query", "user"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode != 0:
+                    return False
             stdout = result.stdout or ""
-        for line in stdout.splitlines()[1:]:
-            if "Active" not in line:
-                continue
-            low = line.lower()
-            if "services" in low:
-                continue
-            parts = line.split()
+        if _stdout_has_active_interactive(stdout):
+            return True
+        # Second source if first was session-only and empty
+        if query_stdout is None:
             try:
-                # SESSIONNAME USERNAME ID STATE … — ID sits immediately before Active
-                idx = next(i for i, p in enumerate(parts) if p == "Active")
-                sid = int(parts[idx - 1])
-                if sid > 0:
+                r2 = subprocess.run(
+                    ["query", "user"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if r2.returncode == 0 and _stdout_has_active_interactive(r2.stdout or ""):
                     return True
-            except (StopIteration, ValueError, IndexError):
-                if "console" in low or "rdp" in low:
-                    return True
+            except Exception:
+                pass
         return False
     except Exception:
         return False
+
+
+# Windows "query session/user" state column — not always English "Active"
+_ACTIVE_STATE_TOKENS = frozenset({
+    "active", "aktif", "aktiv", "activo", "attivo", "активно",
+})
+
+
+def _is_active_state_token(tok: str) -> bool:
+    t = (tok or "").strip().lower().lstrip(">")
+    if not t:
+        return False
+    if t in _ACTIVE_STATE_TOKENS:
+        return True
+    # Some builds prefix / suffix punctuation
+    return any(t.startswith(a) or t.endswith(a) for a in _ACTIVE_STATE_TOKENS)
+
+
+def _stdout_has_active_interactive(stdout: str) -> bool:
+    for line in (stdout or "").splitlines()[1:]:
+        low = line.lower()
+        if "services" in low or "servis" in low:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            idx = next(i for i, p in enumerate(parts) if _is_active_state_token(p))
+        except StopIteration:
+            continue
+        # Session id is typically immediately before state
+        sid = None
+        if idx >= 1:
+            try:
+                sid = int(parts[idx - 1])
+            except ValueError:
+                sid = None
+        if sid is not None:
+            if sid > 0:
+                return True
+            continue
+        # No numeric id parsed — still treat console/rdp Active as interactive
+        if "console" in low or "rdp" in low or "tcp#" in low:
+            return True
+    return False
+
+
+def get_active_interactive_session_id() -> int:
+    """Best-effort WTS session id (>0) for Active console/RDP, or 0."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["query", "session"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            return 0
+        for line in (result.stdout or "").splitlines()[1:]:
+            low = line.lower()
+            if "services" in low or "servis" in low:
+                continue
+            parts = line.split()
+            try:
+                idx = next(i for i, p in enumerate(parts) if _is_active_state_token(p))
+                sid = int(parts[idx - 1])
+                if sid > 0:
+                    return sid
+            except (StopIteration, ValueError, IndexError):
+                continue
+    except Exception:
+        pass
+    return 0
 
 
 def interactive_frontend_running() -> bool:
@@ -130,12 +217,15 @@ def launch_interactive_tray_gui() -> bool:
     """Start CloudHoneypot-Tray in the logged-on user session (visible desktop)."""
     try:
         import subprocess
+        import sys
+        import time
         from client_task_scheduler import TASK_NAME_TRAY
         CREATE_NO_WINDOW = 0x08000000
         if interactive_frontend_running():
             log(f"[SESSION] Interactive frontend already running — skip {TASK_NAME_TRAY}")
             return True
-        # Ensure task is enabled, then run (Authenticated Users → any interactive logon)
+
+        # 1) Prefer Task Scheduler Logon task (runs in user session)
         subprocess.run(
             ["schtasks", "/change", "/tn", TASK_NAME_TRAY, "/enable"],
             capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
@@ -147,9 +237,122 @@ def launch_interactive_tray_gui() -> bool:
         )
         ok = r.returncode == 0
         log(f"[SESSION] Trigger {TASK_NAME_TRAY}: rc={r.returncode} ok={ok}")
-        return ok
+        if ok:
+            time.sleep(2.5)
+            if interactive_frontend_running():
+                return True
+            log("[SESSION] schtasks /run returned ok but no interactive frontend yet — trying CreateProcessAsUser")
+
+        # 2) SYSTEM → inject into Active interactive session (Admin RDP / console)
+        if _launch_tray_via_wts():
+            time.sleep(1.5)
+            if interactive_frontend_running():
+                log("[SESSION] Tray started via WTS CreateProcessAsUser")
+                return True
+
+        return interactive_frontend_running()
     except Exception as e:
         log(f"[SESSION] launch_interactive_tray_gui failed: {e}")
+        return False
+
+
+def _launch_tray_via_wts() -> bool:
+    """CreateProcessAsUser(--mode=tray) into Active session id > 0 (needs SYSTEM)."""
+    try:
+        import ctypes
+        import sys
+        from ctypes import wintypes
+
+        session_id = get_active_interactive_session_id()
+        if session_id <= 0:
+            log("[SESSION] WTS launch: no active interactive session id")
+            return False
+
+        if getattr(sys, "frozen", False):
+            exe = sys.executable
+            cmdline = f'"{exe}" --mode=tray'
+        else:
+            exe = sys.executable
+            script = os.path.abspath(sys.argv[0]) if sys.argv else ""
+            cmdline = f'"{exe}" "{script}" --mode=tray'
+
+        wts = ctypes.windll.wtsapi32
+        adv = ctypes.windll.advapi32
+        kernel = ctypes.windll.kernel32
+
+        h_token = wintypes.HANDLE()
+        if not wts.WTSQueryUserToken(session_id, ctypes.byref(h_token)):
+            err = kernel.GetLastError()
+            log(f"[SESSION] WTSQueryUserToken({session_id}) failed err={err}")
+            return False
+
+        class STARTUPINFO(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.POINTER(wintypes.BYTE)),
+                ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", wintypes.HANDLE),
+                ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        si = STARTUPINFO()
+        si.cb = ctypes.sizeof(STARTUPINFO)
+        si.lpDesktop = "winsta0\\default"
+        pi = PROCESS_INFORMATION()
+        CREATE_UNICODE_ENVIRONMENT = 0x00000400
+        CREATE_NEW_CONSOLE = 0x00000010
+        cmd_buf = ctypes.create_unicode_buffer(cmdline)
+
+        ok = adv.CreateProcessAsUserW(
+            h_token,
+            None,
+            cmd_buf,
+            None,
+            None,
+            False,
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
+            None,
+            None,
+            ctypes.byref(si),
+            ctypes.byref(pi),
+        )
+        try:
+            kernel.CloseHandle(h_token)
+        except Exception:
+            pass
+        if not ok:
+            log(f"[SESSION] CreateProcessAsUser failed err={kernel.GetLastError()}")
+            return False
+        try:
+            kernel.CloseHandle(pi.hThread)
+            kernel.CloseHandle(pi.hProcess)
+        except Exception:
+            pass
+        log(f"[SESSION] CreateProcessAsUser tray pid={pi.dwProcessId} session={session_id}")
+        return True
+    except Exception as e:
+        log(f"[SESSION] _launch_tray_via_wts: {e}")
         return False
 
 

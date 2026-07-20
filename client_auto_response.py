@@ -47,12 +47,10 @@ MAX_BLOCKS_PER_HOUR = 50
 MAX_BLOCKS_PER_DAY = 200
 AUTO_UNBLOCK_HOURS = 24
 
-# Protected resources — never touch these
+# Protected resources — OS machine identities only (IR may touch Administrator)
 PROTECTED_ACCOUNTS: Set[str] = {
     "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE",
-    "DEFAULTACCOUNT", "WDAGUTILITYACCOUNT",
-    "ADMINISTRATOR",  # never disable/reset via remote cmd
-    # Guest intentionally NOT protected — hardening should disable it
+    "WDAGUTILITYACCOUNT",
 }
 
 PROTECTED_PROCESSES: Set[str] = {
@@ -184,6 +182,34 @@ class AutoResponse:
                 for b in self._blocks.values()
             ]
 
+    def hydrate_from_inventory(self, inventory: dict) -> int:
+        """Load firewall/ProgramData inventory into RAM (no new netsh rules).
+
+        inventory: {ip: {rule_name, reason, blocked_at, source}}
+        """
+        if not inventory:
+            return 0
+        added = 0
+        with self._lock:
+            for ip, info in inventory.items():
+                if not ip or ip in self._blocks:
+                    continue
+                info = info or {}
+                self._blocks[ip] = BlockRecord(
+                    ip=ip,
+                    rule_name=info.get("rule_name") or f"{FIREWALL_RULE_PREFIX}-{ip}",
+                    reason=info.get("reason") or "firewall_persist",
+                    blocked_at=float(info.get("blocked_at") or time.time()),
+                    unblock_at=0,
+                    auto_unblock=False,
+                )
+                added += 1
+            # Hydrated permanent blocks: allow up to 5000 for GUI listing
+            self._trim_blocks_locked(max_blocks=5000)
+        if added:
+            log(f"[AUTO-RESPONSE] Hydrated {added} blocked IP(s) from firewall/store")
+        return added
+
     # ── IP Blocking ───────────────────────────────────────────────
 
     def block_ip(self, ip: str, reason: str = "",
@@ -244,6 +270,18 @@ class AutoResponse:
             log(f"[AUTO-RESPONSE] 🚫 Blocked: {ip} — {reason} "
                 f"(auto-unblock: {duration_hours}h)")
 
+            try:
+                from client_block_store import upsert_block
+                upsert_block(
+                    ip,
+                    rule_name=rule_name,
+                    source="auto_response",
+                    reason=reason or "auto_block",
+                    blocked_at=now,
+                )
+            except Exception:
+                pass
+
             # Report to API (auto-block + block-applied)
             self._report_block_to_api(ip, reason, duration_hours)
             self._report_block_applied(ip, rule_name)
@@ -254,12 +292,20 @@ class AutoResponse:
             return False
 
     def _trim_blocks_locked(self, max_blocks: int = 500) -> int:
-        """Cap in-memory block dict (call with _lock held). Prefer oldest permanent."""
+        """Cap in-memory block dict (call with _lock held). Drop temporary first."""
         if len(self._blocks) <= max_blocks:
             return 0
+
+        def _evict_prio(b: BlockRecord) -> int:
+            if b.auto_unblock:
+                return 0
+            if (b.reason or "").startswith("firewall"):
+                return 2  # keep firewall/persist longest
+            return 1
+
         items = sorted(
             self._blocks.values(),
-            key=lambda b: (0 if not b.auto_unblock else 1, b.blocked_at),
+            key=lambda b: (_evict_prio(b), b.blocked_at),
         )
         drop_n = len(self._blocks) - max_blocks
         removed = 0
@@ -319,6 +365,11 @@ class AutoResponse:
                 success = True
             self._stats["blocks_removed"] += 1
             log(f"[AUTO-RESPONSE] ✅ Unblocked: {ip}")
+            try:
+                from client_block_store import remove_block
+                remove_block(ip)
+            except Exception:
+                pass
             self._report_unblock_to_api(ip)
             return True
         log(f"[AUTO-RESPONSE] ❌ Unblock failed: {ip}")
@@ -328,6 +379,11 @@ class AutoResponse:
         """Drop IP from local block cache only (firewall already handled)."""
         with self._lock:
             self._blocks.pop(ip, None)
+        try:
+            from client_block_store import remove_block
+            remove_block(ip)
+        except Exception:
+            pass
 
     def clear_all_blocks(self, report_api: bool = False) -> int:
         """Remove all tracked firewall blocks (maintenance cleanup).
@@ -359,45 +415,101 @@ class AutoResponse:
     # ── Session Management ────────────────────────────────────────
 
     def logoff_user(self, username: str) -> bool:
-        """Force logoff an active user session."""
-        if username.upper() in PROTECTED_ACCOUNTS:
-            log(f"[AUTO-RESPONSE] ⚪ Cannot logoff protected account: {username}")
+        """Force logoff all sessions for user (Active + Disc), including Administrator."""
+        if not (username or "").strip():
             return False
 
         try:
-            # Find session ID
-            result = subprocess.run(
-                ["query", "session"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            for line in result.stdout.splitlines()[1:]:
-                if username.lower() in line.lower():
+            session_ids: list = []
+            for tool in ("user", "session"):
+                result = subprocess.run(
+                    ["query", tool],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                for line in (result.stdout or "").splitlines()[1:]:
                     parts = line.split()
-                    # Session ID is typically the 2nd or 3rd column
-                    session_id = None
-                    for p in parts:
-                        if p.isdigit():
-                            session_id = p
+                    if not parts:
+                        continue
+                    tokens = [p.lstrip(">") for p in parts]
+                    matched = False
+                    uname = username.lower().lstrip(">")
+                    for tok in tokens:
+                        tl = tok.lower()
+                        if tl == uname:
+                            matched = True
                             break
-                    if session_id:
-                        logoff_result = subprocess.run(
-                            ["logoff", session_id],
-                            capture_output=True, text=True, timeout=10,
+                        for sep in ("\\", "/"):
+                            if sep in tl and tl.rsplit(sep, 1)[-1] == uname:
+                                matched = True
+                                break
+                            if sep in uname and uname.rsplit(sep, 1)[-1] == tl:
+                                matched = True
+                                break
+                        if matched:
+                            break
+                    if not matched:
+                        continue
+                    for p in parts:
+                        if p.isdigit() and p != "0" and p not in session_ids:
+                            session_ids.append(p)
+                            break
+
+            if not session_ids:
+                log(f"[AUTO-RESPONSE] No active session found for: {username}")
+                return False
+
+            any_ok = False
+            for session_id in session_ids:
+                logoff_result = subprocess.run(
+                    ["logoff", session_id],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                still = self._session_id_present(session_id)
+                if logoff_result.returncode != 0 or still:
+                    for cmd in (
+                        ["reset", "session", session_id],
+                        ["rwinsta", session_id],
+                    ):
+                        subprocess.run(
+                            cmd, capture_output=True, text=True, timeout=10,
                             creationflags=CREATE_NO_WINDOW,
                         )
-                        if logoff_result.returncode == 0:
-                            self._stats["logoffs_executed"] += 1
-                            log(f"[AUTO-RESPONSE] 🚪 Logged off: {username} (session {session_id})")
-                            return True
+                        if not self._session_id_present(session_id):
+                            break
+                if not self._session_id_present(session_id):
+                    any_ok = True
+                    self._stats["logoffs_executed"] += 1
+                    log(f"[AUTO-RESPONSE] 🚪 Logged off: {username} (session {session_id})")
+                else:
+                    log(f"[AUTO-RESPONSE] Logoff incomplete for {username} session {session_id}")
 
-            log(f"[AUTO-RESPONSE] No active session found for: {username}")
-            return False
+            return any_ok
 
         except Exception as e:
             self._stats["errors"] += 1
             log(f"[AUTO-RESPONSE] Logoff error for {username}: {e}")
             return False
+
+    @staticmethod
+    def _session_id_present(session_id: str) -> bool:
+        try:
+            q = subprocess.run(
+                ["query", "session"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            for line in (q.stdout or "").splitlines()[1:]:
+                parts = line.split()
+                if session_id in parts:
+                    low = [p.lower() for p in parts]
+                    if "listen" in low:
+                        continue
+                    return True
+            return False
+        except Exception:
+            return True
 
     # ── Account Management ────────────────────────────────────────
 

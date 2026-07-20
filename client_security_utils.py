@@ -182,12 +182,15 @@ def auth_headers(token: Optional[str] = None) -> Dict[str, str]:
 
 
 def use_legacy_token_query() -> bool:
-    """Backward-compatible query-string token (disable when backend supports headers)."""
+    """Query-string token (?token=) — off by default (Bearer header is canonical).
+
+    Set api.legacy_token_query=true only for emergency rollback against old APIs.
+    """
     try:
         from client_utils import get_from_config
-        return bool(get_from_config("api.legacy_token_query", True))
+        return bool(get_from_config("api.legacy_token_query", False))
     except Exception:
-        return True
+        return False
 
 
 def command_signing_enabled() -> bool:

@@ -883,6 +883,21 @@ def _resolve_latest_from_cloud(api_client=None) -> Optional[dict]:
     return None
 
 
+def _default_installer_url(tag: str) -> str:
+    """Build official GitHub release asset URL when API/cloud omit download_url."""
+    t = _normalize_version_tag(tag)
+    if not t:
+        return ""
+    try:
+        from client_constants import GITHUB_OWNER, GITHUB_REPO
+        return (
+            f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
+            f"/releases/download/v{t}/cloud-client-installer.exe"
+        )
+    except Exception:
+        return ""
+
+
 def run_self_update_command(params: Optional[dict] = None, api_client=None) -> dict:
     """
     Dashboard `self_update` — immediate silent install (independent of schedule).
@@ -906,6 +921,17 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
         f"[SELF-UPDATE] begin force={force} tag={tag or '?'} "
         f"from={from_version} triggered_by={params.get('triggered_by', '')}"
     )
+
+    try:
+        from client_update_ui import set_update_ui_status
+        set_update_ui_status(
+            "accepted",
+            from_version=from_version,
+            to_version=tag,
+            detail="self_update_begin",
+        )
+    except Exception:
+        pass
 
     try:
         from client_lifecycle import report_now
@@ -950,7 +976,31 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
                 except Exception:
                     pass
 
+    # Last resort: known tag → canonical release asset (no GitHub API needed)
+    if tag and not download_url:
+        download_url = _default_installer_url(tag)
+        if download_url:
+            log(f"[SELF-UPDATE] using constructed release URL for v{tag}")
+
+    if not tag and download_url:
+        # Try parse .../download/vX.Y.Z/... from URL
+        try:
+            import re
+            m = re.search(r"/download/v?(\d+\.\d+\.\d+)/", download_url, re.I)
+            if m:
+                tag = m.group(1)
+        except Exception:
+            pass
+
     if not download_url:
+        try:
+            from client_update_ui import set_update_ui_status
+            set_update_ui_status(
+                "failed", from_version=from_version, to_version=tag,
+                detail="download_url_missing", error="download_url_missing",
+            )
+        except Exception:
+            pass
         _lifecycle_fail(api_client, "download_url_missing", from_version, tag)
         return {
             "success": False,
@@ -963,6 +1013,14 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
         }
 
     if not _is_allowed_update_url(download_url):
+        try:
+            from client_update_ui import set_update_ui_status
+            set_update_ui_status(
+                "failed", from_version=from_version, to_version=tag,
+                detail="url_not_allowed", error="url_not_allowed",
+            )
+        except Exception:
+            pass
         _lifecycle_fail(api_client, "url_not_allowed", from_version, tag)
         return {
             "success": False,
@@ -977,6 +1035,11 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
     # Skip if already on target (unless force)
     if tag and from_version and tag == from_version and not force:
         log(f"[SELF-UPDATE] already_current {from_version}")
+        try:
+            from client_update_ui import clear_update_ui_status
+            clear_update_ui_status()
+        except Exception:
+            pass
         return {
             "success": True,
             "ok": True,
@@ -1005,19 +1068,46 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
         pass
 
     if is_update_in_progress():
-        _lifecycle_fail(api_client, "busy", from_version, tag)
-        return {
-            "success": False,
-            "ok": False,
-            "error": "busy",
-            "detail": "another_update_in_progress",
-            "from_version": from_version,
-            "to_version": tag,
-            "tag": f"v{tag}" if tag else "",
-        }
+        if force:
+            log("[SELF-UPDATE] force=1 — clearing stale update lock")
+            try:
+                release_update_lock(resume_updaters=False)
+            except Exception:
+                pass
+        else:
+            try:
+                from client_update_ui import set_update_ui_status
+                set_update_ui_status(
+                    "failed", from_version=from_version, to_version=tag,
+                    detail="another_update_in_progress", error="busy",
+                )
+            except Exception:
+                pass
+            _lifecycle_fail(api_client, "busy", from_version, tag)
+            return {
+                "success": False,
+                "ok": False,
+                "error": "busy",
+                "detail": "another_update_in_progress",
+                "from_version": from_version,
+                "to_version": tag,
+                "tag": f"v{tag}" if tag else "",
+            }
 
     acquire_update_lock("dashboard-self-update")
     pause_competing_updaters()
+
+    try:
+        from client_update_ui import set_update_ui_status
+        set_update_ui_status(
+            "downloading",
+            from_version=from_version,
+            to_version=tag,
+            detail="download_starting",
+            progress=0,
+        )
+    except Exception:
+        pass
 
     temp_dir = tempfile.mkdtemp(prefix="honeypot_self_update_")
     installer_path = os.path.join(temp_dir, installer_name or "cloud-client-installer.exe")
@@ -1031,6 +1121,18 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             if pct % 10 == 0:
                 touch_update_lock()
                 log(f"[SELF-UPDATE] download {pct}%")
+            try:
+                from client_update_ui import set_update_ui_status
+                if pct % 5 == 0 or pct >= 99:
+                    set_update_ui_status(
+                        "downloading",
+                        from_version=from_version,
+                        to_version=tag,
+                        detail=f"download_{pct}",
+                        progress=pct,
+                    )
+            except Exception:
+                pass
 
         downloaded = None
         try:
@@ -1046,6 +1148,14 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
         else:
             if not download_installer_file(download_url, installer_path):
                 release_update_lock(resume_updaters=True)
+                try:
+                    from client_update_ui import set_update_ui_status
+                    set_update_ui_status(
+                        "failed", from_version=from_version, to_version=tag,
+                        detail="installer_download_failed", error="download_failed",
+                    )
+                except Exception:
+                    pass
                 _lifecycle_fail(api_client, "download_failed", from_version, tag)
                 return {
                     "success": False,
@@ -1055,28 +1165,41 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
                     "from_version": from_version,
                     "to_version": tag,
                     "tag": f"v{tag}" if tag else "",
+                    "download_url": download_url,
                 }
 
         touch_update_lock()
         actual_size = os.path.getsize(installer_path) if os.path.isfile(installer_path) else 0
         if expected_size and expected_size > 0 and actual_size > 0:
-            # Allow 2% tolerance (CDN / compression metadata)
+            # Soft check — wrong dashboard size must not block fleet updates
             if abs(actual_size - expected_size) > max(1024 * 64, int(expected_size * 0.02)):
-                release_update_lock(resume_updaters=True)
-                _lifecycle_fail(api_client, "size_mismatch", from_version, tag)
-                return {
-                    "success": False,
-                    "ok": False,
-                    "error": "download_failed",
-                    "detail": f"size_mismatch expected={expected_size} got={actual_size}",
-                    "from_version": from_version,
-                    "to_version": tag,
-                    "tag": f"v{tag}" if tag else "",
-                }
+                log(
+                    f"[SELF-UPDATE] size warn expected={expected_size} got={actual_size} — continuing"
+                )
+
+        try:
+            from client_update_ui import set_update_ui_status
+            set_update_ui_status(
+                "staging",
+                from_version=from_version,
+                to_version=tag,
+                detail="staging_installer",
+                progress=100,
+            )
+        except Exception:
+            pass
 
         staged = stage_installer_for_update(installer_path, version=tag or "latest")
         if not staged or not os.path.isfile(staged):
             release_update_lock(resume_updaters=True)
+            try:
+                from client_update_ui import set_update_ui_status
+                set_update_ui_status(
+                    "failed", from_version=from_version, to_version=tag,
+                    detail="stage_failed", error="stage_failed",
+                )
+            except Exception:
+                pass
             _lifecycle_fail(api_client, "stage_failed", from_version, tag)
             return {
                 "success": False,
@@ -1105,6 +1228,14 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
         )
         if not ok:
             release_update_lock(resume_updaters=True)
+            try:
+                from client_update_ui import set_update_ui_status
+                set_update_ui_status(
+                    "failed", from_version=from_version, to_version=tag,
+                    detail="launch_helper_failed", error="launch_helper_failed",
+                )
+            except Exception:
+                pass
             _lifecycle_fail(api_client, "launch_helper_failed", from_version, tag)
             return {
                 "success": False,
@@ -1115,6 +1246,17 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
                 "to_version": tag,
                 "tag": f"v{tag}" if tag else "",
             }
+
+        try:
+            from client_update_ui import set_update_ui_status
+            set_update_ui_status(
+                "installing",
+                from_version=from_version,
+                to_version=tag,
+                detail="helper_launched",
+            )
+        except Exception:
+            pass
 
         try:
             from client_lifecycle import report_now
@@ -1139,11 +1281,20 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             "to_version": tag,
             "tag": f"v{tag}" if tag else "",
             "restart_required": True,
+            "download_url": download_url,
         }
 
     except Exception as e:
         try:
             release_update_lock(resume_updaters=True)
+        except Exception:
+            pass
+        try:
+            from client_update_ui import set_update_ui_status
+            set_update_ui_status(
+                "failed", from_version=from_version, to_version=tag,
+                detail=str(e), error=str(e),
+            )
         except Exception:
             pass
         _lifecycle_fail(api_client, str(e), from_version, tag)

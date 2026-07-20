@@ -6,7 +6,8 @@ Cloud Honeypot Client — Remote Desktop Screen Mirror
 Dashboard “Uzak Masaüstü” — akıcı WebSocket + HTTP fallback.
 
 Primary:
-  wss://…/ws/remote/agent?token=…  → binary JPEG + JSON meta/input
+  wss://…/ws/remote/agent  + Authorization: Bearer …  → binary JPEG + JSON meta/input
+  (legacy: ?token= only if api.legacy_token_query=true)
 Fallback:
   POST /api/remote/frame (+ frame-json)
   GET  /api/remote/inputs (200–500 ms) when WS down
@@ -45,11 +46,14 @@ HTTP_KEYFRAME_EVERY = 6               # also POST HTTP every N frames (dashboard
 MIN_JPEG_BYTES = 1500                 # API rejects tinier frames ("Frame too small")
 MIN_GOOD_JPEG_BYTES = 5 * 1024        # healthy 1280q35 frame is usually ≥5KB
 CAPTURE_FAIL_SECONDS = 10.0           # no frames in this window → fail stream
-PROBE_TIMEOUT_SEC = 3.0
+PROBE_TIMEOUT_SEC = 12.0              # SYSTEM→user CreateProcessAsUser needs cold-start room
 
 
-def _api_to_ws_agent_url(api_base: str, token: str) -> str:
-    """https://host/api → wss://host/ws/remote/agent?token=…"""
+def _api_to_ws_agent_url(api_base: str, token: str = "") -> str:
+    """https://host/api → wss://host/ws/remote/agent (Bearer via header).
+
+    If api.legacy_token_query is enabled, appends ?token= for old servers.
+    """
     base = (api_base or "").strip().rstrip("/")
     if base.lower().endswith("/api"):
         origin = base[:-4]
@@ -61,7 +65,14 @@ def _api_to_ws_agent_url(api_base: str, token: str) -> str:
         ws = "ws://" + origin[len("http://"):]
     else:
         ws = "wss://" + origin.lstrip("/")
-    return f"{ws}/ws/remote/agent?{urlencode({'token': token})}"
+    url = f"{ws}/ws/remote/agent"
+    try:
+        from client_security_utils import use_legacy_token_query
+        if token and use_legacy_token_query():
+            return f"{url}?{urlencode({'token': token})}"
+    except Exception:
+        pass
+    return url
 
 
 class RemoteDesktopStreamer:
@@ -249,8 +260,32 @@ class RemoteDesktopStreamer:
                 f"state={state} pid_session={sid}")
 
             jpeg, w, h = None, 0, 0
+            helper_err = ""
             if need_helper:
+                t_helper = time.time()
                 jpeg, w, h = self._grab_via_user_helper()
+                took = time.time() - t_helper
+                log(f"[REMOTE-DESKTOP] helper probe took {took:.1f}s "
+                    f"jpeg={0 if not jpeg else len(jpeg)}B {w}x{h}")
+                if not jpeg or w <= 0 or h <= 0 or len(jpeg) < MIN_JPEG_BYTES:
+                    helper_err = (
+                        f"user-helper failed for session={self._target_session_id} "
+                        f"(jpeg={0 if not jpeg else len(jpeg)}B, {took:.1f}s). "
+                        "Agent is Session 0 — capture requires WTSQueryUserToken/"
+                        "CreateProcessAsUser into the selected RDP/console session."
+                    )
+                    # Do NOT fall back to Session-0 BitBlt (always black for other sessions)
+                    err = "CAPTURE_NO_DESKTOP"
+                    msg = helper_err
+                    log(f"[REMOTE-DESKTOP] ✖ {err}: {msg}")
+                    self._running = False
+                    self._transport = "idle"
+                    return {
+                        "success": False,
+                        "error": err,
+                        "message": msg,
+                        "data": self.get_status(),
+                    }
             else:
                 # Capture thread-less probe: attach input desktop first (RDP/elevated)
                 self._attach_input_desktop()
@@ -265,6 +300,7 @@ class RemoteDesktopStreamer:
                     if not self._tscon_attempted:
                         self._try_reconnect_session_to_console(self._target_session_id)
                         time.sleep(0.4)
+                        self._desktop_attached = False
                         self._attach_input_desktop()
                         jpeg, w, h = self._grab_jpeg()
                         blackish = "+black" in (self._capture_method or "")
@@ -527,48 +563,52 @@ class RemoteDesktopStreamer:
             log("[REMOTE-DESKTOP] Invalid JPEG magic — skip frame")
             return
         if "+black" in (self._capture_method or ""):
-            # Disconnected RDP → try console reconnect once, then skip black
-            sid, _ = self._session_ids()
+            # Disconnected RDP / wrong desktop → re-attach + optional tscon
+            self._desktop_attached = False
+            self._attach_input_desktop()
+            sid = self._target_session_id
             if not self._tscon_attempted:
                 if self._try_reconnect_session_to_console(sid):
                     time.sleep(0.35)
+                    self._desktop_attached = False
                     self._attach_input_desktop()
                     jpeg2, w2, h2 = self._grab_jpeg()
                     if jpeg2 and "+black" not in (self._capture_method or ""):
                         jpeg, w, h = jpeg2, w2, h2
                     else:
                         self._stats["frames_failed"] += 1
+                        self._stats["black_frames"] += 1
                         return
                 else:
                     self._stats["frames_failed"] += 1
+                    self._stats["black_frames"] += 1
                     return
             else:
                 self._stats["frames_failed"] += 1
+                self._stats["black_frames"] += 1
                 return
 
         self._seq += 1
         seq = self._seq
-        ws_ok = False
-        http_ok = False
-
-        if self._ws_ok:
-            ws_ok = self._enqueue_ws_frame(jpeg, w, h, seq)
-            if ws_ok:
-                self._transport = "websocket"
+        ws_queued = self._enqueue_ws_frame(jpeg, w, h, seq)
+        ws_live = bool(self._ws_ok and ws_queued)
+        if ws_live:
+            self._transport = "websocket"
 
         need_http = (
-            not ws_ok
+            not ws_live
             or seq <= 12
             or (seq % HTTP_KEYFRAME_EVERY) == 0
         )
+        http_ok = False
         if need_http:
             http_ok = self._http_send_frame(token, jpeg, w, h, seq)
             if http_ok:
                 self._stats["http_fallbacks"] += 1
-                if not ws_ok:
+                if not ws_live:
                     self._transport = "http"
 
-        if ws_ok or http_ok:
+        if ws_live or http_ok:
             self._stats["frames_sent"] += 1
             self._stats["bytes_sent"] += len(jpeg)
             self._last_good_jpeg = jpeg
@@ -576,7 +616,7 @@ class RemoteDesktopStreamer:
             self._last_activity = time.time()
             if self._stats["frames_sent"] == 1 or seq == 1:
                 log(f"[REMOTE-DESKTOP] frame ok — {w}x{h} {len(jpeg)}B "
-                    f"method={self._capture_method} ws={ws_ok} http={http_ok}")
+                    f"method={self._capture_method} ws={ws_live} http={http_ok}")
         else:
             self._stats["frames_failed"] += 1
 
@@ -1037,7 +1077,6 @@ class RemoteDesktopStreamer:
         import os
         import sys
         import tempfile
-        import subprocess
 
         sid, csid = self._session_ids()
         target = self._target_session_id
@@ -1075,16 +1114,12 @@ class RemoteDesktopStreamer:
 
         launched = self._launch_in_session(int(target), cmd)
         if not launched:
-            try:
-                subprocess.run(
-                    [exe, "--rd-capture-once", out_path],
-                    timeout=PROBE_TIMEOUT_SEC + 2,
-                    capture_output=True,
-                    creationflags=0x08000000,
-                )
-            except Exception as e:
-                log(f"[REMOTE-DESKTOP] helper subprocess failed: {e}")
-                return None, 0, 0
+            # Session-0 subprocess cannot see another user's desktop — do not fake it
+            log(
+                f"[REMOTE-DESKTOP] helper launch failed for session={target} "
+                "(no Session-0 fallback — would capture black)"
+            )
+            return None, 0, 0
 
         deadline = time.time() + PROBE_TIMEOUT_SEC + 2
         while time.time() < deadline:
@@ -1245,7 +1280,7 @@ class RemoteDesktopStreamer:
 
             api_base = getattr(self.api_client, "base_url", "") or ""
             url = _api_to_ws_agent_url(api_base, token)
-            log(f"[REMOTE-DESKTOP] WS connecting… {url.split('?')[0]}?token=…")
+            log(f"[REMOTE-DESKTOP] WS connecting… {url.split('?')[0]} (Bearer)")
 
             ws = None
             try:
@@ -1260,11 +1295,13 @@ class RemoteDesktopStreamer:
                     import ssl
                     sslopt = {"cert_reqs": ssl.CERT_NONE}
 
+                ws_headers = [f"Authorization: Bearer {token}"]
                 ws = websocket.create_connection(
                     url,
                     timeout=12,
                     sslopt=sslopt,
                     enable_multithread=True,
+                    header=ws_headers,
                 )
                 self._ws = ws
                 self._ws_ok = True
@@ -1327,8 +1364,11 @@ class RemoteDesktopStreamer:
         self._q_put(("txt", json.dumps(meta)))
 
     def _enqueue_ws_frame(self, jpeg: bytes, w: int, h: int, seq: int) -> bool:
-        if not self._ws_ok:
-            return False
+        """Queue JPEG for agent RD WS. Always enqueue — WS thread flushes when up.
+
+        Previously returned False when !_ws_ok, so the probe frame was lost if
+        HTTP also failed and the viewer stayed on "Yayın başlatılıyor…".
+        """
         self._capture_w, self._capture_h = w, h
         self._enqueue_meta(force=(seq <= 3 or seq % META_EVERY_N_FRAMES == 0))
         return self._q_put(("bin", jpeg))

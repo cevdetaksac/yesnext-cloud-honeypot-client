@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 5
-!define VERSIONBUILD 15
+!define VERSIONBUILD 39
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -28,22 +28,12 @@ RequestExecutionLevel admin
 ; Interface Settings
 !define MUI_ABORTWARNING
 
-; Pages
+; Pages — no finish/checkbox wait; app launches when files are done
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "LICENSE"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-
-; Finish page - "Run after install" checkbox (checked by default)
-!define MUI_FINISHPAGE_TITLE "Setup Complete"
-!define MUI_FINISHPAGE_TEXT "Cloud Honeypot Client v${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD} has been installed successfully.$\r$\n$\r$\nSystem is ready for security monitoring.$\r$\n$\r$\nUse the checkbox below to launch the application now."
-!define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "Launch Cloud Honeypot Client now"
-!define MUI_FINISHPAGE_RUN_FUNCTION LaunchAsCurrentUser
-!define MUI_FINISHPAGE_RUN_CHECKED
-!define MUI_FINISHPAGE_NOREBOOTSUPPORT
-!insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
 !insertmacro MUI_UNPAGE_WELCOME
@@ -53,6 +43,10 @@ RequestExecutionLevel admin
 
 ; Languages
 !insertmacro MUI_LANGUAGE "English"
+
+; Close InstFiles page immediately after success (no Finish checkbox screen)
+AutoCloseWindow true
+ShowInstDetails nevershow
 
 ; Variables
 Var LogFile
@@ -388,9 +382,10 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     ; =================================================================
     !insertmacro LOG "[PHASE 3] Starting post-installation configuration..."
 
-    ; Windows Defender exclusions (non-blocking)
-    !insertmacro LOG "[CONFIG] Adding Defender exclusions..."
-    nsExec::Exec 'powershell -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath \"$INSTDIR\" -Force -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionProcess \"$INSTDIR\honeypot-client.exe\" -Force -ErrorAction SilentlyContinue"'
+    ; Windows Defender exclusions — fire-and-forget (Add-MpPreference can hang
+    ; forever under nsExec::Exec and block silent self-update Wait).
+    !insertmacro LOG "[CONFIG] Adding Defender exclusions (async)..."
+    nsExec::Exec 'cmd /c start "" /b powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try{Add-MpPreference -ExclusionPath \"$INSTDIR\" -Force -EA SilentlyContinue;Add-MpPreference -ExclusionProcess \"$INSTDIR\honeypot-client.exe\" -Force -EA SilentlyContinue}catch{}"'
 
     ; Create uninstaller
     !insertmacro LOG "[CONFIG] Creating uninstaller..."
@@ -417,29 +412,28 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     CreateShortCut "$SMPROGRAMS\${COMPANYNAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
 
     ; =================================================================
-    ; PHASE 4: AUTO-START (silent install only — normal install uses finish page checkbox)
+    ; PHASE 4: AUTO-START
+    ; Silent (/S): NEVER start honeypot-client here.
+    ; update-and-install.ps1 owns kill → install → --create-tasks → daemon/GUI.
+    ; Exec mid-install while helper Start-Process -Wait = classic self-deadlock
+    ; (new process locks files / Defender / finalize never returns).
     ; =================================================================
     IfSilent 0 InteractiveOnboarding
-        !insertmacro LOG "[AUTO-START] Silent install - starting daemon mode..."
-        IfFileExists "$INSTDIR\honeypot-client.exe" SilentStart SkipAutoStart
-        SilentStart:
-            ; Single daemon launch (onedir — no _MEI unpack)
-            Sleep 1000
-            Exec '"$INSTDIR\honeypot-client.exe" --mode=daemon --silent'
-            !insertmacro LOG "[AUTO-START] Daemon started (single launch)."
+        !insertmacro LOG "[AUTO-START] Silent install — skip daemon (helper restarts app)."
         Goto SkipAutoStart
     InteractiveOnboarding:
         ; Force visible GUI until user registers / links account (no tray hide)
-        ; Use %ProgramData% — reliable on all NSIS versions ($COMMONPROGRAMDATA may be empty)
         ExpandEnvStrings $1 "%ProgramData%\YesNext\CloudHoneypotClient"
         CreateDirectory "$1"
         FileOpen $0 "$1\force_gui_onboarding.flag" w
         FileWrite $0 "interactive_install$\r$\n"
         FileClose $0
         !insertmacro LOG "[ONBOARDING] force_gui_onboarding.flag written — GUI will stay visible"
-        ; End tray/daemon so finish-page --show-gui is not killed by singleton
         nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Tray" >nul 2>&1'
         nsExec::Exec 'schtasks /end /tn "CloudHoneypot-Background" >nul 2>&1'
+        ; Launch immediately — installer closes (AutoCloseWindow); no Finish checkbox
+        Call LaunchAsCurrentUser
+        !insertmacro LOG "[AUTO-START] GUI launched after interactive install."
     SkipAutoStart:
 
     !insertmacro LOG "[FINISH] Installation complete."

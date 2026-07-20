@@ -158,7 +158,7 @@ TASK_CONFIGS = {
     },
     TASK_NAME_TRAY: {
         "description": "Cloud Honeypot Client - Interactive Tray",
-        "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></LogonTrigger>",
+        "trigger": "<LogonTrigger><Enabled>true</Enabled><Delay>PT5S</Delay></LogonTrigger>",
         # S-1-5-11 = Authenticated Users (includes local Administrator; Users group often does not)
         "principal": (
             "<GroupId>S-1-5-11</GroupId>"

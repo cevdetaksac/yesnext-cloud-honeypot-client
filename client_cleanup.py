@@ -145,6 +145,12 @@ class DataCleanupManager:
             result["rules_removed"] = removed
             self._stats["rules_removed"] += removed
 
+            try:
+                from client_block_store import save_blocked_map
+                save_blocked_map({})
+            except Exception:
+                pass
+
             if sync_dashboard:
                 token = self._token()
                 api = getattr(self.app, "api_client", None)

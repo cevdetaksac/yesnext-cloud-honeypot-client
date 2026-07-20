@@ -1913,13 +1913,21 @@ def heal_update_machinery(log_func=None) -> None:
 
 def stage_installer_for_update(src_path: str, version: str = "") -> Optional[str]:
     """Copy installer to ProgramData so TEMP cleanup cannot delete it mid-helper."""
+    import re
     import shutil
 
     if not src_path or not os.path.isfile(src_path):
         return None
     try:
         dest_dir = _update_helper_staging_dir()
-        ver = (version or "latest").replace(" ", "")
+        raw = (version or "").replace(" ", "")
+        m = re.search(r"(\d+\.\d+\.\d+)", raw) or re.search(
+            r"(\d+\.\d+\.\d+)", os.path.basename(src_path)
+        )
+        ver = m.group(1) if m else (raw.strip("-_") or "latest")
+        # Avoid cloud-client-installer-cloud-client-installer-X.Y.Z.exe
+        if ver.lower().startswith("cloud-client-installer"):
+            ver = re.sub(r"(?i)^cloud-client-installer-?", "", ver) or "latest"
         dest = os.path.join(dest_dir, f"cloud-client-installer-{ver}.exe")
         shutil.copy2(src_path, dest)
         return dest if os.path.isfile(dest) else None
@@ -2200,10 +2208,16 @@ def launch_safe_update_install(
         elevate = not already_admin
 
     # Stable installer copy (TEMP dirs vanish / get cleaned)
-    stable = stage_installer_for_update(
-        installer_path,
-        version=os.path.splitext(os.path.basename(installer_path))[0],
-    )
+    # Prefer clean version tag — avoid cloud-client-installer-cloud-client-installer-*.exe
+    ver_hint = ""
+    try:
+        import re
+        base = os.path.splitext(os.path.basename(installer_path))[0]
+        m = re.search(r"(\d+\.\d+\.\d+)", base)
+        ver_hint = m.group(1) if m else base.replace("cloud-client-installer-", "").strip("-_")
+    except Exception:
+        ver_hint = "latest"
+    stable = stage_installer_for_update(installer_path, version=ver_hint or "latest")
     if stable:
         installer_path = stable
 
@@ -2276,7 +2290,47 @@ def launch_safe_update_install(
                     return False
             return True
 
-        # Already admin / silent SYSTEM path
+        # Already admin / silent SYSTEM path — prefer one-shot scheduled task
+        # so Session-0 DETACHED powershell is not lost / hung without a log.
+        try:
+            task = f"CloudHoneypot-UpdateOnce-{pid}"
+            tr = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass "
+                f"-WindowStyle Hidden -File \"{launcher}\""
+            )
+            subprocess.run(
+                [
+                    "schtasks", "/Create", "/TN", task, "/TR", tr,
+                    "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM",
+                    "/RL", "HIGHEST", "/F",
+                ],
+                capture_output=True,
+                timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            run = subprocess.run(
+                ["schtasks", "/Run", "/TN", task],
+                capture_output=True,
+                timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            # Task already kicked — delete immediately (no timeout /t 120 cmd windowout).
+            # CREATE_NO_WINDOW|DETACHED_PROCESS + "timeout" previously popped a visible
+            # console ("Waiting for N seconds...") during dashboard self_update.
+            try:
+                subprocess.run(
+                    ["schtasks", "/Delete", "/TN", task, "/F"],
+                    capture_output=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception:
+                pass
+            if run.returncode == 0:
+                return True
+        except Exception:
+            pass
+
         proc = subprocess.Popen(
             [
                 "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",

@@ -384,6 +384,20 @@ class ThreatEngine:
         self._whitelist_ips = set(ips)
         log(f"[THREAT] 🛡️ Whitelist updated: {len(ips)} IP(s)")
 
+    def hydrate_blocked_ips(self, ips) -> int:
+        """Mark IPs as blocked for GUI/listing (from firewall / ProgramData)."""
+        added = 0
+        for ip in ips or []:
+            ip = str(ip or "").strip()
+            if not ip or ip in ("local", "127.0.0.1", "::1"):
+                continue
+            if ip not in self._rule_blocked_ips:
+                self._rule_blocked_ips.add(ip)
+                added += 1
+        if added:
+            log(f"[THREAT] Hydrated {added} blocked IP(s) from firewall/store")
+        return added
+
     def start(self):
         """Start the housekeeping (cleanup + score decay) thread."""
         if self._running:
@@ -1024,8 +1038,18 @@ class ThreatEngine:
                     evicted += 1
                 log(f"[THREAT] 🧹 LRU evicted {evicted} IP contexts (pool was >10k)")
 
-            # Cleanup _rule_blocked_ips — remove entries no longer in pool
-            stale_blocked = self._rule_blocked_ips - set(self._ip_pool.keys())
+            # Cleanup _rule_blocked_ips — keep firewall/store blocks even if
+            # they have no threat context (GUI Engellenen tab needs them).
+            try:
+                from client_block_store import load_blocked_map
+                persisted = set(load_blocked_map().keys())
+            except Exception:
+                persisted = set()
+            stale_blocked = (
+                self._rule_blocked_ips
+                - set(self._ip_pool.keys())
+                - persisted
+            )
             if stale_blocked:
                 self._rule_blocked_ips -= stale_blocked
 

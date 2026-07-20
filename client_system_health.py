@@ -397,6 +397,14 @@ class SystemHealthMonitor:
                 elif not session_name or sn in ("console", "services"):
                     protocol = "Console" if sn != "services" else "Services"
 
+                # Skip non-user / listener / session 0 ghosts
+                if session_id == 0 or protocol == "Services" or sn == "services":
+                    continue
+                if status_raw.lower() in ("listen",):
+                    continue
+                if not username or username.upper() in ("SYSTEM",):
+                    continue
+
                 client_ip = ""
                 if protocol == "RDP" and status == "Active":
                     if len(remote_ips) == 1:
@@ -450,16 +458,28 @@ class SystemHealthMonitor:
                         continue
                     if not sid.isdigit():
                         continue
-                    proto = "RDP" if name.lower().startswith("rdp") else "Console"
+                    sid_i = int(sid)
+                    state_l = (state or "").lower()
+                    name_l = name.lower()
+                    if sid_i == 0 or name_l in ("services",) or state_l in ("listen",):
+                        continue
+                    if not username:
+                        continue  # bare console Conn with no user — not a logon
+                    proto = "RDP" if name_l.startswith("rdp") else "Console"
+                    status_norm = {
+                        "active": "Active",
+                        "disc": "Disconnected",
+                        "conn": "Conn",
+                    }.get(state_l, state or "Unknown")
                     sessions.append({
-                        "username": username or "SYSTEM",
-                        "session_id": int(sid),
+                        "username": username,
+                        "session_id": sid_i,
                         "session_name": name,
-                        "status": state or "Unknown",
+                        "status": status_norm,
                         "client_ip": remote_ips[0] if proto == "RDP" and remote_ips else "",
                         "protocol": proto,
                         "logon_type": 10 if proto == "RDP" else 2,
-                        "login_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "login_time": None,  # unknown — don't invent "now"
                         "duration_sec": None,
                         "idle_sec": None,
                         "client_name": "",

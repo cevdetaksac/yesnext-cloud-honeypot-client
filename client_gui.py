@@ -11,7 +11,7 @@ import time
 import threading
 import webbrowser
 from tkinter import messagebox
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import customtkinter as ctk
 
@@ -88,10 +88,12 @@ class ModernGUI:
 
         self._set_window_icon(root)
         self._build_top_bar(root)
+        self._build_update_banner(root)
         root.protocol("WM_DELETE_WINDOW", self.app.on_close)
 
         # Ana gövde: sidebar + içerik
         body = ctk.CTkFrame(root, fg_color=COLORS["bg"], corner_radius=0)
+        self._main_body = body
         body.pack(fill="both", expand=True)
 
         sidebar = ctk.CTkFrame(body, width=SIDEBAR_WIDTH, fg_color=COLORS["sidebar"], corner_radius=0)
@@ -152,7 +154,7 @@ class ModernGUI:
             # Lightweight placeholder — real widgets built lazily
             ph = ctk.CTkLabel(
                 page,
-                text="Yükleniyor…",
+                text=self.t("gui_loading"),
                 font=ctk.CTkFont(size=13),
                 text_color=COLORS["text_dim"],
             )
@@ -201,6 +203,7 @@ class ModernGUI:
             root.after(30, lambda: self._ensure_page_built("status"))
             root.after(120, self._lazy_load_status_data)
             root.after(400, self._start_refresh_loop_once)
+            root.after(600, self._start_update_banner_poll)
             # Prewarm delayed — early prewarm competed with Status paint and started IPC timers
             root.after(8000, lambda: self._prewarm_page("services"))
             root.after(12000, lambda: self._prewarm_page("threat"))
@@ -209,6 +212,10 @@ class ModernGUI:
             self._ensure_page_built("status")
             self._lazy_load_status_data()
             self._start_refresh_loop_once()
+            try:
+                self._start_update_banner_poll()
+            except Exception:
+                pass
 
     def _clear_page_placeholder(self, page_id: str):
         ph = self._page_placeholders.pop(page_id, None)
@@ -554,6 +561,186 @@ class ModernGUI:
             bar, text=ver_text,
             font=ctk.CTkFont(size=11), text_color=COLORS["orange"] if DEBUG_MODE else COLORS["text_dim"],
         ).pack(side="right", padx=(4, 4))
+
+    def _build_update_banner(self, root):
+        """Top banner for dashboard self_update progress (daemon → ProgramData → GUI)."""
+        self._update_banner = ctk.CTkFrame(
+            root, fg_color=COLORS["card"], corner_radius=0, height=40,
+            border_width=1, border_color=COLORS["orange"],
+        )
+        # Hidden until an update status appears
+        self._update_banner_visible = False
+        self._update_banner_last_phase = ""
+        self._update_banner_toasted = ""
+        self._update_banner_done_at = 0.0
+
+        inner = ctk.CTkFrame(self._update_banner, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=6)
+
+        self._update_banner_icon = ctk.CTkLabel(
+            inner, text="⬇️", font=self._emoji_font(14), text_color=COLORS["orange"],
+        )
+        self._update_banner_icon.pack(side="left", padx=(0, 8))
+
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+
+        self._update_banner_title = ctk.CTkLabel(
+            text_col, text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["orange"],
+            anchor="w",
+        )
+        self._update_banner_title.pack(anchor="w")
+
+        self._update_banner_detail = ctk.CTkLabel(
+            text_col, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text"],
+            anchor="w",
+        )
+        self._update_banner_detail.pack(anchor="w")
+
+        self._update_banner_ver = ctk.CTkLabel(
+            inner, text="",
+            font=ctk.CTkFont(size=11, family="Consolas"),
+            text_color=COLORS["text_dim"],
+        )
+        self._update_banner_ver.pack(side="right", padx=(8, 0))
+
+    def _start_update_banner_poll(self):
+        if getattr(self, "_update_banner_poll_started", False):
+            return
+        self._update_banner_poll_started = True
+        self._poll_update_banner()
+
+    def _poll_update_banner(self):
+        try:
+            self._refresh_update_banner()
+        except Exception:
+            pass
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.after(1000, self._poll_update_banner)
+        except Exception:
+            pass
+
+    def _hide_update_banner(self):
+        banner = getattr(self, "_update_banner", None)
+        if not banner:
+            return
+        try:
+            if self._update_banner_visible:
+                banner.pack_forget()
+                self._update_banner_visible = False
+        except Exception:
+            pass
+
+    def _show_update_banner(self):
+        banner = getattr(self, "_update_banner", None)
+        if not banner or self._update_banner_visible:
+            return
+        try:
+            body = getattr(self, "_main_body", None)
+            if body is not None:
+                banner.pack(fill="x", side="top", before=body)
+            else:
+                banner.pack(fill="x", side="top")
+            self._update_banner_visible = True
+        except Exception:
+            pass
+
+    def _refresh_update_banner(self):
+        from client_update_ui import get_update_ui_status, clear_update_ui_status
+
+        st = get_update_ui_status()
+        if not st:
+            self._hide_update_banner()
+            return
+
+        phase = (st.get("phase") or "").strip().lower()
+        from_v = (st.get("from_version") or "").strip().lstrip("vV")
+        to_v = (st.get("to_version") or "").strip().lstrip("vV")
+        progress = st.get("progress")
+        err = (st.get("error") or "").strip()
+
+        # Auto-dismiss success after ~12s
+        if phase == "done":
+            if not self._update_banner_done_at:
+                self._update_banner_done_at = time.time()
+            elif (time.time() - self._update_banner_done_at) > 12:
+                clear_update_ui_status()
+                self._hide_update_banner()
+                self._update_banner_done_at = 0.0
+                return
+        else:
+            self._update_banner_done_at = 0.0
+
+        phase_keys = {
+            "accepted": ("update_banner_accepted", "⬇️", "warning"),
+            "downloading": ("update_banner_downloading", "⬇️", "info"),
+            "staging": ("update_banner_staging", "📦", "info"),
+            "installing": ("update_banner_installing", "⚙️", "warning"),
+            "done": ("update_banner_done", "✅", "info"),
+            "failed": ("update_banner_failed", "⚠️", "high"),
+        }
+        key, icon, toast_sev = phase_keys.get(phase, ("update_banner_accepted", "⬇️", "info"))
+        title = self.t(key)
+        if phase == "downloading" and progress is not None:
+            try:
+                title = self.t("update_banner_downloading_pct").format(pct=int(progress))
+            except Exception:
+                title = f"{title} ({progress}%)"
+
+        detail = ""
+        if from_v or to_v:
+            left = f"v{from_v}" if from_v else "?"
+            right = f"v{to_v}" if to_v else "?"
+            detail = self.t("update_banner_version_line").format(from_v=left, to_v=right)
+        if phase == "failed" and err:
+            detail = (detail + " — " if detail else "") + err[:80]
+
+        border = COLORS["orange"]
+        title_color = COLORS["orange"]
+        if phase == "done":
+            border = COLORS["green"]
+            title_color = COLORS["green"]
+        elif phase == "failed":
+            border = COLORS["red"]
+            title_color = COLORS["red"]
+        elif phase in ("downloading", "staging"):
+            border = COLORS["blue"]
+            title_color = COLORS["blue"]
+
+        try:
+            self._update_banner.configure(border_color=border)
+            self._update_banner_icon.configure(text=icon, text_color=title_color)
+            self._update_banner_title.configure(text=title, text_color=title_color)
+            self._update_banner_detail.configure(text=detail)
+            self._update_banner_ver.configure(
+                text=f"{from_v or '?'} → {to_v or '?'}" if (from_v or to_v) else ""
+            )
+        except Exception:
+            pass
+
+        self._show_update_banner()
+
+        # Toast once per phase transition (accepted / fail / done)
+        if phase != self._update_banner_last_phase:
+            if phase in ("accepted", "failed", "done") or (
+                not self._update_banner_last_phase and phase in ("downloading", "installing")
+            ):
+                try:
+                    msg = title if phase != "accepted" else self.t("update_banner_accepted")
+                    self.show_toast(
+                        self.t("update_toast_title"),
+                        msg,
+                        severity=toast_sev,
+                        duration_ms=6000 if phase != "failed" else 9000,
+                    )
+                except Exception:
+                    pass
+            self._update_banner_last_phase = phase
 
     def _copy_to_clipboard(self, text: str):
         """Metni panoya kopyala ve bildirim göster."""
@@ -2368,6 +2555,11 @@ class ModernGUI:
         self._ip_table_tab = "activity"
         self._ip_table_rows: list = []
         self._ip_tab_buttons: Dict[str, ctk.CTkButton] = {}
+        self._ip_tab_keys = {
+            "activity": "ip_tab_activity",
+            "blocked": "ip_tab_blocked",
+            "whitelist": "ip_tab_whitelist",
+        }
 
         hdr = ctk.CTkFrame(sec, fg_color="transparent")
         hdr.pack(fill="x", padx=16, pady=(12, 4))
@@ -2403,8 +2595,8 @@ class ModernGUI:
             ("whitelist", "ip_tab_whitelist"),
         ):
             btn = ctk.CTkButton(
-                tabs, text=self.t(key),
-                height=28, width=110,
+                tabs, text=f"{self.t(key)} (0)",
+                height=28, width=128,
                 font=ctk.CTkFont(size=12, weight="bold"),
                 corner_radius=6,
                 command=lambda t=tab_id: self._set_ip_table_tab(t),
@@ -2412,6 +2604,7 @@ class ModernGUI:
             btn.pack(side="left", padx=(0, 6))
             self._ip_tab_buttons[tab_id] = btn
         self._update_ip_tab_styles()
+        self._update_ip_tab_labels([])
 
         sep = ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"])
         sep.pack(fill="x", padx=16, pady=(4, 8))
@@ -2474,9 +2667,39 @@ class ModernGUI:
                     border_color=COLORS["border"],
                 )
 
+    def _ip_tab_counts(self, rows: list) -> Dict[str, int]:
+        """Sekme bazlı toplam sayılar (tüm satırlar üzerinden)."""
+        activity = blocked = whitelist = 0
+        for r in rows or []:
+            status = r.get("status")
+            if status == "blocked":
+                blocked += 1
+            elif status == "whitelisted":
+                whitelist += 1
+            elif status == "watching":
+                activity += 1
+        return {
+            "activity": activity,
+            "blocked": blocked,
+            "whitelist": whitelist,
+        }
+
+    def _update_ip_tab_labels(self, rows: Optional[list] = None):
+        """Sekme başlıkları: Aktivite (N) | Engellenen (N) | Whitelist (N)."""
+        rows = rows if rows is not None else getattr(self, "_ip_table_rows", [])
+        counts = self._ip_tab_counts(rows)
+        keys = getattr(self, "_ip_tab_keys", {})
+        for tab_id, btn in getattr(self, "_ip_tab_buttons", {}).items():
+            try:
+                label = self.t(keys.get(tab_id, f"ip_tab_{tab_id}"))
+                btn.configure(text=f"{label} ({counts.get(tab_id, 0)})")
+            except Exception:
+                pass
+
     def _set_ip_table_tab(self, tab_id: str):
         """Sekme değiştir — mevcut veriyi filtrele."""
         self._ip_table_tab = tab_id
+        self._ip_table_fp = None  # force re-render for new filter
         self._update_ip_tab_styles()
         self._render_ip_table(getattr(self, "_ip_table_rows", []))
 
@@ -2485,17 +2708,43 @@ class ModernGUI:
         threading.Thread(target=self._collect_ip_table_data, daemon=True).start()
 
     def _collect_ip_table_data(self):
-        """Arka planda IP verilerini topla (aktivite + engellenen + whitelist)."""
+        """Arka planda IP verilerini topla (aktivite + engellenen + whitelist).
+
+        Frontend-only (SYSTEM daemon): threat_engine is None — Engellenen must
+        still come from ProgramData blocked_ips.json (firewall inventory cache).
+        """
         threat_engine = getattr(self.app, 'threat_engine', None)
         auto_response = getattr(self.app, 'auto_response', None)
-        if not threat_engine:
-            return
 
         rows = []
         seen: set = set()
-        contexts = threat_engine.get_all_contexts()
-        blocked_ips = set(getattr(threat_engine, '_rule_blocked_ips', set()) or set())
-        whitelist_ips = set(getattr(threat_engine, '_whitelist_ips', set()) or set())
+        contexts = {}
+        blocked_ips: set = set()
+        whitelist_ips: set = set()
+
+        if threat_engine:
+            try:
+                contexts = threat_engine.get_all_contexts() or {}
+            except Exception:
+                contexts = {}
+            blocked_ips = set(getattr(threat_engine, '_rule_blocked_ips', set()) or set())
+            whitelist_ips = set(getattr(threat_engine, '_whitelist_ips', set()) or set())
+
+        # Live firewall SoT → ProgramData (throttled). Fixes Engellenen(1) vs hundreds of HP-BLOCK.
+        try:
+            from client_block_store import refresh_from_live_firewall, load_blocked_map
+            store_meta = refresh_from_live_firewall(min_interval_sec=20.0, force=False)
+            if not store_meta:
+                store_meta = load_blocked_map(force=True)
+            blocked_ips |= set(store_meta.keys())
+        except Exception:
+            store_meta = {}
+            try:
+                from client_block_store import load_blocked_map
+                store_meta = load_blocked_map(force=True)
+                blocked_ips |= set(store_meta.keys())
+            except Exception:
+                store_meta = {}
 
         # AutoResponse'daki aktif blokları / whitelist'i de birleştir
         ar_blocked: set = set()
@@ -2545,15 +2794,16 @@ class ModernGUI:
             })
             seen.add(ip)
 
-        # Context'te olmayan engellenmiş IP'ler
+        # Context'te olmayan engellenmiş IP'ler (firewall / store)
         for ip in (blocked_ips | ar_blocked):
             if ip in skip or ip in seen or ip in whitelist_ips:
                 continue
+            meta = store_meta.get(ip) or {}
             rows.append({
                 "ip": ip,
                 "service": "—",
                 "attempts": 0,
-                "last_seen": 0,
+                "last_seen": float(meta.get("blocked_at") or 0),
                 "status": "blocked",
                 "score": 0,
             })
@@ -2574,7 +2824,8 @@ class ModernGUI:
             seen.add(ip)
 
         rows.sort(key=lambda r: r["last_seen"], reverse=True)
-        rows = rows[:200]
+        # Cap display; Engellenen may hold thousands — show newest 2000
+        rows = rows[:2000]
 
         self._gui_safe(lambda: self._render_ip_table(rows))
 
@@ -2600,6 +2851,7 @@ class ModernGUI:
         """IP tablosunu GUI'ye render et (aktif sekmeye göre)."""
         try:
             self._ip_table_rows = list(rows)
+            self._update_ip_tab_labels(rows)
             filtered = self._filter_ip_rows(rows)
 
             # Skip full destroy/rebuild when visible data unchanged
@@ -3630,25 +3882,39 @@ class ModernGUI:
 
     # ── Detail: Engellenen IP'ler ── #
     def _detail_blocked_ips(self):
-        """Engellenen/takip edilen IP detayları — tam liste."""
+        """Engellenen/takip edilen IP detayları — tam liste (store + TE)."""
         popup = self._show_detail_window(f"🚫 {self.t('card_tracked_ips')}", height=520)
         content = popup._content
 
         threat_engine = getattr(self.app, 'threat_engine', None)
-        if not threat_engine:
-            ctk.CTkLabel(content, text=self.t("detail_no_data"),
-                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
-            return
+        store_blocks = []
+        try:
+            from client_block_store import list_blocked_ips
+            store_blocks = list_blocked_ips()
+        except Exception:
+            store_blocks = []
 
-        contexts = threat_engine.get_all_contexts()
-        blocked = getattr(threat_engine, '_rule_blocked_ips', set())
+        blocked = set()
+        if threat_engine:
+            blocked |= set(getattr(threat_engine, '_rule_blocked_ips', set()) or set())
+        blocked |= {str(b.get("ip") or "") for b in store_blocks if b.get("ip")}
+
+        contexts = {}
+        if threat_engine:
+            try:
+                contexts = threat_engine.get_all_contexts() or {}
+            except Exception:
+                contexts = {}
 
         active_ips = [(ip, ctx) for ip, ctx in contexts.items()
                       if ip not in ("local", "", "127.0.0.1", "::1")
                       and (ctx.threat_score > 0 or ctx.failed_attempts > 0)]
 
-        blocked_count = sum(1 for ip, ctx in active_ips if ip in blocked or ctx.is_blocked)
-        watching_count = len(active_ips) - blocked_count
+        blocked_count = len(blocked)
+        watching_count = sum(
+            1 for ip, ctx in active_ips
+            if ip not in blocked and not getattr(ctx, "is_blocked", False)
+        )
 
         ctk.CTkLabel(
             content,
@@ -3658,42 +3924,67 @@ class ModernGUI:
             text_color=COLORS["orange"],
         ).pack(anchor="w", padx=8, pady=(0, 8))
 
-        if not active_ips:
-            ctk.CTkLabel(content, text=self.t("ip_no_activity"),
-                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=8)
-            return
-
         from datetime import datetime
-        sorted_ips = sorted(active_ips, key=lambda x: x[1].last_seen, reverse=True)[:30]
-
-        headers = ["IP", self.t("ip_col_status"), self.t("detail_score"),
-                    self.t("ip_col_attempts"), self.t("ip_col_last_time")]
         rows = []
         actions = []
-        for ip, ctx in sorted_ips:
-            is_blocked = ip in blocked or ctx.is_blocked
-            status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
-                     (self.t("ip_status_watching"), COLORS["orange"])
-            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
-                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
-            try:
-                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
-            except Exception:
-                ts = "—"
-            rows.append([ip, status, (str(ctx.threat_score), score_color),
-                         str(ctx.failed_attempts), ts])
-            _ip = ip
-            if is_blocked:
+        # Prefer firewall inventory (store); fall back to threat contexts
+        if store_blocks:
+            for b in store_blocks[:100]:
+                ip = str(b.get("ip") or "")
+                if not ip:
+                    continue
+                ts_raw = float(b.get("blocked_at") or 0)
+                try:
+                    ts = datetime.fromtimestamp(ts_raw).strftime("%d.%m %H:%M") if ts_raw else "—"
+                except Exception:
+                    ts = "—"
+                rows.append([
+                    ip,
+                    (self.t("ip_status_blocked"), COLORS["red"]),
+                    ("—", COLORS["text_dim"]),
+                    "—",
+                    ts,
+                ])
+                _ip = ip
                 actions.append([
                     (self.t("ip_btn_unblock"), COLORS["orange"],
                      lambda i=_ip: (self._ip_table_unblock(i), popup.destroy())),
                 ])
-            else:
-                actions.append([
-                    (self.t("ip_btn_block"), COLORS["red"],
-                     lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
-                ])
+        elif active_ips:
+            sorted_ips = sorted(active_ips, key=lambda x: x[1].last_seen, reverse=True)[:30]
+            for ip, ctx in sorted_ips:
+                is_blocked = ip in blocked or ctx.is_blocked
+                status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
+                         (self.t("ip_status_watching"), COLORS["orange"])
+                score_color = COLORS["red"] if ctx.threat_score >= 80 else (
+                    COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
+                try:
+                    ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
+                except Exception:
+                    ts = "—"
+                rows.append([ip, status, (str(ctx.threat_score), score_color),
+                             str(ctx.failed_attempts), ts])
+                _ip = ip
+                if is_blocked:
+                    actions.append([
+                        (self.t("ip_btn_unblock"), COLORS["orange"],
+                         lambda i=_ip: (self._ip_table_unblock(i), popup.destroy())),
+                    ])
+                else:
+                    actions.append([
+                        (self.t("ip_btn_block"), COLORS["red"],
+                         lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
+                    ])
+        else:
+            try:
+                msg = self.t("ip_no_blocked")
+            except Exception:
+                msg = self.t("detail_no_data")
+            ctk.CTkLabel(content, text=msg, text_color=COLORS["text_dim"]).pack(anchor="w", padx=8)
+            return
 
+        headers = ["IP", self.t("ip_col_status"), self.t("detail_score"),
+                    self.t("ip_col_attempts"), self.t("ip_col_last_time")]
         self._add_detail_table(content, headers, rows,
                                col_widths=[130, 80, 55, 65, 90], row_actions=actions)
 
@@ -4237,15 +4528,36 @@ class ModernGUI:
             else:
                 self._update_card("last_attack", self.t("dash_no_attack"), COLORS["text_dim"])
 
-            # 6) API bağlantı durumu (gerçek zamanlı kontrol)
+            # 6) API + motor (dashboard poll) — auth alone is not "online"
             api_ok = getattr(self.app, '_last_api_ok', False)
-            if api_ok:
+            motor_ok = False
+            try:
+                from client_daemon_ipc import is_motor_healthy
+                motor_ok = bool(is_motor_healthy(timeout=0.4))
+            except Exception:
+                motor_ok = False
+            if not motor_ok:
+                rc = getattr(self.app, "remote_commands", None)
+                motor_ok = bool(rc is not None and getattr(rc, "_running", False))
+            if api_ok and motor_ok:
                 self._update_card("connection", self.t("dash_connected"), COLORS["green"])
+            elif api_ok and not motor_ok:
+                try:
+                    label = self.t("dash_api_no_motor")
+                except Exception:
+                    label = "API var · motor yok"
+                self._update_card("connection", label, COLORS["orange"])
             else:
                 self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
 
-            # 7) Threat Detection cards (v4.0)
+            # 7) Threat Detection cards (v4.0) + firewall inventory count
             threat_engine = getattr(self.app, 'threat_engine', None)
+            store_count = 0
+            try:
+                from client_block_store import load_blocked_map
+                store_count = len(load_blocked_map())
+            except Exception:
+                store_count = 0
             if threat_engine:
                 try:
                     level, level_color = threat_engine.get_threat_level()
@@ -4259,12 +4571,21 @@ class ModernGUI:
                         COLORS["orange"] if events_per_hour > 20 else COLORS["text_dim"])
                     self._update_card("events_per_hour", str(events_per_hour), eph_color)
 
-                    active_ips = engine_stats.get("active_ips", 0)
+                    te_blocked = len(getattr(threat_engine, "_rule_blocked_ips", set()) or set())
+                    active_ips = max(int(engine_stats.get("active_ips", 0) or 0), te_blocked, store_count)
                     blocked_color = COLORS["red"] if active_ips > 5 else (
                         COLORS["orange"] if active_ips > 0 else COLORS["text_dim"])
                     self._update_card("blocked_ips", str(active_ips), blocked_color)
                 except Exception:
-                    pass
+                    if store_count:
+                        self._update_card(
+                            "blocked_ips",
+                            str(store_count),
+                            COLORS["red"] if store_count > 5 else COLORS["orange"],
+                        )
+            elif store_count:
+                blocked_color = COLORS["red"] if store_count > 5 else COLORS["orange"]
+                self._update_card("blocked_ips", str(store_count), blocked_color)
 
             # 8) Silent Hours status (v4.0 Faz 2)
             sh_guard = getattr(self.app, 'silent_hours_guard', None)
@@ -4810,57 +5131,89 @@ class ModernGUI:
         if menu_type == "settings":
             from client_utils import is_account_linked
             linked = is_account_linked()
+            # Structured rows: ("header"|"item"|"sep", label_key_or_text, cmd|None)
+            items = [("header", self.t("menu_section_account"), None)]
             if linked:
-                items = [
-                    (f"✓  {self.t('btn_account_linked')}", _run_and_close(
+                items += [
+                    ("status", self.t("btn_account_linked"), None),
+                    ("item", self.t("menu_open_my_servers"), _run_and_close(
                         lambda: webbrowser.open(f"{self._account_base_url()}/servers"))),
-                    (f"🔗  {self.t('menu_open_my_servers')}", _run_and_close(
-                        lambda: webbrowser.open(f"{self._account_base_url()}/servers"))),
-                    (f"↩️  {self.t('menu_unmark_account_linked')}", _run_and_close(
+                    ("item", self.t("menu_unmark_account_linked"), _run_and_close(
                         self._unmark_account_linked)),
                 ]
             else:
-                items = [
-                    (f"🔗  {self.t('btn_link_account')}", _run_and_close(
+                items += [
+                    ("item", self.t("btn_link_account"), _run_and_close(
                         lambda: self._open_link_account(self.app.state.get("token", "")))),
-                    (f"✓  {self.t('menu_mark_account_linked')}", _run_and_close(
+                    ("item", self.t("menu_mark_account_linked"), _run_and_close(
                         self._mark_account_linked)),
                 ]
             items += [
-                (f"📋  {self.t('menu_copy_token')}", _run_and_close(
+                ("item", self.t("menu_copy_token"), _run_and_close(
                     lambda: self._copy_token_with_hint(self.app.state.get("token", "")))),
-                (None, None),  # separator
-                (f"🔐  {self.t('menu_pin_set')}", _run_and_close(self._pin_set_or_change)),
-                (f"🔓  {self.t('menu_pin_clear')}", _run_and_close(self._pin_clear)),
-                (None, None),  # separator
-                (f"🇹🇷  {self.t('menu_lang_tr')}", _run_and_close(lambda: self._set_lang("tr"))),
-                (f"🇬🇧  {self.t('menu_lang_en')}", _run_and_close(lambda: self._set_lang("en"))),
-                (None, None),  # separator
-                (f"🧹  {self.t('menu_cleanup_local')}", _run_and_close(lambda: self._run_cleanup("local"))),
-                (f"🔥  {self.t('menu_cleanup_firewall')}", _run_and_close(lambda: self._run_cleanup("firewall"))),
-                (f"☁️  {self.t('menu_cleanup_server')}", _run_and_close(lambda: self._run_cleanup("server"))),
-                (f"♻️  {self.t('menu_cleanup_all')}", _run_and_close(lambda: self._run_cleanup("all"))),
+                ("sep", None, None),
+                ("header", self.t("menu_section_security"), None),
+                ("item", self.t("menu_pin_set"), _run_and_close(self._pin_set_or_change)),
+            ]
+            try:
+                from client_gui_lock import GuiLock
+                if GuiLock.instance().has_pin():
+                    items.append(
+                        ("item", self.t("menu_pin_clear"), _run_and_close(self._pin_clear))
+                    )
+            except Exception:
+                pass
+            items += [
+                ("sep", None, None),
+                ("header", self.t("menu_section_language"), None),
+                ("item", self.t("menu_lang_tr"), _run_and_close(lambda: self._set_lang("tr"))),
+                ("item", self.t("menu_lang_en"), _run_and_close(lambda: self._set_lang("en"))),
+                ("sep", None, None),
+                ("header", self.t("menu_section_maintenance"), None),
+                ("item", self.t("menu_cleanup_local"), _run_and_close(lambda: self._run_cleanup("local"))),
+                ("item", self.t("menu_cleanup_firewall"), _run_and_close(lambda: self._run_cleanup("firewall"))),
+                ("item", self.t("menu_cleanup_server"), _run_and_close(lambda: self._run_cleanup("server"))),
+                ("item", self.t("menu_cleanup_all"), _run_and_close(lambda: self._run_cleanup("all"))),
             ]
         elif menu_type == "help":
             items = [
-                (f"📄  {self.t('menu_logs')}", _run_and_close(self._open_logs)),
-                (f"🌐  {self.t('menu_github')}", _run_and_close(self._open_github)),
-                (None, None),  # separator
-                (f"🔄  {self.t('menu_check_updates')}", _run_and_close(self.app.check_updates_and_prompt)),
+                ("item", self.t("menu_logs"), _run_and_close(self._open_logs)),
+                ("item", self.t("menu_github"), _run_and_close(self._open_github)),
+                ("sep", None, None),
+                ("item", self.t("menu_check_updates"), _run_and_close(self.app.check_updates_and_prompt)),
             ]
 
-        for label, cmd in items:
-            if label is None:
-                ctk.CTkFrame(popup, height=1, fg_color=COLORS["border"]).pack(fill="x", padx=8, pady=2)
+        muted = COLORS.get("text_muted") or COLORS.get("text_secondary") or "#8B93A7"
+        for kind, label, cmd in items:
+            if kind == "sep":
+                ctk.CTkFrame(popup, height=1, fg_color=COLORS["border"]).pack(
+                    fill="x", padx=10, pady=6
+                )
+            elif kind == "header":
+                ctk.CTkLabel(
+                    popup,
+                    text=str(label or "").upper(),
+                    anchor="w",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=muted,
+                ).pack(fill="x", padx=12, pady=(6, 2))
+            elif kind == "status":
+                ctk.CTkLabel(
+                    popup,
+                    text=f"✓  {label}",
+                    anchor="w",
+                    font=ctk.CTkFont(size=12),
+                    text_color=COLORS.get("success") or "#3DDC97",
+                ).pack(fill="x", padx=12, pady=(2, 4))
             else:
                 btn = ctk.CTkButton(
-                    popup, text=label, anchor="w",
-                    font=ctk.CTkFont(size=12), height=32, width=280,
+                    popup, text=str(label or ""), anchor="w",
+                    font=ctk.CTkFont(size=12), height=30, width=260,
                     fg_color="transparent", hover_color=COLORS["accent"],
                     text_color=COLORS["text"], corner_radius=4,
                     command=cmd,
                 )
-                btn.pack(fill="x", padx=4, pady=1)
+                btn.pack(fill="x", padx=6, pady=1)
 
         # Dışına tıklanınca kapat (root üzerinde global click)
         def _on_root_click(event):

@@ -18,8 +18,8 @@ Config via environment or CLI args:
 - REFRESH_INTERVAL_SEC (default: 10)
 
 Endpoints:
-- GET  {API_BASE}/api/agent/pending-blocks?token=TOKEN
-- GET  {API_BASE}/api/agent/pending-unblocks?token=TOKEN
+- GET  {API_BASE}/api/agent/pending-blocks  (Authorization: Bearer)
+- GET  {API_BASE}/api/agent/pending-unblocks  (Authorization: Bearer)
 - POST {API_BASE}/api/agent/block-applied   body: {token, block_ids:[...]}
 - POST {API_BASE}/api/agent/block-removed   body: {token, block_ids:[...]}
 
@@ -283,21 +283,32 @@ class WindowsFirewallBackend(FirewallBackend):
         return ok_all
 
     def _lookup_rule_remoteip(self, rule_name: str) -> str:
-        """Query netsh for a rule's remoteip before deleting it."""
+        """Query netsh for a rule's first remote IP (delete / resolve helpers)."""
+        full = self.lookup_rule_remoteips(rule_name)
+        if not full:
+            return ""
+        return full.split(",")[0].strip().split("/")[0]
+
+    def lookup_rule_remoteips(self, rule_name: str) -> str:
+        """Return full RemoteIP field (may be comma-separated CIDRs)."""
         try:
             rc, out, _ = run_cmd([
                 "netsh", "advfirewall", "firewall", "show", "rule",
                 f"name={rule_name}", "dir=in",
-            ], timeout=10)
+            ], timeout=15)
             if rc != 0:
                 return ""
             for line in out.splitlines():
-                low = line.strip().lower()
-                if any(k in low for k in ("remoteip", "uzak ip", "remote ip")):
-                    _, _, val = line.partition(":")
-                    val = val.strip()
-                    if val and val.lower() not in ("any", "herhangi"):
-                        return val.split(",")[0].strip().split("/")[0]
+                key, _, val = line.partition(":")
+                key_l = key.strip().lower().replace(" ", "")
+                val = val.strip()
+                if not val:
+                    continue
+                if key_l in ("remoteip", "uzakip", "remoteipv4", "uzakipv4") or (
+                    "remoteip" in key_l or "uzakip" in key_l
+                ):
+                    if val.lower() not in ("any", "herhangi"):
+                        return val
         except Exception:
             pass
         return ""
@@ -344,6 +355,7 @@ class WindowsFirewallBackend(FirewallBackend):
                 f"No firewall rules found for block {block_id} / {ip_or_cidr} (idempotent OK)"
             )
         return True
+
     def scan_existing_rules(self) -> List[dict]:
         """Scan honeypot block rules: HP-BLOCK-*, HONEYPOT_BLOCK*, legacy.
 
@@ -351,8 +363,8 @@ class WindowsFirewallBackend(FirewallBackend):
         """
         rc, out, err = run_cmd([
             "netsh", "advfirewall", "firewall", "show", "rule",
-            "dir=in", "status=enabled", "type=static",
-        ], timeout=30)
+            "dir=in", "status=enabled",
+        ], timeout=120)
         if rc != 0:
             self.logger.error(f"Failed to enumerate firewall rules: {err}")
             return []
@@ -368,11 +380,19 @@ class WindowsFirewallBackend(FirewallBackend):
                 continue
             if ":" in line:
                 key, _, val = line.partition(":")
-                key = key.strip().lower()
+                key_raw = key.strip().lower()
+                key_ns = key_raw.replace(" ", "")
                 val = val.strip()
-                if "rule name" in key or "kural ad" in key:
+                if "rule name" in key_raw or "kural ad" in key_raw:
+                    if current.get("name"):
+                        rules.append(current)
+                        current = {}
                     current["name"] = val
-                elif "remoteip" in key or "uzak ip" in key or "remote ip" in key:
+                elif (
+                    key_ns in ("remoteip", "uzakip", "remoteipv4", "uzakipv4")
+                    or "remoteip" in key_ns
+                    or "uzakip" in key_ns
+                ):
                     current["remoteip"] = val
         if current:
             rules.append(current)
@@ -568,12 +588,14 @@ class FirewallAgent:
         cidr_feed_base: str = "https://www.ipdeny.com/ipblocks/data/countries",
         logger: Optional[logging.Logger] = None,
         auto_response=None,
+        threat_engine=None,
     ) -> None:
         self.api_base = api_base.rstrip("/")
         self.token = token
         self.refresh_interval = max(1, int(refresh_interval))
         self.logger = logger or make_logger()
         self.auto_response = auto_response
+        self.threat_engine = threat_engine
         self.session = make_session()
         cache_root = _default_cache_dir()
         self.country_cache = CountryCIDRCache(cidr_feed_base, cache_root / "country", self.logger)
@@ -796,6 +818,12 @@ class FirewallAgent:
 
         if not rules:
             self.logger.info("No existing HP-BLOCK / legacy rules found")
+            try:
+                from client_block_store import save_blocked_map
+                save_blocked_map({})
+            except Exception:
+                pass
+            self._hydrate_blocked_runtime({})
             self._sync_rules_to_api([])
             return
 
@@ -818,28 +846,60 @@ class FirewallAgent:
         if migrated:
             self.logger.info(f"✅ Migrated {migrated} legacy rule(s) to HP-BLOCK- prefix")
 
+        # Persist inventory under ProgramData + hydrate RAM for GUI / AutoResponse
+        try:
+            from client_block_store import merge_from_firewall_rules, extract_ip_from_rule
+            persisted = merge_from_firewall_rules(rules)
+            self.logger.info(
+                f"[BLOCK-STORE] ProgramData blocked_ips.json = {len(persisted)} IP(s)"
+            )
+        except Exception as e:
+            self.logger.error(f"[BLOCK-STORE] persist failed: {e}")
+            persisted = {}
+            try:
+                from client_block_store import extract_ip_from_rule
+            except Exception:
+                extract_ip_from_rule = None  # type: ignore
+
+        sync_ips: dict = {}
+        for r in rules:
+            try:
+                from client_block_store import extract_ips_from_rule
+                ips = extract_ips_from_rule(r) or []
+            except Exception:
+                ips = []
+                ip = ""
+                if extract_ip_from_rule:
+                    try:
+                        ip = extract_ip_from_rule(r) or ""
+                    except Exception:
+                        ip = ""
+                if not ip:
+                    remoteip = r.get("remoteip", "")
+                    suffix = r.get("suffix", "")
+                    if suffix and "." in str(suffix):
+                        ip = str(suffix).replace("_", ".")
+                    elif remoteip and remoteip.lower() not in ("any", "herhangi"):
+                        ip = remoteip.split(",")[0].strip().split("/")[0]
+                if ip:
+                    ips = [ip]
+            suffix = str(r.get("suffix", ""))
+            for ip in ips:
+                if not ip:
+                    continue
+                sync_ips[ip] = {
+                    "rule_name": r["name"],
+                    "source": "dashboard" if suffix.isdigit() else "firewall",
+                    "reason": (persisted.get(ip) or {}).get("reason", "firewall_rule"),
+                    "blocked_at": (persisted.get(ip) or {}).get("blocked_at", 0),
+                }
+
         auto_blocks = []
         if self.auto_response:
             try:
                 auto_blocks = self.auto_response.get_blocked_ips()
             except Exception:
                 pass
-
-        sync_ips: dict = {}
-        for r in rules:
-            remoteip = r.get("remoteip", "")
-            suffix = r.get("suffix", "")
-            ip = ""
-            if suffix and not str(suffix).isdigit():
-                ip = suffix
-            elif remoteip and remoteip.lower() not in ("any", "herhangi"):
-                ip = remoteip.split(",")[0].strip().split("/")[0]
-
-            if ip:
-                sync_ips[ip] = {
-                    "rule_name": r["name"],
-                    "source": "auto_response" if not str(suffix).isdigit() else "dashboard",
-                }
 
         for ab in auto_blocks:
             ip = ab.get("ip", "")
@@ -851,10 +911,30 @@ class FirewallAgent:
                     "blocked_at": ab.get("blocked_at", 0),
                 }
 
+        self._hydrate_blocked_runtime(sync_ips)
         self._sync_rules_to_api(list(sync_ips.items()))
         self.logger.info(
             f"🔄 Sync complete: {len(sync_ips)} active block(s) reported to API"
         )
+
+    def _hydrate_blocked_runtime(self, sync_ips: dict) -> None:
+        """Fill AutoResponse + ThreatEngine from firewall/ProgramData inventory."""
+        try:
+            if self.auto_response and hasattr(self.auto_response, "hydrate_from_inventory"):
+                self.auto_response.hydrate_from_inventory(sync_ips)
+        except Exception as e:
+            self.logger.error(f"AutoResponse hydrate failed: {e}")
+        try:
+            te = self.threat_engine
+            ips = set(sync_ips.keys())
+            if not ips:
+                from client_block_store import load_blocked_map
+                ips = set(load_blocked_map().keys())
+            if te is not None and hasattr(te, "hydrate_blocked_ips"):
+                te.hydrate_blocked_ips(ips)
+                self.logger.info(f"[BLOCK-STORE] ThreatEngine hydrated {len(ips)} blocked IP(s)")
+        except Exception as e:
+            self.logger.error(f"ThreatEngine hydrate failed: {e}")
 
     def _sync_rules_to_api(self, ip_entries: list) -> None:
         """POST /api/agent/sync-rules — inventory only (replace semantics on server)."""
@@ -935,8 +1015,12 @@ class FirewallAgent:
 
         backoff = self.refresh_interval
         max_backoff = max(60, self.refresh_interval * 6)
+        # Re-scan firewall → ProgramData → API so GUI/dashboard stay aligned
+        inventory_every = max(1, int(900 / max(1, self.refresh_interval)))  # ~15 min
+        cycles = 0
         self.logger.info(
-            f"Started Honeypot Firewall Agent (poll every {self.refresh_interval}s)"
+            f"Started Honeypot Firewall Agent (poll every {self.refresh_interval}s, "
+            f"inventory every {inventory_every} cycles)"
         )
         while not self._stop:
             start = time.time()
@@ -948,6 +1032,13 @@ class FirewallAgent:
                     f"pending_unblocks={len(unblocked)} "
                     f"removed={len(unblocked)} failed=0"
                 )
+                cycles += 1
+                if blocked or unblocked or cycles >= inventory_every:
+                    try:
+                        self._migrate_and_sync_rules()
+                    except Exception as inv_err:
+                        self.logger.error(f"Periodic inventory sync failed: {inv_err}")
+                    cycles = 0
                 backoff = self.refresh_interval  # reset on success
             except Exception as e:
                 self.logger.exception(f"Agent loop error: {e}")

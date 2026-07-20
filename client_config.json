@@ -1,7 +1,7 @@
 {
   "application": {
     "name": "Cloud Honeypot Client",
-    "version": "4.5.15",
+    "version": "4.5.39",
     "author": "YesNext Technology"
   },
   "language": {
@@ -38,7 +38,7 @@
     "retry_count": 3,
     "tls_verify": true,
     "ca_bundle": "",
-    "legacy_token_query": true
+    "legacy_token_query": false
   },
   "services": {
     "auto_start": false,

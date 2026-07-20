@@ -1,16 +1,12 @@
 Cloud Honeypot Client
 =====================
-**Current Version: 4.5.15**
+**Current Version: 4.5.39**
 
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 
-Son Sürüm Değişiklikleri (v2.9.x)
-- Thread yönetimi optimizasyonu (saldırı sayacı için thread reuse)
-- IP caching sistemi (5 dakika TTL ile HTTP çağrı azaltma)
-- Heartbeat interval optimizasyonu (60s, önceki: 10s)
-- GUI thread'den gc.collect() kaldırıldı (50-200ms freeze düzeltmesi)
-- Tünel döngüleri birleştirildi (sync + watchdog tek loop)
-- Tray mode bug fix (minimize edildiğinde pencere açılması sorunu)
+Son Sürüm Değişiklikleri
+- Tam liste: [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (v4.5.35 güncel)
+- Cloud API sözleşmeleri: [`docs/`](docs/README.md)
 
 Özellikler
 - Ters tünel: Seçili portları TLS üzerinden sunucuya taşır.
@@ -45,8 +41,11 @@ Otomatik Güncelleme
 - Repo bilgisi `client_constants.py` içinde `GITHUB_OWNER`/`GITHUB_REPO` ile yapılandırılır.
 
 Release
-- Manuel release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file release_notes_vX.Y.Z.md cloud-client-installer.exe`
-- Release dosyası: `cloud-client-installer.exe`
+- Changelog: `docs/CHANGELOG.md` (eski `release_notes_v*.md` birleştirildi)
+- Manuel release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file docs/CHANGELOG.md cloud-client-installer.exe`
+  (veya sürüm için kısa notes; tam geçmiş `docs/CHANGELOG.md`)
+- Operasyon: `docs/OPERATIONS.md`
+- Cloud API: `docs/api/`
 
 Sürümleme
 - SemVer: `__version__` değişkeni üzerinden (`client_constants.py`).

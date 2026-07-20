@@ -82,17 +82,23 @@ class HoneypotAPIClient:
         data: Optional[Dict],
         token: Optional[str] = None,
     ) -> tuple[Optional[Dict], Optional[Dict], Dict[str, str]]:
-        """Merge auth header + optional legacy query token."""
+        """Merge Bearer auth header; optional legacy ?token= only if configured."""
         tok = token or self._auth_token
         req_params = dict(params) if params else None
         req_data = dict(data) if data else None
         headers: Dict[str, str] = {}
         if tok:
             headers.update(auth_headers(tok))
+            # Prefer Authorization only — query token leaks into access logs
             if use_legacy_token_query():
                 if req_params is None:
                     req_params = {}
                 req_params.setdefault("token", tok)
+            elif req_params and "token" in req_params:
+                # Never ship token in query when legacy mode is off
+                req_params = {k: v for k, v in req_params.items() if k != "token"}
+                if not req_params:
+                    req_params = None
         return req_params, req_data, headers
 
     def api_request(self, method: str, endpoint: str, data: Optional[Dict] = None,

@@ -1,0 +1,44 @@
+---
+description: YesNext shared honeypot-contract — read VERSION/INDEX before API or agent work
+alwaysApply: true
+---
+
+# Shared contract (zorunlu)
+
+Sen YesNext Honeypot **Windows client** tarafını geliştiriyorsun.
+
+## CONTRACT_ROOT
+
+```text
+CONTRACT_ROOT = ../honeypot-contract
+# absolute: c:\honeypot-cloud\honeypot-contract
+# veya sibling clone: <workspace>/honeypot-contract
+```
+
+Yoksa: kullanıcıya clone/submodule etmesini söyle; uydurma API yazma.
+
+## Her görevde sıra
+
+1. Oku: `CONTRACT_ROOT/VERSION` ve `CONTRACT_ROOT/INDEX.md`
+2. İlgili dosyayı INDEX tablosundan aç (`api/*`, `agent/*`)
+3. Sözleşmeye aykırı kod yazma. Belirsizse contract’a `Open questions` notu; uydurma.
+4. API/davranış değişikliği → önce `CONTRACT_ROOT` altında MD + CHANGELOG + VERSION bump; sonra kod.
+5. Cloud-only dosyalara (PM2, nginx, dashboard HTML) dokunma / varsayma.
+
+## Sprint odakları
+
+- `agent/CLIENT.md` — Auth, Control WS, Self-update, IR, Remote
+- `agent/register-protection.md` — register `protection.block_rules` (3 fail→block)
+- `agent/remote-input.md` — frame ACK `inputs[]` anında uygula
+- `api/09-threat-intel.md` — GET ETag/304, ACK, WS `threat_intel_updated`
+
+## Kurallar
+
+- Base API: `https://honeypot.yesnext.com.tr` — Bearer token; agent API’de `?token=` yok
+- Client harici threat feed çekmez; sadece cloud threat-intel bundle
+- Min client notları ilgili MD’de
+- Acceptance checklist’leri ilgili contract dosyasının sonunda
+
+## Çıktı (her anlamlı değişiklikten sonra)
+
+Kısa özet: hangi contract dosyasına uyuldu, VERSION, ne implement edildi, kalan gap.

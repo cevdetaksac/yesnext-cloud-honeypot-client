@@ -2961,32 +2961,41 @@ if __name__ == "__main__":
         client_constants.SILENT_ADMIN_ELEVATION = True
         client_constants.SKIP_USER_DIALOGS = True
 
-    # Handle watchdog mode - check if app is running
+    # Handle watchdog mode — immortality of SYSTEM motor (not mere GUI presence)
     if args.watchdog:
         from client_helpers import ClientHelpers
         helper = ClientHelpers()
         
-        log("Watchdog mode activated - checking if app is running...")
+        log("Watchdog mode activated — checking SYSTEM motor (Session 0)...")
         
         try:
-            # Check if main app is running
-            is_running = helper.is_app_running()
-            
             from client_helpers import (
                 has_interactive_user_session,
                 interactive_frontend_running,
                 is_session_zero,
                 launch_interactive_tray_gui,
             )
-            if not is_running:
-                log("Main app not running — starting daemon + tray if needed")
-                import subprocess
-                import sys
-                exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
-                CREATE_NO_WINDOW = 0x08000000
-                # Always prefer Background task (Session 0 motor)
+            motor_alive = False
+            try:
+                motor_alive = bool(helper.is_system_motor_alive(timeout=0.9))
+            except Exception as e:
+                log(f"Watchdog motor probe failed: {e}")
+                motor_alive = False
+
+            import subprocess
+            import sys
+            exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
+            CREATE_NO_WINDOW = 0x08000000
+
+            if not motor_alive:
+                # GUI-only host used to look "already running" and skipped restart — fixed.
+                log("SYSTEM motor unhealthy/missing — starting CloudHoneypot-Background")
                 try:
                     from client_task_scheduler import TASK_NAME_BACKGROUND
+                    subprocess.run(
+                        ["schtasks", "/change", "/tn", TASK_NAME_BACKGROUND, "/enable"],
+                        capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+                    )
                     subprocess.run(
                         ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
                         capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW,
@@ -3002,15 +3011,13 @@ if __name__ == "__main__":
                                 | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                             ),
                         )
-                if has_interactive_user_session():
-                    launch_interactive_tray_gui()
-                log("Watchdog recovery triggered")
-            elif is_session_zero() and has_interactive_user_session() and not interactive_frontend_running():
-                # Daemon alive but no tray after logon (e.g. silent update while nobody logged on)
-                log("Daemon running but no interactive tray — launching Tray task")
-                launch_interactive_tray_gui()
+                log("Watchdog motor recovery triggered")
             else:
-                log("Main app is already running - no action needed")
+                log("SYSTEM motor healthy (motor_ok / Session 0)")
+
+            if has_interactive_user_session() and not interactive_frontend_running():
+                log("Interactive session without tray — launching Tray task")
+                launch_interactive_tray_gui()
                 
         except Exception as e:
             log(f"Watchdog error: {e}")
@@ -3342,28 +3349,30 @@ if __name__ == "__main__":
                     log(f"Interactive tray launch failed: {e}")
                 # Fall through to normal headless daemon (do NOT build GUI here)
             else:
-                log("Active user session detected at daemon startup. Switching to tray/GUI mode.")
-                # Tray/GUI modunu başlat
-                log_dir = os.path.join(os.environ.get('APPDATA', ''), 'YesNext', 'CloudHoneypotClient')
-                os.makedirs(log_dir, exist_ok=True)
-                setup_logging()
+                # CRITICAL: never convert interactive --mode=daemon into a GUI motor.
+                # Security motor must live in Session 0 via Background task.
+                log(
+                    "Daemon argv in interactive session — ensuring Session-0 Background "
+                    "motor (will NOT build Tk as motor), then hand off tray and exit"
+                )
                 try:
-                    selected_language = resolve_app_language()
-                    app = CloudHoneypotClient()
-                    app.lang = selected_language
-                    app._quit_protect_until = time.time() + 25.0
-                    log(f"Application initialized with language: {selected_language}")
-                    log("Building main GUI (daemon detected logon)...")
-                    app.build_gui(minimized=False)
-                    log("GUI build completed successfully")
-                    app.start_delayed_api_sync()
-                    if hasattr(app, 'root') and app.root:
-                        app.root.mainloop()
-                except Exception as gui_error:
-                    log(f"GUI Mode Error (daemon logon): {gui_error}")
-                    import traceback
-                    log(f"GUI Error traceback: {traceback.format_exc()}")
-                    sys.exit(1)
+                    from client_task_scheduler import TASK_NAME_BACKGROUND
+                    from client_winproc import run_hidden
+                    run_hidden(
+                        ["schtasks", "/change", "/tn", TASK_NAME_BACKGROUND, "/enable"],
+                        timeout=10,
+                    )
+                    run_hidden(
+                        ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
+                        timeout=15,
+                    )
+                except Exception as e:
+                    log(f"Background ensure from interactive daemon failed: {e}")
+                try:
+                    from client_helpers import launch_interactive_tray_gui
+                    launch_interactive_tray_gui()
+                except Exception as e:
+                    log(f"Tray handoff failed: {e}")
                 sys.exit(0)
 
         # Headless daemon (no interactive session, or Session 0 with tray handoff)

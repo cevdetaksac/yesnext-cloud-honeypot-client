@@ -1,7 +1,7 @@
 # Architecture — SYSTEM daemon + GUI frontend
 
 > API: `https://honeypot.yesnext.com.tr`  
-> Client: **≥ 4.5.50** (RDP NetNTLMv2 capture + auto-update SYSTEM path + remote prepare)
+> Client: **≥ 4.5.59** (SYSTEM motor immortality + per-session single GUI)
 
 ---
 
@@ -9,11 +9,11 @@
 
 | Katman | Process | Rol |
 |--------|---------|-----|
-| **Motor** | `CloudHoneypot-Background` (`--mode=daemon`, SYSTEM Session 0) | Threat, firewall, honeypot, RemoteCommands, control WS, self_update, RD |
-| **Frontend** | Tray / GUI (`--show-gui`, interactive session) | UI only — reads ProgramData + IPC; **does not** own `:58632` when motor healthy |
-| **Watchdog** | Scheduled task | Respawn Background if dead |
+| **Motor** | `CloudHoneypot-Background` (`--mode=daemon`, SYSTEM Session 0) | Threat, firewall, honeypot, RemoteCommands, control `:58632`, self_update, RD — **güvenlik kritik** |
+| **Frontend** | Tray / GUI (interactive session) | Sadece arayüz — ProgramData + IPC; motor sağlıklıysa `:58632` **tutmaz** |
+| **Watchdog** | Scheduled task (her 2 dk) | `motor_ok` / Session 0 yoksa Background’u yeniden başlatır (GUI var diye atlamaz) |
 
-N kullanıcı aynı anda GUI açabilir; koruma motoru tektir.
+Kural: makinede **tek** SYSTEM motor. Her Windows oturumunda **en fazla bir** tray/GUI (`Local\CloudHoneypotClient_GUI`).
 
 ```
 ┌─────────────┐   IPC 127.0.0.1:58632   ┌──────────────────────┐

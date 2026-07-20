@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.58"  # One GUI/tray per session (Local mutex + show handoff)
+VERSION = "4.5.59"  # Watchdog checks SYSTEM motor_ok (not mere GUI presence)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

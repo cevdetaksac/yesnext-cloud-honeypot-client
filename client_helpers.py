@@ -404,6 +404,47 @@ class ClientHelpers:
             return _ip_cache['ip'] if _ip_cache['ip'] else "0.0.0.0"
 
     @staticmethod
+    def is_system_motor_alive(timeout: float = 0.8) -> bool:
+        """True if Session-0 security motor is healthy (not merely any GUI process)."""
+        try:
+            from client_daemon_ipc import is_motor_healthy
+            if is_motor_healthy(timeout=timeout):
+                return True
+        except Exception:
+            pass
+        try:
+            import ctypes
+            import psutil
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            current_pid = os.getpid()
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    pid = int(proc.info.get("pid") or 0)
+                    if pid == current_pid:
+                        continue
+                    name = (proc.info.get("name") or "").lower()
+                    cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+                    if "honeypot-client" not in name and "client.py" not in cmdline:
+                        continue
+                    if "--watchdog" in cmdline or "--silent-update" in cmdline:
+                        continue
+                    sid = wintypes.DWORD()
+                    if not kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
+                        continue
+                    if int(sid.value) != 0:
+                        continue
+                    # Session 0 honeypot process = candidate motor
+                    if "--mode=daemon" in cmdline or "--daemon" in cmdline or "honeypot-client" in name:
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError, ValueError):
+                    continue
+        except Exception as e:
+            log(f"is_system_motor_alive error: {e}")
+        return False
+
+    @staticmethod
     def is_app_running() -> bool:
         """Check if main app is currently running"""
         try:

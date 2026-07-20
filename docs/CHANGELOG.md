@@ -1,3 +1,12 @@
+# v4.5.59
+
+## Daemon immortality: Watchdog checks SYSTEM motor, not GUI
+- Architecture: Session-0 daemon = security motor; per-session tray/GUI = UI only.
+- Watchdog no longer treats “any honeypot-client.exe” as healthy — requires `motor_ok` / Session 0.
+- Interactive `--mode=daemon` no longer converts into a GUI motor (ensures Background + exits).
+
+---
+
 # v4.5.58
 
 ## Fix: duplicate tray/GUI instances

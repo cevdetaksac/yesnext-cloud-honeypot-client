@@ -699,6 +699,8 @@ class ModernGUI:
             detail = self.t("update_banner_version_line").format(from_v=left, to_v=right)
         if phase == "failed" and err:
             detail = (detail + " — " if detail else "") + err[:80]
+            if err in ("update_stalled", "install_did_not_complete"):
+                title = self.t("update_banner_stalled")
 
         border = COLORS["orange"]
         title_color = COLORS["orange"]

@@ -388,6 +388,7 @@
     "update_banner_installing": "Kurulum çalışıyor…",
     "update_banner_done": "Güncelleme tamamlandı",
     "update_banner_failed": "Güncelleme başarısız",
+    "update_banner_stalled": "Güncelleme takıldı — tekrar deneyin",
     "update_banner_version_line": "{from_v} → {to_v}",
 
     "shares_info_unavailable": "⚪  Paylaşım bilgisi alınamadı",
@@ -841,6 +842,7 @@
     "update_banner_installing": "Installation in progress…",
     "update_banner_done": "Update completed",
     "update_banner_failed": "Update failed",
+    "update_banner_stalled": "Update stalled — try again",
     "update_banner_version_line": "{from_v} → {to_v}",
 
     "shares_info_unavailable": "⚪  Share info unavailable",

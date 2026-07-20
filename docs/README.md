@@ -6,6 +6,7 @@ Merkezi dokümantasyon (API sözleşmeleri, changelog, operasyon).
 
 | Konu | Dosya |
 |------|--------|
+| **Client sözleşme özeti** | [CLIENT.md](CLIENT.md) |
 | **Changelog** | [CHANGELOG.md](CHANGELOG.md) |
 | **Operasyon** | [OPERATIONS.md](OPERATIONS.md) |
 | **Güvenlik** | [SECURITY.md](SECURITY.md) |

@@ -24,6 +24,16 @@ _VALID_PHASES = frozenset({
     "failed",
 })
 
+# Active phases must not stick forever when helper dies silently.
+_PHASE_STALE_SEC = {
+    "accepted": 600,       # 10 min
+    "downloading": 1800,   # 30 min
+    "staging": 600,
+    "installing": 600,     # 10 min — helper/NSIS stall or never started
+    "done": 86400,
+    "failed": 86400,
+}
+
 
 def _status_path() -> str:
     base = os.path.join(
@@ -52,7 +62,7 @@ def set_update_ui_status(
         phase = (phase or "").strip().lower()
         if phase not in _VALID_PHASES:
             return
-        prev = get_update_ui_status() or {}
+        prev = _read_raw() or {}
         payload: Dict[str, Any] = {
             "phase": phase,
             "from_version": (from_version or prev.get("from_version") or "").strip(),
@@ -78,8 +88,7 @@ def set_update_ui_status(
         pass
 
 
-def get_update_ui_status(max_age_sec: float = 7200.0) -> Optional[Dict[str, Any]]:
-    """Read status file; None if missing/stale/invalid."""
+def _read_raw() -> Optional[Dict[str, Any]]:
     try:
         path = _status_path()
         if not os.path.isfile(path):
@@ -91,17 +100,57 @@ def get_update_ui_status(max_age_sec: float = 7200.0) -> Optional[Dict[str, Any]
         phase = (data.get("phase") or "").strip().lower()
         if phase not in _VALID_PHASES:
             return None
-        updated = float(data.get("updated_at") or 0)
-        if updated and max_age_sec > 0 and (time.time() - updated) > max_age_sec:
-            # Stale failed/done can linger; still return recent active phases only
-            if phase in ("done", "failed"):
-                return None
-            if (time.time() - updated) > max_age_sec:
-                return None
         data["phase"] = phase
         return data
     except Exception:
         return None
+
+
+def _release_stale_lock() -> None:
+    try:
+        from client_utils import release_update_lock
+        release_update_lock(resume_updaters=True)
+    except Exception:
+        pass
+
+
+def _mark_stalled(st: Dict[str, Any], reason: str = "update_stalled") -> Dict[str, Any]:
+    set_update_ui_status(
+        "failed",
+        from_version=str(st.get("from_version") or ""),
+        to_version=str(st.get("to_version") or ""),
+        detail=reason,
+        error=reason,
+    )
+    _release_stale_lock()
+    return _read_raw() or {
+        "phase": "failed",
+        "error": reason,
+        "from_version": st.get("from_version") or "",
+        "to_version": st.get("to_version") or "",
+        "updated_at": time.time(),
+    }
+
+
+def get_update_ui_status(max_age_sec: float = 7200.0) -> Optional[Dict[str, Any]]:
+    """Read status file; expire stuck active phases to failed."""
+    data = _read_raw()
+    if not data:
+        return None
+    phase = data.get("phase") or ""
+    updated = float(data.get("updated_at") or 0)
+    age = (time.time() - updated) if updated else 0.0
+
+    stale_limit = float(_PHASE_STALE_SEC.get(phase, max_age_sec))
+    if updated and age > stale_limit and phase in (
+        "accepted", "downloading", "staging", "installing",
+    ):
+        return _mark_stalled(data, "update_stalled")
+
+    if updated and max_age_sec > 0 and age > max_age_sec and phase in ("done", "failed"):
+        return None
+
+    return data
 
 
 def clear_update_ui_status() -> None:
@@ -121,17 +170,21 @@ def maybe_mark_done_on_startup(current_version: str) -> None:
     """
     After install, new process starts: if status targeted this version,
     mark done so GUI can show success briefly.
+
+    If still on old version while phase=installing and status is old → failed
+    (helper died after setting 'installing' without finishing).
     """
     try:
-        st = get_update_ui_status(max_age_sec=86400.0)
+        st = _read_raw()
         if not st:
             return
         phase = st.get("phase") or ""
         target = _norm_ver(str(st.get("to_version") or ""))
         cur = _norm_ver(current_version)
-        if not target or not cur:
-            return
-        if cur == target and phase in (
+        updated = float(st.get("updated_at") or 0)
+        age = (time.time() - updated) if updated else 0.0
+
+        if target and cur and cur == target and phase in (
             "accepted", "downloading", "staging", "installing", "done",
         ):
             set_update_ui_status(
@@ -140,10 +193,19 @@ def maybe_mark_done_on_startup(current_version: str) -> None:
                 to_version=target,
                 detail="install_complete",
             )
-        elif phase == "failed":
-            pass  # leave for GUI to show
-        elif target and cur != target and phase in ("installing", "staging"):
-            # Still mid-flight or failed silently — keep installing signal briefly
-            pass
+            return
+
+        # Still old build but banner says installing → helper never finished
+        if (
+            phase in ("installing", "staging", "accepted", "downloading")
+            and target
+            and cur
+            and cur != target
+            and age > 120  # give helper 2 min after relaunch
+        ):
+            # If age already past phase stale, mark stalled
+            limit = float(_PHASE_STALE_SEC.get(phase, 900))
+            if age > min(300.0, limit):  # 5 min soft fail on boot
+                _mark_stalled(st, "install_did_not_complete")
     except Exception:
         pass

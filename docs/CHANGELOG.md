@@ -1,3 +1,13 @@
+# v4.5.43
+
+## Güncelleme banner takılması
+- “Kurulum çalışıyor” helper ölünce / NSIS hiç başlamayınca sonsuza kadar kalıyordu.
+- Active phase timeout: installing ~10 dk → `failed` + lock release (“Güncelleme takıldı”).
+- Boot: hâlâ eski sürümdeyken `installing` → `install_did_not_complete`.
+- Helper: NSIS beklerken her 5 sn `update_ui_status` heartbeat.
+
+---
+
 # v4.5.42
 
 ## Tümünü temizle: gerçekten siler (SYSTEM)

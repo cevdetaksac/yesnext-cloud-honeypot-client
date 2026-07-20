@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.42"  # Clear-all via SYSTEM daemon IPC (elevated); batch PS purge
+VERSION = "4.5.43"  # Stale update banner → failed; helper UI heartbeat while NSIS waits
 
 
 CLIENT_VERSION = VERSION  # Main version constant

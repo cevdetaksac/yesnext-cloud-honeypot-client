@@ -366,7 +366,16 @@ try {
         Fail-Update 4 "ERROR: Installer failed to start (null process)"
     }
     Write-UpLog "Installer PID=$($p.Id) — waiting up to ${timeoutSec}s..."
-    $finished = $p.WaitForExit($timeoutSec * 1000)
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    $finished = $false
+    while ((Get-Date) -lt $deadline) {
+        if ($p.HasExited) { $finished = $true; break }
+        try {
+            Write-UpdateUiStatus -Phase "installing" -Detail ("installer_wait_pid=" + $p.Id)
+        } catch {}
+        Start-Sleep -Seconds 5
+        try { $p.Refresh() } catch {}
+    }
     if (-not $finished) {
         Write-UpLog "ERROR: Installer hung after ${timeoutSec}s — killing PID $($p.Id) + children"
         try { & taskkill.exe /F /T /PID $p.Id 2>$null | Out-Null } catch {}

@@ -1,3 +1,12 @@
+# v4.5.47
+
+## Cleanup
+- Remove unused methods (utils RDP/update helpers, dead client/GUI/helpers/security APIs).
+- Delete `_archive/client_networking.py`, scattered `docs/release_notes_v*.md` (CHANGELOG is SoT).
+- Drop unused theme tokens (`FONTS`, `CORNER_RADIUS`, purple); ignore local junk logs/probes.
+
+---
+
 # v4.5.46
 
 ## Centralization / P1 cleanup

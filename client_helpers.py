@@ -370,11 +370,6 @@ class ClientHelpers:
     """Container class for client helper functions"""
     
     @staticmethod
-    def current_executable() -> str:
-        """Get current executable path"""
-        return sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
-
-    @staticmethod
     def get_public_ip(force_refresh: bool = False, *, allow_network: bool = True) -> str:
         """Get public IP address with caching for performance.
 
@@ -401,35 +396,6 @@ class ClientHelpers:
             log(f"get_public_ip error: {e}")
             # Return cached IP if available, otherwise fallback
             return _ip_cache['ip'] if _ip_cache['ip'] else "0.0.0.0"
-
-    @staticmethod
-    def safe_set_entry(entry, text: str):
-        """Safely update entry widget text (supports both tk.Entry and CTkEntry)"""
-        try:
-            # CTkEntry requires configure to toggle state
-            if hasattr(entry, 'configure'):
-                try:
-                    entry.configure(state="normal")
-                except Exception:
-                    pass
-            entry.delete(0, "end")
-            entry.insert(0, str(text) if text else "")
-            if hasattr(entry, 'configure'):
-                try:
-                    entry.configure(state="disabled")
-                except Exception:
-                    pass
-        except Exception as e:
-            log(f"Entry update error: {e}")
-
-    @staticmethod
-    def set_primary_button(button: tk.Button, text: str, cmd, color: str):
-        """Update primary button properties"""
-        if button:
-            try:
-                button.config(text=text, command=cmd, bg=color)
-            except Exception as e:
-                log(f"Button update error: {e}")
 
     @staticmethod
     def is_app_running() -> bool:

@@ -27,7 +27,7 @@ from client_utils import get_from_config
 
 
 from client_gui_theme import (
-    COLORS, SERVICE_ICONS, SIDEBAR_WIDTH, CORNER_RADIUS,
+    COLORS, SERVICE_ICONS, SIDEBAR_WIDTH,
     NAV_ITEM_HEIGHT, NAV_ICON_WIDTH, NAV_PAD_X, NAV_ICON_TEXT_GAP,
     NAV_FONT_ICON, NAV_FONT_LABEL,
 )
@@ -743,16 +743,6 @@ class ModernGUI:
                     pass
             self._update_banner_last_phase = phase
 
-    def _copy_to_clipboard(self, text: str):
-        """Metni panoya kopyala ve bildirim göster."""
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.root.update()
-            messagebox.showinfo(self.t("copy"), text)
-        except Exception as e:
-            log(f"clipboard error: {e}")
-
     def _render_account_link_controls(self, token: str = ""):
         """Rebuild account CTA / linked badge inside _account_slot."""
         from client_utils import is_account_linked, get_linked_account_email
@@ -1150,34 +1140,6 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
     #  BAŞLIK BANDI
     # ═══════════════════════════════════════════════════════════════
-    def _build_header(self, parent):
-        hdr = ctk.CTkFrame(parent, fg_color=COLORS["accent"], corner_radius=0, height=44)
-        hdr.pack(fill="x", pady=(0, 0))
-        hdr.pack_propagate(False)
-
-        title_wrap = ctk.CTkFrame(hdr, fg_color="transparent")
-        title_wrap.pack(side="left", padx=16)
-        ctk.CTkLabel(
-            title_wrap, text="🛡️",
-            font=self._emoji_font(17),
-            text_color=COLORS["text_bright"],
-        ).pack(side="left")
-        ctk.CTkLabel(
-            title_wrap,
-            text=f"  {self.t('app_title')}  v{__version__}",
-            font=ctk.CTkFont(size=17, weight="bold"),
-            text_color=COLORS["text_bright"],
-        ).pack(side="left")
-
-        # Sağ taraf — durum göstergesi
-        self._header_status = ctk.CTkLabel(
-            hdr,
-            text="● " + self.t("protection_inactive"),
-            font=ctk.CTkFont(size=13),
-            text_color=COLORS["red"],
-        )
-        self._header_status.pack(side="right", padx=16)
-
     def update_header_status(self, active=None):
         """Koruma durumu badge'ini güncelle.
 
@@ -4129,29 +4091,6 @@ class ModernGUI:
         self._cmd_history_box.insert("1.0", self.t("placeholder_command_history"))
         self._cmd_history_box.configure(state="disabled")
         self._cmd_history_has_data = False
-
-    def append_command_history(self, text: str):
-        """Append a line to command history (thread-safe)."""
-        def _do():
-            try:
-                if not hasattr(self, '_cmd_history_box'):
-                    return
-                self._cmd_history_box.configure(state="normal")
-                # İlk gerçek veri geldiğinde placeholder'ı temizle
-                if not getattr(self, '_cmd_history_has_data', False):
-                    self._cmd_history_box.delete("1.0", "end")
-                    self._cmd_history_has_data = True
-                self._cmd_history_box.insert("end", text + "\n")
-                self._cmd_history_box.see("end")
-                content = self._cmd_history_box.get("1.0", "end")
-                lines = content.splitlines()
-                if len(lines) > 50:
-                    self._cmd_history_box.delete("1.0", f"{len(lines)-50}.0")
-                self._cmd_history_box.configure(state="disabled")
-            except Exception:
-                pass
-        if self.root:
-            self.root.after(0, _do)
 
     # ─── Active Sessions Panel (v4.0 Faz 4) ─── #
     def _build_active_sessions(self, parent):

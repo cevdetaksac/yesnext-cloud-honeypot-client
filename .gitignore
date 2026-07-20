@@ -37,3 +37,8 @@ pre.txt
 
 # Local certs/keys (do NOT commit)
 certs/
+
+# Local junk / runtime
+threats.log
+_probe.jpg
+hp-installer-*.exe

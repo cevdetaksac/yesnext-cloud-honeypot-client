@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.46"  # Threat coalesce, service off-thread, winproc centralization
+VERSION = "4.5.47"  # Dead code/file cleanup: archive, release_notes, unused methods
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Cloud Honeypot Client — main application orchestrator.
 
@@ -848,56 +848,6 @@ class CloudHoneypotClient:
             return key  # Return key itself as fallback
 
     # ---------- Helper Methods ---------- #
-    def require_admin_for_operation(self, operation_name: str) -> bool:
-        """Check and request admin privileges for critical operations"""
-        try:
-            from client_constants import SKIP_ADMIN_ELEVATION, TEST_MODE
-            if SKIP_ADMIN_ELEVATION or TEST_MODE:
-                return True
-        except ImportError:
-            pass
-        if ctypes.windll.shell32.IsUserAnAdmin(): return True
-        log(f"'{operation_name}' işlemi admin yetkisi gerektiriyor ama mevcut değil")
-        
-        try:
-            if hasattr(self, 'root') and self.root:
-                messagebox.showwarning(
-                    self.t("admin_operation_failed"),
-                    self.t("admin_operation_message").format(operation=operation_name)
-                )
-        except Exception as e:
-            log(f"Admin warning dialog error: {e}")
-        
-        return False
-
-    def ensure_admin(self, force_request: bool = False) -> Union[bool, str]:
-        """Ensure admin privileges with optional elevation request"""
-        try:
-            from client_constants import SKIP_ADMIN_ELEVATION, TEST_MODE
-            if SKIP_ADMIN_ELEVATION or TEST_MODE:
-                return True
-            if os.name != "nt" or ctypes.windll.shell32.IsUserAnAdmin(): return True
-            if force_request:
-                log("🔧 Security monitoring requires elevated privileges...")
-                try:
-                    exe = sys.executable
-                    params = " ".join(sys.argv[1:]) if getattr(sys, 'frozen', False) else \
-                            f'"{os.path.abspath(sys.argv[0])}" ' + " ".join(sys.argv[1:])
-                    
-                    # Smart elevation strategy - appears as legitimate security software
-                    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
-                    log("🛡️ Elevation request sent for network security monitoring")
-                    return "restarting"
-                except Exception as e:
-                    log(f"❌ Privilege elevation failed: {e}")
-                    return False
-            
-            log("⚠️ Limited privileges mode - some security features may be restricted")
-            return False
-        except Exception as e:
-            log(f"ensure_admin error: {e}")
-            return False
-
     # ---------- API Connection ---------- #
     def try_api_connection(self, show_error: bool = True) -> bool:
         """Check API connection using modular client"""
@@ -1662,48 +1612,6 @@ class CloudHoneypotClient:
         except Exception as e:
             log(f"write_consent error: {e}")
 
-    def ensure_consent_ui(self):
-        """Show consent dialog if not already accepted"""
-        cons = self.read_consent()
-        if cons.get("accepted"):
-            self.state["consent"] = cons
-            return cons
-
-        win = tk.Toplevel(self.root)
-        win.title(self.t("consent_title"))
-        try: win.grab_set(); win.transient(self.root)
-        except Exception as e: log(f"Exception: {e}")
-
-        tk.Label(win, text=self.t("consent_msg"), justify="left", font=("Arial", 10)).pack(padx=16, pady=12)
-
-        var_rdp = tk.BooleanVar(value=True)
-        var_auto = tk.BooleanVar(value=False)
-        tk.Checkbutton(win, text=self.t("consent_rdp"),  variable=var_rdp).pack(anchor="w", padx=16)
-        tk.Checkbutton(win, text=self.t("consent_auto"), variable=var_auto).pack(anchor="w", padx=16)
-
-        accepted = {"val": False}
-
-        def do_accept():
-            accepted["val"] = True
-            self.write_consent(True, var_rdp.get(), var_auto.get())
-            self.state["consent"] = self.read_consent()
-            try: win.destroy()
-            except: pass
-
-        def do_cancel():
-            accepted["val"] = False
-            self.write_consent(False, var_rdp.get(), var_auto.get())
-            self.state["consent"] = self.read_consent()
-            try: win.destroy()
-            except: pass
-
-        frm = tk.Frame(win); frm.pack(pady=10)
-        tk.Button(frm, text=self.t("consent_accept"), bg="#4CAF50", fg="white", command=do_accept).pack(side="left", padx=6)
-        tk.Button(frm, text=self.t("consent_cancel"), command=do_cancel).pack(side="left", padx=6)
-
-        win.wait_window()
-        return self.state.get("consent", cons)
-
     # ---------- UI Helpers ---------- #
     # ---------- Update Management ---------- #
     def check_updates_and_prompt(self):
@@ -2040,14 +1948,6 @@ class CloudHoneypotClient:
     def is_protection_active(self) -> bool:
         """Tray/header: port izleme veya honeypot bait aktifse koruma var sayılır."""
         return self.get_protection_mode() != "inactive"
-
-    def get_service_state(self) -> Dict[str, Any]:
-        """ServiceManager'dan güncel servis durumlarını al."""
-        return self.service_manager.get_all_statuses()
-
-    def get_active_services(self) -> list:
-        """Get list of currently active services for tray status detection"""
-        return self.service_manager.running_services
 
     # ---------- Per-row helpers ---------- #
 
@@ -2392,17 +2292,6 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"report_open_ports_loop err: {e}")
             time.sleep(600)
-
-    def _normalize_service(self, s: str) -> str:
-        s = (s or '').upper()
-        if s == 'MYSQL':
-            return 'MySQL'
-        return s
-
-    def _is_service_running(self, listen_port: int, service_name: str) -> bool:
-        """Check if service is running — delegates to ServiceManager"""
-        status = self.service_manager.get_status(service_name)
-        return status == "started"
 
     # ---------- Tray Management (Modularized) ---------- #
     def initialize_tray_manager(self):

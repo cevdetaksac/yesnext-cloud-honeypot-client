@@ -8,7 +8,7 @@ prevent false-positive detections. Validates process integrity and
 checks security environment (admin, AV, firewall).
 
 Key exports:
-  SecurityManager                  — initialize(), get_security_status(), is_admin()
+  SecurityManager                  — initialize()
   check_defender_compatibility()   — hash + registry markers
   create_defender_trust_signals()   — metadata + process verification
   verify_process_integrity()       — exe name & PID check
@@ -187,18 +187,3 @@ class SecurityManager:
             log(f"Security initialization error: {e}")
             return False
     
-    def get_security_status(self) -> Dict[str, Any]:
-        """Get current security status"""
-        return self.security_status.copy()
-    
-    def is_admin(self) -> bool:
-        """Check if running with admin privileges"""
-        return self.security_status.get("is_admin", False)
-    
-    def ensure_admin_privileges(self, operation_name: str) -> bool:
-        """Ensure admin privileges for critical operations"""
-        if self.is_admin():
-            return True
-            
-        log(f"'{operation_name}' işlemi admin yetkisi gerektiriyor ama mevcut değil")
-        return False

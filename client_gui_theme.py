@@ -19,7 +19,6 @@ COLORS = {
     "orange_hover": "#fbbf24",
     "blue":         "#3b82f6",
     "blue_hover":   "#60a5fa",
-    "purple":       "#a78bfa",
     "text":         "#cbd5e1",
     "text_dim":     "#64748b",
     "text_bright":  "#f8fafc",
@@ -29,14 +28,6 @@ COLORS = {
     "status_dot_off": "#f43f5e",
     "nav_active":   "#1e3a5f",
     "nav_hover":    "#1e293b",
-}
-
-FONTS = {
-    "title": ("Segoe UI", 20, "bold"),
-    "heading": ("Segoe UI", 14, "bold"),
-    "body": ("Segoe UI", 12),
-    "small": ("Segoe UI", 11),
-    "mono": ("Cascadia Mono", 11),
 }
 
 SERVICE_ICONS = {
@@ -50,7 +41,6 @@ SERVICE_ICONS = {
 }
 
 SIDEBAR_WIDTH = 220
-CORNER_RADIUS = 14
 
 # Sidebar navigation layout (fixed icon gutter — emoji widths vary)
 NAV_ITEM_HEIGHT = 40

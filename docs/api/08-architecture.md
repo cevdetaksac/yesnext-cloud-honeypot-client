@@ -1,7 +1,7 @@
 # Architecture — SYSTEM daemon + GUI frontend
 
 > API: `https://honeypot.yesnext.com.tr`  
-> Client: **≥ 4.5.46** (winproc centralization + threat coalesce)
+> Client: **≥ 4.5.47** (dead-code cleanup + winproc centralization)
 
 ---
 

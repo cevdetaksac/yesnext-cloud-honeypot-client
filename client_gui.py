@@ -328,14 +328,12 @@ class ModernGUI:
             # Heavy scans staggered — never all at once on tab click
             if self.root:
                 self.root.after(50, self._refresh_security_intel)
-                self.root.after(300, self._refresh_active_sessions)
-                self.root.after(600, self._refresh_user_accounts)
+                self.root.after(400, self._refresh_active_sessions)
                 if hasattr(self, "_refresh_remote_desktop_status"):
-                    self.root.after(800, self._refresh_remote_desktop_status)
+                    self.root.after(700, self._refresh_remote_desktop_status)
             else:
                 self._refresh_security_intel()
                 self._refresh_active_sessions()
-                self._refresh_user_accounts()
                 if hasattr(self, "_refresh_remote_desktop_status"):
                     self._refresh_remote_desktop_status()
         except Exception as e:
@@ -1541,34 +1539,53 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _refresh_security_intel(self):
-        """Güvenlik panellerini arka planda yenile (lazy: threat sekmesi)."""
+        """Güvenlik panellerini arka planda yenile (coalesce + sequential PS)."""
         if self._lazy_intel and self._active_page != "threat":
             return
-        import threading as _th
-        _th.Thread(target=self._collect_security_overview, daemon=True).start()
-        _th.Thread(target=self._collect_user_accounts, daemon=True).start()
-        _th.Thread(target=self._collect_network_shares, daemon=True).start()
-        _th.Thread(target=self._collect_suspicious_services, daemon=True).start()
+        if getattr(self, "_security_intel_busy", False):
+            self._security_intel_pending = True
+            return
+        self._security_intel_busy = True
+        self._security_intel_pending = False
+
+        def _worker():
+            try:
+                # One worker — avoid parallel PowerShell storms
+                self._collect_security_overview()
+                self._collect_user_accounts()
+                self._collect_network_shares()
+                self._collect_suspicious_services()
+            finally:
+                def _done():
+                    self._security_intel_busy = False
+                    if getattr(self, "_security_intel_pending", False):
+                        self._security_intel_pending = False
+                        self._refresh_security_intel()
+                try:
+                    self._gui_safe(_done)
+                except Exception:
+                    self._security_intel_busy = False
+
+        threading.Thread(target=_worker, daemon=True, name="SecurityIntel").start()
 
     def _refresh_user_accounts(self):
         """Sadece kullanıcı hesaplarını yenile."""
-        import threading as _th
-        _th.Thread(target=self._collect_user_accounts, daemon=True).start()
+        threading.Thread(
+            target=self._collect_user_accounts, daemon=True, name="UserAccounts"
+        ).start()
 
     # ─── Collector: System Security Overview ─── #
     def _collect_security_overview(self):
         """Sistem güvenlik kontrollerini çalıştır ve GUI'yi güncelle."""
-        import subprocess
+        from client_winproc import run_hidden, run_ps
         checks = []
-        CREATE_NW = 0x08000000
 
         # 1) Windows Firewall
         try:
-            r = subprocess.run(
-                ["netsh", "advfirewall", "show", "allprofiles", "state"],
-                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
+            rc, out, _ = run_hidden(
+                ["netsh", "advfirewall", "show", "allprofiles", "state"], timeout=5,
             )
-            fw_on = "ON" in r.stdout.upper() if r.returncode == 0 else False
+            fw_on = "ON" in out.upper() if rc == 0 else False
             checks.append((self.t("check_firewall"), fw_on,
                            self.t("check_active") if fw_on else self.t("check_disabled_warning"),
                            None if fw_on else "firewall"))
@@ -1577,12 +1594,11 @@ class ModernGUI:
 
         # 2) Windows Defender / Antivirus
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-MpComputerStatus | Select-Object -ExpandProperty RealTimeProtectionEnabled"],
-                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            rc, out, _ = run_ps(
+                "Get-MpComputerStatus | Select-Object -ExpandProperty RealTimeProtectionEnabled",
+                timeout=10,
             )
-            av_on = "TRUE" in r.stdout.upper().strip() if r.returncode == 0 else False
+            av_on = "TRUE" in out.upper().strip() if rc == 0 else False
             checks.append((self.t("check_antivirus"), av_on,
                            self.t("check_realtime_on") if av_on else self.t("check_disabled_warning"),
                            None if av_on else "antivirus"))
@@ -1591,11 +1607,8 @@ class ModernGUI:
 
         # 3) WinRM (uzaktan yönetim — kapalı olmalı)
         try:
-            r = subprocess.run(
-                ["sc", "query", "WinRM"],
-                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
-            )
-            winrm_running = "RUNNING" in r.stdout.upper() if r.returncode == 0 else False
+            rc, out, _ = run_hidden(["sc", "query", "WinRM"], timeout=5)
+            winrm_running = "RUNNING" in out.upper() if rc == 0 else False
             checks.append((self.t("check_winrm"), not winrm_running,
                            self.t("check_closed_safe") if not winrm_running else self.t("check_open_remote_risk"),
                            "winrm" if winrm_running else None))
@@ -1604,13 +1617,13 @@ class ModernGUI:
 
         # 4) RDP Network Level Authentication
         try:
-            r = subprocess.run(
+            rc, out, _ = run_hidden(
                 ["reg", "query",
                  r"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
                  "/v", "UserAuthentication"],
-                capture_output=True, text=True, timeout=5, creationflags=CREATE_NW,
+                timeout=5,
             )
-            nla_on = "0x1" in r.stdout if r.returncode == 0 else False
+            nla_on = "0x1" in out if rc == 0 else False
             checks.append((self.t("check_rdp_nla"), nla_on,
                            self.t("check_nla_active") if nla_on else self.t("check_nla_off_risk"),
                            None if nla_on else "nla"))
@@ -1640,21 +1653,18 @@ class ModernGUI:
 
         # 6) Windows Update (son güncelleme tarihi)
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "(Get-HotFix | Sort-Object InstalledOn -Descending | "
-                 "Select-Object -First 1).InstalledOn.ToString('dd.MM.yyyy')"],
-                capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+            rc, out, _ = run_ps(
+                "(Get-HotFix | Sort-Object InstalledOn -Descending | "
+                "Select-Object -First 1).InstalledOn.ToString('dd.MM.yyyy')",
+                timeout=15,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                last_update = r.stdout.strip()
-                checks.append((self.t("check_last_update"), True, last_update))
+            if rc == 0 and out.strip():
+                checks.append((self.t("check_last_update"), True, out.strip()))
             else:
                 checks.append((self.t("check_last_update"), None, self.t("check_info_unavailable")))
         except Exception:
             checks.append((self.t("check_last_update"), None, self.t("check_unable_to_verify")))
 
-        # GUI'yi güncelle (thread-safe)
         self._gui_safe(lambda: self._render_security_checks(checks))
 
     def _render_security_checks(self, checks: list):
@@ -1771,16 +1781,14 @@ class ModernGUI:
         """WinRM servisini kapat."""
         if not messagebox.askyesno("WinRM", self.t("fix_winrm_confirm")):
             return
-        import subprocess
-        CREATE_NW = 0x08000000
+        from client_winproc import run_ps
         def _do():
             try:
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "Stop-Service WinRM -Force; "
-                     "Set-Service WinRM -StartupType Disabled; "
-                     "Disable-PSRemoting -Force -ErrorAction SilentlyContinue"],
-                    capture_output=True, timeout=15, creationflags=CREATE_NW,
+                run_ps(
+                    "Stop-Service WinRM -Force; "
+                    "Set-Service WinRM -StartupType Disabled; "
+                    "Disable-PSRemoting -Force -ErrorAction SilentlyContinue",
+                    timeout=15,
                 )
                 self._gui_safe(lambda: messagebox.showinfo("WinRM", self.t("fix_winrm_ok")))
             except Exception:
@@ -1792,15 +1800,14 @@ class ModernGUI:
         """RDP NLA'yı aktifleştir."""
         if not messagebox.askyesno("RDP NLA", self.t("fix_nla_confirm")):
             return
-        import subprocess
-        CREATE_NW = 0x08000000
+        from client_winproc import run_hidden
         def _do():
             try:
-                subprocess.run(
+                run_hidden(
                     ["reg", "add",
                      r"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
                      "/v", "UserAuthentication", "/t", "REG_DWORD", "/d", "1", "/f"],
-                    capture_output=True, timeout=10, creationflags=CREATE_NW,
+                    timeout=10,
                 )
                 self._gui_safe(lambda: messagebox.showinfo("RDP NLA", self.t("fix_nla_ok")))
             except Exception:
@@ -1812,16 +1819,14 @@ class ModernGUI:
         """Windows Defender gerçek zamanlı korumayı aç."""
         if not messagebox.askyesno("Antivirus", self.t("fix_av_confirm")):
             return
-        import subprocess
-        CREATE_NW = 0x08000000
+        from client_winproc import run_ps
         def _do():
             try:
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "Set-MpPreference -DisableRealtimeMonitoring $false"],
-                    capture_output=True, text=True, timeout=15, creationflags=CREATE_NW,
+                rc, _, _ = run_ps(
+                    "Set-MpPreference -DisableRealtimeMonitoring $false",
+                    timeout=15,
                 )
-                if r.returncode == 0:
+                if rc == 0:
                     self._gui_safe(lambda: messagebox.showinfo("Antivirus", self.t("fix_av_ok")))
                 else:
                     self._gui_safe(lambda: messagebox.showerror("Antivirus", self.t("fix_av_fail")))
@@ -1833,20 +1838,19 @@ class ModernGUI:
     # ─── Collector: User Accounts ─── #
     def _collect_user_accounts(self):
         """Windows kullanıcı hesaplarını topla — grup üyelikleri + IIS tespiti."""
-        import subprocess, json, base64
-        CREATE_NW = 0x08000000
+        import json
+        from client_winproc import run_ps, run_ps_script
         users = []
 
         # 1) Kullanıcı listesini al
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-LocalUser | Select-Object Name, Enabled, "
-                 "LastLogon, Description | ConvertTo-Json"],
-                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            rc, out, _ = run_ps(
+                "Get-LocalUser | Select-Object Name, Enabled, "
+                "LastLogon, Description | ConvertTo-Json",
+                timeout=10,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                data = json.loads(r.stdout.strip())
+            if rc == 0 and out.strip():
+                data = json.loads(out.strip())
                 if isinstance(data, dict):
                     data = [data]
                 users = data
@@ -1862,13 +1866,9 @@ class ModernGUI:
                 'ForEach-Object { [PSCustomObject]@{Group=$g; User=$_.Name} } } '
                 'catch {} } | ConvertTo-Json -Depth 3'
             )
-            encoded_g = base64.b64encode(ps_groups.encode('utf-16-le')).decode('ascii')
-            r2 = subprocess.run(
-                ["powershell", "-NoProfile", "-EncodedCommand", encoded_g],
-                capture_output=True, text=True, timeout=20, creationflags=CREATE_NW,
-            )
-            if r2.returncode == 0 and r2.stdout.strip():
-                memberships = json.loads(r2.stdout.strip())
+            rc2, out2, _ = run_ps_script(ps_groups, timeout=20)
+            if rc2 == 0 and out2.strip():
+                memberships = json.loads(out2.strip())
                 if isinstance(memberships, dict):
                     memberships = [memberships]
                 for m in memberships:
@@ -1889,20 +1889,15 @@ class ModernGUI:
                 '@{N="IdType";E={$_.processModel.identityType}} '
                 '| ConvertTo-Json } catch { "[]" }'
             )
-            encoded_i = base64.b64encode(ps_iis.encode('utf-16-le')).decode('ascii')
-            r3 = subprocess.run(
-                ["powershell", "-NoProfile", "-EncodedCommand", encoded_i],
-                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
-            )
-            if r3.returncode == 0 and r3.stdout.strip():
-                pools = json.loads(r3.stdout.strip())
+            rc3, out3, _ = run_ps_script(ps_iis, timeout=10)
+            if rc3 == 0 and out3.strip():
+                pools = json.loads(out3.strip())
                 if isinstance(pools, dict):
                     pools = [pools]
-                for p in pools:
-                    id_type = str(p.get("IdType", ""))
-                    identity = p.get("Identity", "") or ""
-                    pool_name = p.get("Name", "") or ""
-                    # ApplicationPoolIdentity → IIS APPPOOL\<poolname>
+                for pool in pools:
+                    id_type = str(pool.get("IdType", ""))
+                    identity = pool.get("Identity", "") or ""
+                    pool_name = pool.get("Name", "") or ""
                     if "ApplicationPoolIdentity" in id_type:
                         iis_pool_users.add(pool_name.lower())
                     elif identity:
@@ -2154,20 +2149,18 @@ class ModernGUI:
     # ─── Collector: Network Shares ─── #
     def _collect_network_shares(self):
         """Ağ paylaşımlarını topla."""
-        import subprocess
-        CREATE_NW = 0x08000000
+        import json
+        from client_winproc import run_ps
         shares = []
 
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-SmbShare | Select-Object Name, Path, Description, "
-                 "ShareType, CurrentUsers | ConvertTo-Json"],
-                capture_output=True, text=True, timeout=10, creationflags=CREATE_NW,
+            rc, out, _ = run_ps(
+                "Get-SmbShare | Select-Object Name, Path, Description, "
+                "ShareType, CurrentUsers | ConvertTo-Json",
+                timeout=10,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                import json
-                data = json.loads(r.stdout.strip())
+            if rc == 0 and out.strip():
+                data = json.loads(out.strip())
                 if isinstance(data, dict):
                     data = [data]
                 shares = data
@@ -2246,26 +2239,20 @@ class ModernGUI:
     # ─── Collector: Suspicious Services ─── #
     def _collect_suspicious_services(self):
         """Windows dışı 3. parti çalışan servisleri topla."""
-        import subprocess, base64
-        CREATE_NW = 0x08000000
+        import json
+        from client_winproc import run_ps_script
         services = []
 
         try:
-            # PowerShell scriptini EncodedCommand ile gönder ($_ escape sorununu önler)
             ps_script = (
                 'Get-CimInstance Win32_Service | '
                 'Where-Object { $_.State -eq "Running" } | '
                 'Select-Object Name, DisplayName, PathName, StartMode, StartName | '
                 'ConvertTo-Json -Depth 2'
             )
-            encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-EncodedCommand", encoded],
-                capture_output=True, text=True, timeout=20, creationflags=CREATE_NW,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                import json
-                data = json.loads(r.stdout.strip())
+            rc, out, _ = run_ps_script(ps_script, timeout=20)
+            if rc == 0 and out.strip():
+                data = json.loads(out.strip())
                 if isinstance(data, dict):
                     data = [data]
                 services = data
@@ -4363,19 +4350,14 @@ class ModernGUI:
 
     def _refresh_active_sessions(self):
         """Fetch and display active sessions via 'query user' + 'query session'."""
-        import subprocess
-        CREATE_NW = 0x08000000
+        from client_winproc import run_hidden
 
         def _do():
             lines = []
             try:
                 # query user — RDP/console oturumlarını gösterir
-                r1 = subprocess.run(
-                    ["query", "user"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=CREATE_NW,
-                )
-                raw = (r1.stdout or "").strip()
+                _rc1, raw, _ = run_hidden(["query", "user"], timeout=5)
+                raw = (raw or "").strip()
                 if raw:
                     # Parse query user output into Turkish-friendly format
                     for line in raw.splitlines():
@@ -4410,13 +4392,9 @@ class ModernGUI:
             if not lines:
                 # Fallback: query session
                 try:
-                    r2 = subprocess.run(
-                        ["query", "session"],
-                        capture_output=True, text=True, timeout=5,
-                        creationflags=CREATE_NW,
-                    )
-                    if (r2.stdout or "").strip():
-                        lines = ["  " + l for l in r2.stdout.strip().splitlines()]
+                    _rc2, out2, _ = run_hidden(["query", "session"], timeout=5)
+                    if (out2 or "").strip():
+                        lines = ["  " + l for l in out2.strip().splitlines()]
                 except Exception:
                     pass
 
@@ -5102,7 +5080,7 @@ class ModernGUI:
 
     # ─── Servis Toggle ─── #
     def _toggle_service(self, port, service, btn, card, status_lbl, status_dot):
-        """Tek bir servisi başlat/durdur — iş mantığı client.py'de."""
+        """Tek bir servisi başlat/durdur — off-thread (Tk freeze yok)."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
@@ -5113,26 +5091,56 @@ class ModernGUI:
 
         svc_upper = str(service).upper()
         is_rdp = svc_upper == "RDP"
+        try:
+            cur_text = btn.cget("text").lower()
+        except Exception:
+            return
+        want_start = cur_text == self.t("btn_row_start").lower()
+
+        try:
+            btn.configure(state="disabled")
+        except Exception:
+            pass
 
         if is_rdp:
             self.app.service_manager.reconciliation_paused = True
             log("RDP işlemi için uzlaştırma döngüsü duraklatıldı.")
 
-        try:
-            cur_text = btn.cget("text").lower()
-            if cur_text == self.t("btn_row_start").lower():
-                if self.app.start_single_row(port, service, manual_action=True):
-                    if not is_rdp:
+        def _work():
+            ok = False
+            try:
+                if want_start:
+                    ok = bool(self.app.start_single_row(port, service, manual_action=True))
+                else:
+                    ok = bool(self.app.stop_single_row(port, service, manual_action=True))
+            except Exception as e:
+                log(f"[GUI] service toggle error: {e}")
+                ok = False
+            finally:
+                if is_rdp:
+                    self.app.service_manager.reconciliation_paused = False
+                    log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
+                    try:
+                        threading.Thread(
+                            target=self.app.report_service_status_once, daemon=True
+                        ).start()
+                    except Exception:
+                        pass
+
+            def _ui():
+                try:
+                    btn.configure(state="normal")
+                except Exception:
+                    pass
+                if ok and not is_rdp:
+                    if want_start:
                         self._set_card_active(btn, card, status_lbl, status_dot)
-            else:
-                if self.app.stop_single_row(port, service, manual_action=True):
-                    if not is_rdp:
+                    else:
                         self._set_card_inactive(btn, card, status_lbl, status_dot)
-        finally:
-            if is_rdp:
-                self.app.service_manager.reconciliation_paused = False
-                log("RDP işlemi tamamlandı, uzlaştırma döngüsü devam ettiriliyor.")
-                threading.Thread(target=self.app.report_service_status_once, daemon=True).start()
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name=f"SvcToggle-{svc_upper}").start()
 
     # ─── Kart Durumu Güncelleyiciler ─── #
     def _set_card_active(self, btn, card, status_lbl, status_dot):

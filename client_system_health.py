@@ -332,20 +332,15 @@ class SystemHealthMonitor:
 
     def _collect_active_sessions(self) -> List[dict]:
         """Enumerate interactive / RDP sessions (canonical active_sessions schema)."""
-        import subprocess
-        CREATE_NO_WINDOW = 0x08000000
+        from client_winproc import run_hidden
         sessions: List[dict] = []
         now = time.time()
         remote_ips = self._guess_rdp_client_ips()
 
         # query user — richest text source
         try:
-            r = subprocess.run(
-                ["query", "user"],
-                capture_output=True, text=True, timeout=8,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            for line in (r.stdout or "").splitlines()[1:]:
+            _rc, _out, _ = run_hidden(["query", "user"], timeout=8)
+            for line in (_out or "").splitlines()[1:]:
                 parts = line.split()
                 if len(parts) < 3:
                     continue
@@ -439,12 +434,8 @@ class SystemHealthMonitor:
         # Fallback: at least console from query session
         if not sessions:
             try:
-                r = subprocess.run(
-                    ["query", "session"],
-                    capture_output=True, text=True, timeout=8,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                for line in (r.stdout or "").splitlines()[1:]:
+                _rc2, _out2, _ = run_hidden(["query", "session"], timeout=8)
+                for line in (_out2 or "").splitlines()[1:]:
                     parts = line.split()
                     if len(parts) < 3:
                         continue

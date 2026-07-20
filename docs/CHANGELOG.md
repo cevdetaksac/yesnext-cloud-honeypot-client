@@ -1,3 +1,11 @@
+# v4.5.46
+
+## Centralization / P1 cleanup
+- Threat intel coalesce (sequential PS in one worker); service toggle off-thread.
+- Expand `client_winproc` (`run_ps` / `run_ps_script` / `popen_detached`) and migrate GUI + helpers + AR + IPC call sites.
+
+---
+
 # v4.5.45
 
 ## Fix: stuck “Kurulum çalışıyor”

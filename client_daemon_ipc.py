@@ -190,37 +190,32 @@ def ensure_daemon_running(log_func=None, wait_sec: float = 20.0) -> bool:
     started = False
     try:
         from client_task_scheduler import TASK_NAME_BACKGROUND
-        CREATE_NO_WINDOW = 0x08000000
-        subprocess.run(
+        from client_winproc import run_hidden, popen_detached
+        run_hidden(
             ["schtasks", "/change", "/tn", TASK_NAME_BACKGROUND, "/enable"],
-            capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+            timeout=10,
         )
-        r = subprocess.run(
+        rc, _, _ = run_hidden(
             ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
-            capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW,
+            timeout=15,
         )
-        started = r.returncode == 0
-        log_func(f"[IPC] schtasks /run {TASK_NAME_BACKGROUND}: rc={r.returncode}")
+        started = rc == 0
+        log_func(f"[IPC] schtasks /run {TASK_NAME_BACKGROUND}: rc={rc}")
     except Exception as e:
         log_func(f"[IPC] schtasks Background run failed: {e}")
 
     if not started:
         log_func("[IPC] Starting SYSTEM daemon motor (direct spawn)...")
         try:
+            from client_winproc import popen_detached
             if getattr(sys, "frozen", False):
                 exe = sys.executable
                 args = [exe, "--mode=daemon", "--silent"]
             else:
                 script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client.py")
                 args = [sys.executable, script, "--mode=daemon", "--silent"]
-            flags = 0
-            if os.name == "nt":
-                flags = (
-                    subprocess.DETACHED_PROCESS
-                    | subprocess.CREATE_NEW_PROCESS_GROUP
-                    | subprocess.CREATE_NO_WINDOW
-                )
-            subprocess.Popen(args, creationflags=flags, close_fds=True)
+            if popen_detached(args) is None:
+                raise RuntimeError("popen_detached failed")
             started = True
         except Exception as e:
             log_func(f"[IPC] Failed to spawn daemon: {e}")

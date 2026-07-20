@@ -29,7 +29,6 @@ Exports:
 import ipaddress
 import secrets
 import string
-import subprocess
 import threading
 import time
 from collections import deque
@@ -37,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set
 
 from client_helpers import log
+from client_winproc import run_hidden
 
 # ── Constants ─────────────────────────────────────────────────────
 
@@ -63,9 +63,6 @@ PROTECTED_SERVICES: Set[str] = {
     "wuauserv", "windefend", "eventlog", "mpssvc",
     "w32time", "dnscache",
 }
-
-# Subprocess creation flags
-CREATE_NO_WINDOW = 0x08000000
 
 
 # ── Block Tracking ───────────────────────────────────────────────
@@ -422,12 +419,8 @@ class AutoResponse:
         try:
             session_ids: list = []
             for tool in ("user", "session"):
-                result = subprocess.run(
-                    ["query", tool],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                for line in (result.stdout or "").splitlines()[1:]:
+                _rc, _out, _ = run_hidden(["query", tool], timeout=10)
+                for line in (_out or "").splitlines()[1:]:
                     parts = line.split()
                     if not parts:
                         continue
@@ -461,21 +454,14 @@ class AutoResponse:
 
             any_ok = False
             for session_id in session_ids:
-                logoff_result = subprocess.run(
-                    ["logoff", session_id],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_NO_WINDOW,
-                )
+                logoff_rc, _, _ = run_hidden(["logoff", session_id], timeout=10)
                 still = self._session_id_present(session_id)
-                if logoff_result.returncode != 0 or still:
+                if logoff_rc != 0 or still:
                     for cmd in (
                         ["reset", "session", session_id],
                         ["rwinsta", session_id],
                     ):
-                        subprocess.run(
-                            cmd, capture_output=True, text=True, timeout=10,
-                            creationflags=CREATE_NO_WINDOW,
-                        )
+                        run_hidden(cmd, timeout=10)
                         if not self._session_id_present(session_id):
                             break
                 if not self._session_id_present(session_id):
@@ -495,12 +481,8 @@ class AutoResponse:
     @staticmethod
     def _session_id_present(session_id: str) -> bool:
         try:
-            q = subprocess.run(
-                ["query", "session"],
-                capture_output=True, text=True, timeout=8,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            for line in (q.stdout or "").splitlines()[1:]:
+            _qrc, qout, _ = run_hidden(["query", "session"], timeout=8)
+            for line in (qout or "").splitlines()[1:]:
                 parts = line.split()
                 if session_id in parts:
                     low = [p.lower() for p in parts]
@@ -827,7 +809,6 @@ class AutoResponse:
     def _run_system_cmd_detail(cmd: list, timeout: int = 15):
         """Run command; return (ok: bool, combined_output: str)."""
         try:
-            from client_winproc import run_hidden
             rc, out, err = run_hidden(cmd, timeout=timeout)
             combined = f"{out or ''}\n{err or ''}"
             return rc == 0, combined

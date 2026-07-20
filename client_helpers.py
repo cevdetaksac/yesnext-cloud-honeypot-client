@@ -68,41 +68,23 @@ def has_interactive_user_session(query_stdout: Optional[str] = None) -> bool:
     Locale-aware: EN Active, TR Aktif, DE Aktiv, ES Activo, IT Attivo, …
     """
     try:
-        import subprocess
+        from client_winproc import run_hidden
         stdout = query_stdout
         if stdout is None:
-            result = subprocess.run(
-                ["query", "session"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if result.returncode != 0:
+            rc, out, _ = run_hidden(["query", "session"], timeout=10)
+            if rc != 0:
                 # Fallback: query user (also localized)
-                result = subprocess.run(
-                    ["query", "user"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                if result.returncode != 0:
+                rc, out, _ = run_hidden(["query", "user"], timeout=10)
+                if rc != 0:
                     return False
-            stdout = result.stdout or ""
+            stdout = out or ""
         if _stdout_has_active_interactive(stdout):
             return True
         # Second source if first was session-only and empty
         if query_stdout is None:
             try:
-                r2 = subprocess.run(
-                    ["query", "user"],
-                    capture_output=True,
-                    text=True,
-                    timeout=8,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                if r2.returncode == 0 and _stdout_has_active_interactive(r2.stdout or ""):
+                rc2, out2, _ = run_hidden(["query", "user"], timeout=8)
+                if rc2 == 0 and _stdout_has_active_interactive(out2 or ""):
                     return True
             except Exception:
                 pass
@@ -159,17 +141,11 @@ def _stdout_has_active_interactive(stdout: str) -> bool:
 def get_active_interactive_session_id() -> int:
     """Best-effort WTS session id (>0) for Active console/RDP, or 0."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ["query", "session"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0:
+        from client_winproc import run_hidden
+        rc, out, _ = run_hidden(["query", "session"], timeout=10)
+        if rc != 0:
             return 0
-        for line in (result.stdout or "").splitlines()[1:]:
+        for line in (out or "").splitlines()[1:]:
             low = line.lower()
             if "services" in low or "servis" in low:
                 continue
@@ -216,27 +192,25 @@ def interactive_frontend_running() -> bool:
 def launch_interactive_tray_gui() -> bool:
     """Start CloudHoneypot-Tray in the logged-on user session (visible desktop)."""
     try:
-        import subprocess
         import sys
         import time
         from client_task_scheduler import TASK_NAME_TRAY
-        CREATE_NO_WINDOW = 0x08000000
+        from client_winproc import run_hidden
         if interactive_frontend_running():
             log(f"[SESSION] Interactive frontend already running — skip {TASK_NAME_TRAY}")
             return True
 
         # 1) Prefer Task Scheduler Logon task (runs in user session)
-        subprocess.run(
+        run_hidden(
             ["schtasks", "/change", "/tn", TASK_NAME_TRAY, "/enable"],
-            capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+            timeout=10,
         )
-        r = subprocess.run(
+        rc, _, _ = run_hidden(
             ["schtasks", "/run", "/tn", TASK_NAME_TRAY],
-            capture_output=True, text=True, timeout=15,
-            creationflags=CREATE_NO_WINDOW,
+            timeout=15,
         )
-        ok = r.returncode == 0
-        log(f"[SESSION] Trigger {TASK_NAME_TRAY}: rc={r.returncode} ok={ok}")
+        ok = rc == 0
+        log(f"[SESSION] Trigger {TASK_NAME_TRAY}: rc={rc} ok={ok}")
         if ok:
             time.sleep(2.5)
             if interactive_frontend_running():
@@ -489,13 +463,12 @@ class ClientHelpers:
             log("psutil not available, checking via process name")
             # Fallback to simpler check
             try:
-                import subprocess
-                result = subprocess.run(
-                    ['tasklist', '/FI', 'IMAGENAME eq honeypot-client.exe'],
-                    capture_output=True, text=True, shell=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                from client_winproc import run_hidden
+                _rc, out, _ = run_hidden(
+                    ["tasklist", "/FI", "IMAGENAME eq honeypot-client.exe"],
+                    timeout=10,
                 )
-                return 'honeypot-client.exe' in result.stdout
+                return "honeypot-client.exe" in (out or "")
             except Exception as e:
                 log(f"Process check error: {e}")
                 return False

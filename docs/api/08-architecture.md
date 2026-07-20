@@ -1,7 +1,7 @@
 # Architecture — SYSTEM daemon + GUI frontend
 
 > API: `https://honeypot.yesnext.com.tr`  
-> Client: **≥ 4.5.44** (perf / IPC harden)
+> Client: **≥ 4.5.46** (winproc centralization + threat coalesce)
 
 ---
 
@@ -59,7 +59,9 @@ JSON replies start with `{`. Helpers: `client_daemon_ipc.py`.
 | Self-update | Daemon → helper | GUI banner via `update_ui_status.json` |
 | Threat / RD capture | Daemon | frontend_only skips local motors |
 
-**Tk thread:** netsh / PowerShell / blocking IPC **yok**. Motor health cache (background poll). IP mutate off-thread.
+**Tk thread:** netsh / PowerShell / blocking IPC / honeypot start-stop **yok**.  
+Motor health cache (background poll). IP mutate off-thread.  
+Threat intel: tek worker + coalesce (paralel PS fırtınası yok). Servis toggle off-thread.
 
 ---
 
@@ -67,7 +69,7 @@ JSON replies start with `{`. Helpers: `client_daemon_ipc.py`.
 
 | Modül | Görev |
 |-------|--------|
-| `client_winproc.run_hidden` | CREATE_NO_WINDOW + OEM-safe decode (canonical subprocess) |
+| `client_winproc` | Canonical hidden subprocess: `run_hidden` / `run_ps` / `run_ps_script` / `popen_detached` |
 | `client_update_ui` | Cross-process update banner status |
 | `client_block_store` | ProgramData blocked inventory |
 | `client_daemon_ipc` | Frontend ↔ motor |
@@ -83,7 +85,7 @@ JSON replies start with `{`. Helpers: `client_daemon_ipc.py`.
   "role": "daemon",
   "motor_ok": true,
   "remote_commands_running": true,
-  "version": "4.5.44",
+  "version": "4.5.46",
   "running_services": ["SSH"],
   "protection_mode": "monitoring",
   "token_present": true

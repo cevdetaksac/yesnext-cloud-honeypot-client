@@ -652,8 +652,9 @@ class ModernGUI:
 
     def _refresh_update_banner(self):
         from client_update_ui import get_update_ui_status, clear_update_ui_status
+        from client_constants import VERSION as _CUR_VER
 
-        st = get_update_ui_status()
+        st = get_update_ui_status(current_version=_CUR_VER)
         if not st:
             self._hide_update_banner()
             return

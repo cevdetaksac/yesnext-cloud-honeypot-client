@@ -1,3 +1,11 @@
+# v4.5.45
+
+## Fix: stuck “Kurulum çalışıyor”
+- Helper install heartbeats no longer reset the stale clock (`phase_started_at`).
+- Banner auto-dismisses when current version is already ≥ update target.
+
+---
+
 # v4.5.44
 
 ## Stability / performance review

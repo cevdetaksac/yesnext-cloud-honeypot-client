@@ -181,13 +181,20 @@ function Write-UpdateUiStatus {
         }
         if (-not $FromVersion -and $prev -and $prev.from_version) { $FromVersion = [string]$prev.from_version }
         if (-not $ToVersion -and $prev -and $prev.to_version) { $ToVersion = [string]$prev.to_version }
+        $now = [double]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
+        # Heartbeats must not reset phase_started_at (GUI stale timeout uses it)
+        $started = $now
+        if ($prev -and $prev.phase -and ([string]$prev.phase).ToLower() -eq $Phase.ToLower() -and $prev.phase_started_at) {
+            try { $started = [double]$prev.phase_started_at } catch { $started = $now }
+        }
         $obj = [ordered]@{
-            phase         = $Phase
-            from_version  = $FromVersion
-            to_version    = $ToVersion
-            detail        = $Detail
-            error         = $ErrorText
-            updated_at    = [double]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
+            phase             = $Phase
+            from_version      = $FromVersion
+            to_version        = $ToVersion
+            detail            = $Detail
+            error             = $ErrorText
+            updated_at        = $now
+            phase_started_at  = $started
         }
         ($obj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $path -Encoding UTF8 -Force
     } catch {}

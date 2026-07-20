@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.44"  # Perf/stability: IP coalesce, IPC block, no failed-scan wipe, winproc
+VERSION = "4.5.45"  # Fix stuck Kurulum banner: phase_started_at + already-on-target dismiss
 
 
 CLIENT_VERSION = VERSION  # Main version constant

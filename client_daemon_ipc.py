@@ -5,6 +5,7 @@ Daemon IPC — GUI frontend talks to Session-0 SYSTEM motor.
 Protocol (newline-terminated, UTF-8):
   PING
   STATUS
+  CLEAR_FIREWALL
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -79,6 +80,14 @@ def get_status(timeout: float = 3.0) -> Dict[str, Any]:
         return request_json("STATUS", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e), "daemon": False}
+
+
+def clear_firewall(timeout: float = 180.0) -> Dict[str, Any]:
+    """Ask SYSTEM daemon to wipe honeypot firewall rules + sync API."""
+    try:
+        return request_json("CLEAR_FIREWALL", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def is_motor_healthy(timeout: float = 1.2) -> bool:

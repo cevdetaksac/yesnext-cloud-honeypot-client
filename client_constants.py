@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.41"  # Hide netsh/cmd console flashes (CREATE_NO_WINDOW on firewall run_cmd)
+VERSION = "4.5.42"  # Clear-all via SYSTEM daemon IPC (elevated); batch PS purge
 
 
 CLIENT_VERSION = VERSION  # Main version constant

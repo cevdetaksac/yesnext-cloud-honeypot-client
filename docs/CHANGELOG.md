@@ -1,3 +1,13 @@
+# v4.5.42
+
+## Tümünü temizle: gerçekten siler (SYSTEM)
+- GUI unelevated → `netsh delete` “requires elevation” ile sessizce başarısız oluyordu; CMD flaş + kural/API değişmiyordu.
+- Fix: GUI `CLEAR_FIREWALL` IPC → Session-0 Background daemon (elevated) purge + `sync-rules []` + `clear-data`.
+- Tek gizli PowerShell `Remove-NetFirewallRule` sweep (CMD yağmuru yok); netsh sadece kalanlar için.
+- Yetkisiz süreç store/API’yi boşaltmaz (firewall doluyken yalan UI yok).
+
+---
+
 # v4.5.41
 
 ## CMD penceresi flaşları

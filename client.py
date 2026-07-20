@@ -1375,6 +1375,28 @@ class CloudHoneypotClient:
                         _send(json.dumps({"ok": False, "error": str(e)}))
                     continue
 
+                if cmd_u == "CLEAR_FIREWALL":
+                    # GUI (unelevated) → SYSTEM motor purges HP-BLOCK-* + API sync
+                    try:
+                        cm = getattr(self, "cleanup_manager", None)
+                        if cm is None:
+                            _send(json.dumps({
+                                "ok": False,
+                                "error": "no_cleanup_manager",
+                            }, ensure_ascii=False))
+                            continue
+                        out = cm.clear_firewall(sync_dashboard=True)
+                        payload = {"ok": True}
+                        if isinstance(out, dict):
+                            payload.update(out)
+                        if out.get("error"):
+                            payload["ok"] = False
+                        _send(json.dumps(payload, ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] CLEAR_FIREWALL error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
                 if cmd_u.startswith("HONEYPOT "):
                     # HONEYPOT START SVC PORT | HONEYPOT STOP SVC | HONEYPOT LIST
                     try:

@@ -5378,7 +5378,47 @@ class ModernGUI:
                         ips=result.get("ip_pool_cleared", 0),
                     )
                 elif scope == "firewall":
-                    result = cm.clear_firewall(sync_dashboard=True)
+                    result = None
+                    # Prefer SYSTEM daemon (elevated) — GUI netsh delete needs admin
+                    try:
+                        from client_daemon_ipc import clear_firewall as ipc_clear
+                        from client_daemon_ipc import is_motor_healthy
+                        if is_motor_healthy(timeout=2.0):
+                            log("[CLEANUP] CLEAR_FIREWALL via daemon IPC…")
+                            result = ipc_clear(timeout=180.0)
+                            log(f"[CLEANUP] daemon IPC result: {result}")
+                    except Exception as e:
+                        log(f"[CLEANUP] daemon IPC clear failed: {e}")
+                        result = None
+
+                    if not result or not result.get("ok"):
+                        # Local fallback only when this process is elevated
+                        try:
+                            from client_utils import is_admin
+                            admin = bool(is_admin())
+                        except Exception:
+                            admin = False
+                        if admin and cm:
+                            result = cm.clear_firewall(sync_dashboard=True)
+                        else:
+                            err = (result or {}).get("error") or "daemon_unavailable"
+                            msg = self.t("cleanup_firewall_need_daemon").format(err=err)
+                            self._gui_safe(
+                                lambda m=msg: messagebox.showerror(self.t("cleanup_title"), m)
+                            )
+                            return
+
+                    if result.get("error") and not result.get("ok"):
+                        msg = self.t("cleanup_firewall_fail").format(
+                            err=result.get("error"),
+                            rules=result.get("rules_removed", 0),
+                            left=result.get("rules_left", "?"),
+                        )
+                        self._gui_safe(
+                            lambda m=msg: messagebox.showerror(self.t("cleanup_title"), m)
+                        )
+                        return
+
                     msg = self.t("cleanup_done_firewall").format(
                         rules=result.get("rules_removed", 0),
                         synced="✓" if result.get("api_synced") else "—",
@@ -5393,7 +5433,22 @@ class ModernGUI:
                             err=result.get("error") or "unknown",
                         )
                 else:
-                    result = cm.clear_all()
+                    # Full cleanup: firewall via daemon first, then local+server
+                    fw = None
+                    try:
+                        from client_daemon_ipc import clear_firewall as ipc_clear
+                        from client_daemon_ipc import is_motor_healthy
+                        if is_motor_healthy(timeout=2.0):
+                            fw = ipc_clear(timeout=180.0)
+                    except Exception:
+                        fw = None
+                    if not fw or not fw.get("ok"):
+                        fw = cm.clear_firewall(sync_dashboard=True)
+                    local = cm.clear_local()
+                    srv = cm.clear_server(
+                        scopes=["attacks", "blocks", "alerts", "threat_summary", "all"]
+                    )
+                    result = {"local": local, "firewall": fw, "server": srv}
                     srv_ok = (result.get("server") or {}).get("ok")
                     msg = self.t("cleanup_done_all").format(
                         ips=(result.get("local") or {}).get("ip_pool_cleared", 0),

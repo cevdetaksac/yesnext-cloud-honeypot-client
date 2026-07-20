@@ -115,35 +115,72 @@ class DataCleanupManager:
             return result
 
     def clear_firewall(self, sync_dashboard: bool = True) -> Dict[str, Any]:
-        """Tüm HP-BLOCK-* kurallarını sil + dashboard sync (boş liste)."""
+        """Tüm HP-BLOCK-* kurallarını sil + dashboard sync (boş liste).
+
+        Must run elevated (SYSTEM daemon). Non-admin GUI must IPC to daemon.
+        """
         result = {
             "rules_removed": 0,
             "auto_blocks_cleared": 0,
             "api_synced": False,
             "server_cleared": False,
+            "elevated": False,
+            "error": None,
         }
         with self._lock:
-            # Auto-response memory
+            try:
+                from client_firewall import is_admin
+                result["elevated"] = bool(is_admin())
+            except Exception:
+                result["elevated"] = False
+            # SYSTEM Session-0 motor can always purge (IsUserAnAdmin is unreliable for SYSTEM)
+            if getattr(self.app, "_is_daemon_motor", False) or getattr(self.app, "daemon_is_active", False):
+                result["elevated"] = True
+            try:
+                import getpass
+                if (getpass.getuser() or "").upper() in ("SYSTEM", "LOCAL SYSTEM"):
+                    result["elevated"] = True
+            except Exception:
+                pass
+
+            # Auto-response memory (firewall delete only when elevated)
             ar = getattr(self.app, "auto_response", None)
-            if ar and hasattr(ar, "clear_all_blocks"):
+            if ar and result["elevated"] and hasattr(ar, "clear_all_blocks"):
                 result["auto_blocks_cleared"] = ar.clear_all_blocks()
             elif ar and hasattr(ar, "_blocks"):
                 with ar._lock:
                     n = len(ar._blocks)
-                    # Remove firewall rules for each
-                    ips = list(ar._blocks.keys())
                     ar._blocks.clear()
-                for ip in ips:
-                    try:
-                        ar.unblock_ip(ip)
-                    except Exception:
-                        pass
                 result["auto_blocks_cleared"] = n
 
             # Scan & delete all HP-BLOCK / legacy rules
             removed = self._delete_all_hp_block_rules()
             result["rules_removed"] = removed
             self._stats["rules_removed"] += removed
+
+            if not result["elevated"]:
+                result["error"] = "elevation_required"
+                log("[CLEANUP] clear_firewall aborted — elevation_required")
+                # Do NOT wipe store / API while firewall still has rules
+                self._stats["firewall_runs"] += 1
+                self._stats["last_result"] = result
+                return result
+
+            # Verify live firewall is empty before wiping API inventory
+            try:
+                from client_firewall import WindowsFirewallBackend
+                backend = WindowsFirewallBackend(logger=_CleanupLogger())
+                ok, left_rules = backend.scan_existing_rules_detailed()
+                left_n = len(left_rules) if ok else -1
+                result["rules_left"] = left_n
+                if ok and left_n > 0:
+                    result["error"] = "purge_incomplete"
+                    log(f"[CLEANUP] clear_firewall incomplete — {left_n} rules still present")
+                    self._stats["firewall_runs"] += 1
+                    self._stats["last_result"] = result
+                    return result
+            except Exception as e:
+                log(f"[CLEANUP] post-purge verify error: {e}")
 
             try:
                 from client_block_store import save_blocked_map
@@ -164,6 +201,8 @@ class DataCleanupManager:
                     )
                     result["server_cleared"] = cleared is not None
                     result["server_response"] = cleared
+                else:
+                    result["error"] = result.get("error") or "no_token_or_api"
 
             self._stats["firewall_runs"] += 1
             self._stats["last_result"] = result
@@ -316,25 +355,97 @@ class DataCleanupManager:
         return False
 
     def _delete_all_hp_block_rules(self) -> int:
-        """netsh ile tüm HP-BLOCK / legacy kuralları sil."""
+        """Remove all honeypot firewall rules (requires elevation / SYSTEM).
+
+        Uses one hidden PowerShell sweep first (fast, no CMD flash storm),
+        then a netsh fallback for any leftovers.
+        """
         removed = 0
         try:
-            from client_firewall import WindowsFirewallBackend, is_windows, run_cmd
+            from client_firewall import WindowsFirewallBackend, is_windows, run_cmd, is_admin
             if not is_windows():
                 return 0
+
+            elevated = False
+            try:
+                elevated = bool(is_admin())
+            except Exception:
+                elevated = False
+            if getattr(self.app, "_is_daemon_motor", False) or getattr(self.app, "daemon_is_active", False):
+                elevated = True
+            try:
+                import getpass
+                if (getpass.getuser() or "").upper() in ("SYSTEM", "LOCAL SYSTEM"):
+                    elevated = True
+            except Exception:
+                pass
+
             backend = WindowsFirewallBackend(logger=_CleanupLogger())
-            rules = backend.scan_existing_rules()
-            for r in rules:
+            before_ok, before = backend.scan_existing_rules_detailed()
+            before_n = len(before) if before_ok else 0
+            if before_n == 0 and before_ok:
+                log("[CLEANUP] No honeypot firewall rules to remove")
+                return 0
+
+            if not elevated and before_n > 0:
+                log(
+                    f"[CLEANUP] Firewall purge needs elevation "
+                    f"(found {before_n} rules) — refusing non-admin delete"
+                )
+                return 0
+
+            # Single PowerShell process — no per-rule CMD windows
+            ps = (
+                "$ErrorActionPreference='SilentlyContinue'; "
+                "$rules = Get-NetFirewallRule | Where-Object { "
+                "  $n = $_.DisplayName; "
+                "  $n -like 'HP-BLOCK-*' -or "
+                "  $n -like 'HONEYPOT_BLOCK*' -or "
+                "  $n -like 'HONEYPOT_THREAT_BLOCK_*' -or "
+                "  $n -like 'HONEYPOT_BLOCK_REMOTE_*' -or "
+                "  $n -like 'HONEYPOT_REMOTE_BLOCK_*' "
+                "}; "
+                "$c = @($rules).Count; "
+                "if ($c -gt 0) { $rules | Remove-NetFirewallRule }; "
+                "Write-Output $c"
+            )
+            rc, out, err = run_cmd([
+                "powershell", "-NoProfile", "-NonInteractive",
+                "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+                "-Command", ps,
+            ], timeout=180)
+            try:
+                removed = int((out or "").strip().splitlines()[-1].strip())
+            except Exception:
+                removed = 0
+            if rc != 0:
+                log(f"[CLEANUP] PowerShell purge rc={rc} err={(err or out)[:200]}")
+
+            # Fallback: netsh per leftover (still hidden via run_cmd)
+            after_ok, after = backend.scan_existing_rules_detailed()
+            leftovers = after if after_ok else []
+            for r in leftovers:
                 name = r.get("name") or ""
                 if not name:
                     continue
-                rc, out, err = run_cmd([
+                drc, dout, _ = run_cmd([
                     "netsh", "advfirewall", "firewall", "delete", "rule",
                     f"name={name}", "dir=in",
-                ])
-                if rc == 0 and "0 rule" not in (out or "").lower():
+                ], timeout=30)
+                if drc == 0 and "0 rule" not in (dout or "").lower():
                     removed += 1
-            log(f"[CLEANUP] Removed {removed}/{len(rules)} firewall rules")
+
+            final_ok, final = backend.scan_existing_rules_detailed()
+            left = len(final) if final_ok else -1
+            log(
+                f"[CLEANUP] Firewall purge: before={before_n} "
+                f"reported_removed≈{removed} left={left}"
+            )
+            if before_n and left == 0:
+                return before_n
+            if before_n and left >= 0:
+                return max(0, before_n - left)
+            return removed
         except Exception as e:
             log(f"[CLEANUP] Firewall rule purge error: {e}")
         return removed

@@ -70,18 +70,45 @@ _LOLBIN_HINTS = (
     ("rundll32", ("http", "javascript:", ".dll,")),
     ("certutil", ("-urlcache", "-decode", "-f ")),
 )
-# Metric definitions: (threshold_type, threshold_value, threat_description, score)
+
+# Known-benign heavy disk writers — NEVER label as ransomware from I/O alone
+_BENIGN_DISK_IO_NAMES = (
+    "cursor.exe", "code.exe", "devenv.exe", "chrome.exe", "msedge.exe",
+    "firefox.exe", "brave.exe", "opera.exe", "onedrive.exe", "dropbox.exe",
+    "googledrivesync.exe", "searchindexer.exe", "searchprotocolhost.exe",
+    "msmpeng.exe", "mssense.exe", "defender", "tiworker.exe", "trustedinstaller.exe",
+    "wuauclt.exe", "svchost.exe", "steam.exe", "epicgameslauncher.exe",
+    "outlook.exe", "teams.exe", "slack.exe", "discord.exe", "spotify.exe",
+    "photoshop.exe", "premiere", "afterfx.exe", "node.exe", "python.exe",
+)
+_BENIGN_DISK_IO_PATHS = (
+    "\\programs\\cursor\\",
+    "\\microsoft vs code\\",
+    "\\jetbrains\\",
+    "\\google\\chrome\\",
+    "\\microsoft\\edge\\",
+    "\\windows defender\\",
+    "\\windows\\system32\\",
+)
+
+# Metric: (threshold_type, threshold_value, description, base_score, category)
+# category: capacity | performance | security | ransomware_suspect
+# Disk full is CAPACITY only — never "ransomware".
 METRIC_CONFIG = {
-    "cpu_percent":          ("fixed", 90, "CPU spike — kripto madenci şüphesi", 60),
-    "memory_percent":       ("fixed", 90, "Memory spike — bellek sızıntısı veya madenci", 50),
-    "disk_usage_percent":   ("fixed", 95, "Disk full — veri taşması veya ransomware", 40),
-    "disk_io_read_rate":    ("multiplier", 3.0, "Disk I/O spike — ransomware şüphesi", 70),
-    "disk_io_write_rate":   ("multiplier", 3.0, "Disk I/O write spike — ransomware", 75),
-    "net_bytes_sent_rate":  ("multiplier", 5.0, "Network outbound spike — data exfiltration", 65),
-    "net_bytes_recv_rate":  ("multiplier", 5.0, "Network inbound spike — download/C2", 55),
-    "process_count":        ("multiplier", 2.0, "Process count spike — process injection", 45),
-    "connection_count":     ("multiplier", 3.0, "Connection count spike — C2 beaconing", 50),
+    "cpu_percent":          ("fixed", 90, "CPU spike — yuksek sistem yuku", 35, "performance"),
+    "memory_percent":       ("fixed", 90, "Memory spike — bellek baskisi", 30, "performance"),
+    "disk_usage_percent":   ("fixed", 98, "Disk kapasitesi kritik — yer acin", 10, "capacity"),
+    "disk_io_read_rate":    ("multiplier", 4.0, "Disk okuma artisi", 20, "performance"),
+    "disk_io_write_rate":   ("multiplier", 4.0, "Disk yazma artisi", 20, "performance"),
+    "net_bytes_sent_rate":  ("multiplier", 5.0, "Network outbound spike — data exfiltration riski", 55, "security"),
+    "net_bytes_recv_rate":  ("multiplier", 5.0, "Network inbound spike", 40, "performance"),
+    "process_count":        ("multiplier", 2.5, "Process count spike", 35, "security"),
+    "connection_count":     ("multiplier", 3.5, "Connection count spike — C2 riski", 45, "security"),
 }
+
+# How many consecutive I/O anomalies (non-benign) before ransomware_suspect
+_IO_RANSOM_STREAK_NEED = 4  # ~40s at 10s collect interval
+_CAPACITY_LOG_COOLDOWN_SEC = 600  # don't spam disk-full every 10s
 
 
 # ── Anomaly Detector ─────────────────────────────────────────────
@@ -161,6 +188,9 @@ class SystemHealthMonitor:
         # Latest snapshot
         self._latest: Dict[str, float] = {}
         self._anomalies: List[str] = []
+        self._io_ransom_streak: Dict[str, int] = {}
+        self._last_capacity_log_at: float = 0.0
+        self._last_benign_io_log_at: float = 0.0
 
         # Stats
         self._stats = {
@@ -170,6 +200,8 @@ class SystemHealthMonitor:
             "top_cpu_processes": [],
             "top_processes": [],
             "active_sessions": [],
+            "suppressed_benign_io": 0,
+            "capacity_warnings": 0,
         }
         self._mem_total_bytes = 0
         self._rdp_ports = {3389}
@@ -299,24 +331,96 @@ class SystemHealthMonitor:
             if not config:
                 continue
 
-            threshold_type, threshold_val, description, score = config
+            threshold_type, threshold_val, description, score, category = config
 
             is_anomaly = False
 
             if threshold_type == "fixed":
-                # Fixed threshold check
                 if value >= threshold_val:
                     is_anomaly = True
             elif threshold_type == "multiplier":
-                # Z-score based
                 anomaly_flag, z = self._detectors[name].add(value)
                 if anomaly_flag:
                     is_anomaly = True
             else:
                 self._detectors[name].add(value)
 
-            if is_anomaly:
-                detected_anomalies.append((name, value, description, score))
+            if not is_anomaly:
+                if name.startswith("disk_io_"):
+                    self._io_ransom_streak[name] = 0
+                continue
+
+            # Capacity: disk full is NOT ransomware
+            if category == "capacity" or name == "disk_usage_percent":
+                self._stats["capacity_warnings"] = int(self._stats.get("capacity_warnings") or 0) + 1
+                now = time.time()
+                if now - self._last_capacity_log_at >= _CAPACITY_LOG_COOLDOWN_SEC:
+                    self._last_capacity_log_at = now
+                    free_gb = 0.0
+                    try:
+                        import psutil
+                        free_gb = psutil.disk_usage("C:\\").free / (1024 ** 3)
+                    except Exception:
+                        pass
+                    log(
+                        f"[HEALTH] CAPACITY: disk {value:.1f}% full "
+                        f"(free~{free_gb:.1f}GB) — not ransomware"
+                    )
+                detected_anomalies.append(
+                    (name, value, description, min(int(score), 15), "capacity")
+                )
+                continue
+
+            # Disk I/O: classify benign IDE/browser vs real suspect
+            if name.startswith("disk_io_"):
+                procs = self._get_top_disk_io_processes()
+                if self._is_benign_disk_io(procs):
+                    self._io_ransom_streak[name] = 0
+                    self._stats["suppressed_benign_io"] = (
+                        int(self._stats.get("suppressed_benign_io") or 0) + 1
+                    )
+                    now = time.time()
+                    if now - self._last_benign_io_log_at >= _CAPACITY_LOG_COOLDOWN_SEC:
+                        self._last_benign_io_log_at = now
+                        top = procs[0] if procs else {}
+                        log(
+                            f"[HEALTH] Disk I/O high but benign "
+                            f"({top.get('name', '?')}) — not ransomware"
+                        )
+                    # Soft performance note only (low score, no ransom wording)
+                    detected_anomalies.append(
+                        (
+                            name,
+                            value,
+                            f"Disk I/O yuksek — bilinen uygulama ({(procs[0].get('name') if procs else 'n/a')})",
+                            5,
+                            "performance",
+                        )
+                    )
+                    continue
+
+                streak = int(self._io_ransom_streak.get(name, 0)) + 1
+                self._io_ransom_streak[name] = streak
+                if streak < _IO_RANSOM_STREAK_NEED:
+                    detected_anomalies.append(
+                        (name, value, description, int(score), "performance")
+                    )
+                else:
+                    # Sustained anonymous/suspicious writer → escalate
+                    detected_anomalies.append(
+                        (
+                            name,
+                            value,
+                            "Surdurulen disk yazma — ransomware adayi (canary/VSS ile dogrulayin)",
+                            55,
+                            "ransomware_suspect",
+                        )
+                    )
+                continue
+
+            detected_anomalies.append(
+                (name, value, description, int(score), category)
+            )
 
         self._latest = metrics
         self._anomalies = [a[0] for a in detected_anomalies]
@@ -325,8 +429,8 @@ class SystemHealthMonitor:
         # ── Alert on anomalies ──
         if detected_anomalies:
             self._stats["anomalies_detected"] += len(detected_anomalies)
-            for name, value, desc, score in detected_anomalies:
-                self._emit_anomaly(name, value, desc, score)
+            for name, value, desc, score, category in detected_anomalies:
+                self._emit_anomaly(name, value, desc, score, category=category)
 
     # ── Sessions & Processes ──────────────────────────────────────
 
@@ -866,9 +970,41 @@ class SystemHealthMonitor:
         except Exception:
             return []
 
-    def _emit_anomaly(self, metric: str, value: float, description: str, score: int):
-        """Feed anomaly to ThreatEngine with detailed process information."""
-        # Metriğe göre detaylı bilgi topla
+    def _is_benign_disk_io(self, process_details: List[dict]) -> bool:
+        """True if top disk writers look like IDE/browser/OS — not ransomware."""
+        if not process_details:
+            return False
+        # If majority of top writers are benign, treat as benign
+        benign_hits = 0
+        checked = 0
+        for p in process_details[:3]:
+            checked += 1
+            name = (p.get("name") or "").lower()
+            exe = (p.get("exe") or "").lower()
+            hit = False
+            for b in _BENIGN_DISK_IO_NAMES:
+                if b in name or b in exe:
+                    hit = True
+                    break
+            if not hit:
+                for path in _BENIGN_DISK_IO_PATHS:
+                    if path in exe:
+                        hit = True
+                        break
+            if hit:
+                benign_hits += 1
+        return checked > 0 and benign_hits >= max(1, (checked + 1) // 2)
+
+    def _emit_anomaly(
+        self,
+        metric: str,
+        value: float,
+        description: str,
+        score: int,
+        *,
+        category: str = "performance",
+    ):
+        """Feed anomaly to ThreatEngine — capacity/benign never look like ransomware."""
         process_details = []
         if "disk_io" in metric:
             process_details = self._get_top_disk_io_processes()
@@ -877,10 +1013,10 @@ class SystemHealthMonitor:
                     f"{p['name']}(PID:{p['pid']}) W:{p['write_mb']}MB R:{p['read_mb']}MB [{p['exe']}]"
                     for p in process_details[:3]
                 )
-                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
-                log(f"[HEALTH] 📋 Top disk I/O processes: {proc_lines}")
+                log(f"[HEALTH] Anomaly: {metric} = {value:.1f} [{category}] — {description}")
+                log(f"[HEALTH] Top disk I/O processes: {proc_lines}")
             else:
-                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+                log(f"[HEALTH] Anomaly: {metric} = {value:.1f} [{category}] — {description}")
         elif "net_bytes" in metric:
             process_details = self._get_top_network_processes()
             if process_details:
@@ -888,30 +1024,52 @@ class SystemHealthMonitor:
                     f"{p['name']}(PID:{p['pid']}) conns:{p['connections']} [{p['exe']}]"
                     for p in process_details[:3]
                 )
-                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
-                log(f"[HEALTH] 📋 Top network processes: {proc_lines}")
+                log(f"[HEALTH] Anomaly: {metric} = {value:.1f} [{category}] — {description}")
+                log(f"[HEALTH] Top network processes: {proc_lines}")
             else:
-                log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+                log(f"[HEALTH] Anomaly: {metric} = {value:.1f} [{category}] — {description}")
         else:
-            log(f"[HEALTH] ⚠️ Anomaly: {metric} = {value:.1f} — {description}")
+            # Capacity already logged with cooldown in collect loop
+            if category != "capacity":
+                log(f"[HEALTH] Anomaly: {metric} = {value:.1f} [{category}] — {description}")
+
+        # Soft / capacity: do not inflate threat engine as ransomware
+        if category in ("capacity", "performance") and score < 25:
+            threat_type = "capacity_warning" if category == "capacity" else "health_performance"
+            severity = "info"
+            # Skip threat-engine feed for pure capacity / benign I/O noise
+            if category == "capacity" or score <= 5:
+                return
+        elif category == "ransomware_suspect":
+            threat_type = "ransomware_suspect"
+            severity = "high"
+        elif category == "security":
+            threat_type = "health_security"
+            severity = "high" if score >= 50 else "warning"
+        else:
+            threat_type = "health_anomaly"
+            severity = "warning" if score < 60 else "high"
 
         if self.on_alert:
             self.on_alert({
                 "event_type": "system_health_anomaly",
-                "threat_type": "health_anomaly",
-                "severity": "high" if score >= 60 else "warning",
-                "threat_score": score,
+                "threat_type": threat_type,
+                "severity": severity,
+                "threat_score": int(score),
                 "details": {
                     "metric": metric,
                     "value": round(value, 2),
                     "description": description,
+                    "category": category,
                     "suspect_processes": process_details[:5],
                 },
                 "description": (
-                    f"Sistem anomalisi: {description}\n"
+                    f"Sistem anomalisi [{category}]: {description}\n"
                     f"Metrik: {metric} = {value:.1f}\n"
-                    + (f"Şüpheli süreçler: {', '.join(p['name'] + '(PID:' + str(p['pid']) + ')' for p in process_details[:3])}"
-                       if process_details else "")
+                    + (
+                        f"Surecler: {', '.join(p['name'] + '(PID:' + str(p['pid']) + ')' for p in process_details[:3])}"
+                        if process_details else ""
+                    )
                 ),
             })
 

@@ -19,6 +19,10 @@ Akış:
   - Skor 100'e ulaşırsa AutoResponse.emergency_lockdown() tetiklenir.
   - API'ye "ransomware_detected" tipinde urgent alert gönderilir.
 
+NOT: System Health "disk full" / IDE disk I/O kapasite veya performans
+uyarılarıdır — ransomware DEĞİLDİR. Gerçek ransomware sinyalleri:
+canary, VSS silme, toplu rename, şüpheli process (vssadmin/bcdedit).
+
 Exports:
   RansomwareShield — ana sınıf (start / stop / get_stats)
 """

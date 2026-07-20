@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.59"  # Watchdog checks SYSTEM motor_ok (not mere GUI presence)
+VERSION = "4.5.60"  # Disk full / IDE I/O != ransomware (health classify)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

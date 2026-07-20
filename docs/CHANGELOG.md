@@ -1,3 +1,12 @@
+# v4.5.60
+
+## Health: disk full / IDE I/O is not ransomware
+- `disk_usage_percent` → capacity only (threshold 98%, no ransomware wording, no threat-engine spam).
+- Disk I/O from Cursor/VS Code/browsers/Defender suppressed as benign performance.
+- Sustained anonymous writers escalate to `ransomware_suspect` only; real ransomware remains canary/VSS/process layers.
+
+---
+
 # v4.5.59
 
 ## Daemon immortality: Watchdog checks SYSTEM motor, not GUI

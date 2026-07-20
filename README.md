@@ -1,11 +1,11 @@
 Cloud Honeypot Client
 =====================
-**Current Version: 4.5.43**
+**Current Version: 4.5.44**
 
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 
 Son Sürüm Değişiklikleri
-- Tam liste: [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (v4.5.35 güncel)
+- Tam liste: [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (v4.5.44 güncel)
 - Cloud API sözleşmeleri: [`docs/`](docs/README.md)
 
 Özellikler

@@ -1397,6 +1397,29 @@ class CloudHoneypotClient:
                         _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
                     continue
 
+                if cmd_u.startswith("BLOCK_IP ") or cmd_u.startswith("UNBLOCK_IP "):
+                    try:
+                        parts = cmd.split()
+                        op = parts[0].upper()
+                        ip = parts[1] if len(parts) > 1 else ""
+                        reason = parts[2] if len(parts) > 2 else "gui_ipc"
+                        ar = getattr(self, "auto_response", None)
+                        if not ip:
+                            _send(json.dumps({"ok": False, "error": "missing_ip"}))
+                            continue
+                        if ar is None:
+                            _send(json.dumps({"ok": False, "error": "no_auto_response"}))
+                            continue
+                        if op == "BLOCK_IP":
+                            ok = bool(ar.block_ip(ip, reason=reason or "gui_ipc"))
+                        else:
+                            ok = bool(ar.unblock_ip(ip))
+                        _send(json.dumps({"ok": ok, "ip": ip, "op": op.lower()}, ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] BLOCK/UNBLOCK error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
                 if cmd_u.startswith("HONEYPOT "):
                     # HONEYPOT START SVC PORT | HONEYPOT STOP SVC | HONEYPOT LIST
                     try:

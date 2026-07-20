@@ -827,16 +827,10 @@ class AutoResponse:
     def _run_system_cmd_detail(cmd: list, timeout: int = 15):
         """Run command; return (ok: bool, combined_output: str)."""
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True, text=True, timeout=timeout,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            out = f"{result.stdout or ''}\n{result.stderr or ''}"
-            return result.returncode == 0, out
-        except subprocess.TimeoutExpired:
-            log(f"[AUTO-RESPONSE] Command timed out: {' '.join(cmd[:3])}...")
-            return False, "timeout"
+            from client_winproc import run_hidden
+            rc, out, err = run_hidden(cmd, timeout=timeout)
+            combined = f"{out or ''}\n{err or ''}"
+            return rc == 0, combined
         except Exception as e:
             log(f"[AUTO-RESPONSE] Command error: {e}")
             return False, str(e)

@@ -6,6 +6,8 @@ Protocol (newline-terminated, UTF-8):
   PING
   STATUS
   CLEAR_FIREWALL
+  BLOCK_IP <ip> [reason]
+  UNBLOCK_IP <ip>
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -86,6 +88,29 @@ def clear_firewall(timeout: float = 180.0) -> Dict[str, Any]:
     """Ask SYSTEM daemon to wipe honeypot firewall rules + sync API."""
     try:
         return request_json("CLEAR_FIREWALL", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def block_ip(ip: str, reason: str = "gui", timeout: float = 45.0) -> Dict[str, Any]:
+    """Ask SYSTEM daemon to apply HP-BLOCK for one IP (elevated)."""
+    ip = (ip or "").strip()
+    if not ip:
+        return {"ok": False, "error": "missing_ip"}
+    # reason: no spaces in protocol line
+    safe_reason = "".join(c if c.isalnum() or c in "._-" else "_" for c in (reason or "gui"))[:64]
+    try:
+        return request_json(f"BLOCK_IP {ip} {safe_reason}", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def unblock_ip(ip: str, timeout: float = 45.0) -> Dict[str, Any]:
+    ip = (ip or "").strip()
+    if not ip:
+        return {"ok": False, "error": "missing_ip"}
+    try:
+        return request_json(f"UNBLOCK_IP {ip}", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

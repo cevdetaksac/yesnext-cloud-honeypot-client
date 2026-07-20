@@ -115,9 +115,10 @@ class DataCleanupManager:
             return result
 
     def clear_firewall(self, sync_dashboard: bool = True) -> Dict[str, Any]:
-        """Tüm HP-BLOCK-* kurallarını sil + dashboard sync (boş liste).
+        """Tum HP-BLOCK-* kurallarini sil + dashboard sync.
 
         Must run elevated (SYSTEM daemon). Non-admin GUI must IPC to daemon.
+        Long netsh/API work runs outside _lock so IPC/enforcer do not hang.
         """
         result = {
             "rules_removed": 0,
@@ -128,12 +129,15 @@ class DataCleanupManager:
             "error": None,
         }
         with self._lock:
+            if getattr(self, "_firewall_clear_busy", False):
+                result["error"] = "busy"
+                return result
+            self._firewall_clear_busy = True
             try:
                 from client_firewall import is_admin
                 result["elevated"] = bool(is_admin())
             except Exception:
                 result["elevated"] = False
-            # SYSTEM Session-0 motor can always purge (IsUserAnAdmin is unreliable for SYSTEM)
             if getattr(self.app, "_is_daemon_motor", False) or getattr(self.app, "daemon_is_active", False):
                 result["elevated"] = True
             try:
@@ -142,31 +146,27 @@ class DataCleanupManager:
                     result["elevated"] = True
             except Exception:
                 pass
-
-            # Auto-response memory (firewall delete only when elevated)
             ar = getattr(self.app, "auto_response", None)
-            if ar and result["elevated"] and hasattr(ar, "clear_all_blocks"):
+            clear_ar_fw = bool(ar and result["elevated"] and hasattr(ar, "clear_all_blocks"))
+            clear_ar_mem_only = bool(ar and hasattr(ar, "_blocks") and not clear_ar_fw)
+
+        try:
+            if clear_ar_fw:
                 result["auto_blocks_cleared"] = ar.clear_all_blocks()
-            elif ar and hasattr(ar, "_blocks"):
+            elif clear_ar_mem_only:
                 with ar._lock:
                     n = len(ar._blocks)
                     ar._blocks.clear()
                 result["auto_blocks_cleared"] = n
 
-            # Scan & delete all HP-BLOCK / legacy rules
             removed = self._delete_all_hp_block_rules()
             result["rules_removed"] = removed
-            self._stats["rules_removed"] += removed
 
             if not result["elevated"]:
                 result["error"] = "elevation_required"
                 log("[CLEANUP] clear_firewall aborted — elevation_required")
-                # Do NOT wipe store / API while firewall still has rules
-                self._stats["firewall_runs"] += 1
-                self._stats["last_result"] = result
                 return result
 
-            # Verify live firewall is empty before wiping API inventory
             try:
                 from client_firewall import WindowsFirewallBackend
                 backend = WindowsFirewallBackend(logger=_CleanupLogger())
@@ -176,8 +176,6 @@ class DataCleanupManager:
                 if ok and left_n > 0:
                     result["error"] = "purge_incomplete"
                     log(f"[CLEANUP] clear_firewall incomplete — {left_n} rules still present")
-                    self._stats["firewall_runs"] += 1
-                    self._stats["last_result"] = result
                     return result
             except Exception as e:
                 log(f"[CLEANUP] post-purge verify error: {e}")
@@ -192,10 +190,8 @@ class DataCleanupManager:
                 token = self._token()
                 api = getattr(self.app, "api_client", None)
                 if token and api:
-                    # Empty sync = dashboard blok listesi sıfır
                     ok = api.sync_firewall_rules(token, [])
                     result["api_synced"] = bool(ok)
-                    # Also clear server-side block records
                     cleared = api.clear_client_data(
                         token, scopes=["blocks"], reason="firewall_cleanup",
                     )
@@ -204,10 +200,14 @@ class DataCleanupManager:
                 else:
                     result["error"] = result.get("error") or "no_token_or_api"
 
-            self._stats["firewall_runs"] += 1
-            self._stats["last_result"] = result
             log(f"[CLEANUP] Firewall cleanup done: {result}")
             return result
+        finally:
+            with self._lock:
+                self._firewall_clear_busy = False
+                self._stats["rules_removed"] += int(result.get("rules_removed") or 0)
+                self._stats["firewall_runs"] += 1
+                self._stats["last_result"] = result
 
     def clear_server(self, scopes: Optional[List[str]] = None) -> Dict[str, Any]:
         """Sunucu/dashboard saldırı + alert + blok kayıtlarını temizle."""

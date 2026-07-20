@@ -1,3 +1,15 @@
+# v4.5.44
+
+## Stability / performance review
+- Periodic Engellenen refresh no longer forces full `netsh name=all` every ~20s (coalesce + throttle).
+- Failed firewall scan must not wipe ProgramData / API inventory.
+- GUI block/unblock/whitelist off Tk thread; prefer SYSTEM IPC `BLOCK_IP` / `UNBLOCK_IP`.
+- `clear_firewall` does not hold cleanup lock across netsh/HTTP (busy flag).
+- Motor health cached off UI thread; `client_winproc.run_hidden` centralizes hidden subprocess.
+- Architecture doc refreshed: `docs/api/08-architecture.md`.
+
+---
+
 # v4.5.43
 
 ## Güncelleme banner takılması

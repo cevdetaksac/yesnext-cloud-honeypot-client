@@ -107,42 +107,10 @@ def is_admin() -> bool:
 
 
 def run_cmd(cmd: List[str], timeout: int = 20) -> Tuple[int, str, str]:
-    # Run command with timeout. Returns (rc, stdout, stderr).
-    # Bytes + multi-encoding decode: netsh dumps are often OEM/CP857 and
-    # crash text=True (cp1254) → empty stdout → Engellenen always 0.
-    # CREATE_NO_WINDOW: GUI/daemon poll netsh often — never flash a console.
-    def _dec(raw: Optional[bytes]) -> str:
-        if not raw:
-            return ""
-        for enc in ("utf-8", "cp857", "cp850", "cp1254", "oem", "latin-1"):
-            try:
-                return raw.decode(enc)
-            except (UnicodeDecodeError, LookupError):
-                continue
-        return raw.decode("utf-8", errors="replace")
-
-    kwargs: dict = {
-        "shell": False,
-        "capture_output": True,
-        "text": False,
-        "timeout": timeout if timeout and timeout > 0 else None,
-    }
-    if os.name == "nt":
-        # 0x08000000 = CREATE_NO_WINDOW (hide console for netsh/schtasks/etc.)
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        try:
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = 0  # SW_HIDE
-            kwargs["startupinfo"] = si
-        except Exception:
-            pass
-
+    # Canonical hidden runner (CREATE_NO_WINDOW + multi-encoding decode).
     try:
-        p = subprocess.run(cmd, **kwargs)
-        return p.returncode, _dec(p.stdout), _dec(p.stderr)
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timeout after {timeout}s"
+        from client_winproc import run_hidden
+        return run_hidden(cmd, timeout=timeout)
     except Exception as e:
         return 1, "", f"{e}"
 
@@ -863,9 +831,15 @@ class FirewallAgent:
         self.logger.info("🔄 Firewall rule migration & sync starting...")
 
         try:
-            rules = self.backend.scan_existing_rules()
+            ok, rules = self.backend.scan_existing_rules_detailed()
         except Exception as e:
             self.logger.error(f"Rule scan failed: {e}")
+            return
+
+        if not ok:
+            self.logger.error(
+                "Rule scan failed (netsh) — keeping ProgramData / API inventory"
+            )
             return
 
         if not rules:

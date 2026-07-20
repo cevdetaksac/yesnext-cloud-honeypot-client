@@ -17,7 +17,7 @@ Merkezi dokümantasyon (API sözleşmeleri, changelog, operasyon).
 | Uzak masaüstü | [api/05-remote-desktop.md](api/05-remote-desktop.md) |
 | Firewall / cleanup | [api/06-firewall-blocks.md](api/06-firewall-blocks.md) |
 | Lifecycle / sessions | [api/07-lifecycle-sessions.md](api/07-lifecycle-sessions.md) |
-| Daemon ↔ frontend | [api/08-architecture.md](api/08-architecture.md) |
+| Daemon ↔ frontend (IPC, ownership) | [api/08-architecture.md](api/08-architecture.md) |
 
 ## Repo kökü
 

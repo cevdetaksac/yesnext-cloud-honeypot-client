@@ -2584,7 +2584,7 @@ class ModernGUI:
             font=self._emoji_font(11),
             fg_color=COLORS["bg"], border_width=1, border_color=COLORS["border"],
             hover_color="#2a2b3e",
-            command=self._refresh_ip_table,
+            command=lambda: self._refresh_ip_table(force_firewall=True),
         ).pack(side="right")
 
         self._ip_clear_blocked_btn = ctk.CTkButton(
@@ -2716,13 +2716,36 @@ class ModernGUI:
         self._update_ip_tab_styles()
         self._render_ip_table(getattr(self, "_ip_table_rows", []))
 
-    def _refresh_ip_table(self, force_firewall: bool = True):
-        """ThreatEngine IP pool'undan verileri alıp tabloyu güncelle."""
-        threading.Thread(
-            target=self._collect_ip_table_data,
-            kwargs={"force_firewall": bool(force_firewall)},
-            daemon=True,
-        ).start()
+    def _refresh_ip_table(self, force_firewall: bool = False):
+        """IP tablo verisini arka planda topla (coalesce overlapping refreshes)."""
+        if getattr(self, "_ip_table_busy", False):
+            self._ip_table_pending = True
+            self._ip_table_pending_force = bool(
+                getattr(self, "_ip_table_pending_force", False) or force_firewall
+            )
+            return
+        self._ip_table_busy = True
+        self._ip_table_pending = False
+        self._ip_table_pending_force = False
+
+        def _done_coalesce():
+            self._ip_table_busy = False
+            if getattr(self, "_ip_table_pending", False):
+                force = bool(getattr(self, "_ip_table_pending_force", False))
+                self._ip_table_pending = False
+                self._ip_table_pending_force = False
+                self._refresh_ip_table(force_firewall=force)
+
+        def _worker():
+            try:
+                self._collect_ip_table_data(force_firewall=bool(force_firewall))
+            finally:
+                try:
+                    self._gui_safe(_done_coalesce)
+                except Exception:
+                    self._ip_table_busy = False
+
+        threading.Thread(target=_worker, daemon=True, name="IpTableRefresh").start()
 
     def _clear_all_blocked_ips(self):
         """Engellenen: tüm honeypot firewall kurallarını sil + API bildir."""
@@ -3040,92 +3063,140 @@ class ModernGUI:
             log(f"[GUI] IP table render error: {e}")
 
     def _ip_table_block(self, ip: str):
-        """IP tablosundan hızlı engelle — firewall + ThreatEngine senkron."""
+        """IP tablosundan hizli engelle — off-thread (+ daemon IPC)."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
                 return
         except Exception:
             return
-        auto_response = getattr(self.app, 'auto_response', None)
-        threat_engine = getattr(self.app, 'threat_engine', None)
-        if not auto_response:
-            return
 
-        # Önce whitelist'ten çıkar (varsa)
-        if threat_engine:
-            threat_engine._whitelist_ips.discard(ip)
-        ew = getattr(self.app, 'event_watcher', None)
-        if ew and hasattr(ew, 'whitelist_ips'):
-            ew.whitelist_ips.discard(ip)
-        if auto_response:
-            auto_response.whitelist_ips.discard(ip)
+        def _work():
+            ok = self._firewall_mutate_ip(ip, block=True, reason="Manual_block_IP_table")
 
-        ok = auto_response.block_ip(ip, reason="Manual block from IP table")
-        if ok:
-            # ThreatEngine durumunu da güncelle
-            if threat_engine:
-                threat_engine._rule_blocked_ips.add(ip)
-                ctx = threat_engine.get_ip_context(ip)
-                if ctx:
-                    ctx.is_blocked = True
-            self.show_toast(self.t("toast_ip_blocked"),
-                            self.t("toast_ip_blocked_msg").format(ip=ip), "high")
-        else:
-            self.show_toast(self.t("toast_block_failed"),
-                            self.t("toast_ip_blocked_msg").format(ip=ip), "warning")
-        self._refresh_ip_table()
+            def _ui():
+                if ok:
+                    self.show_toast(
+                        self.t("toast_ip_blocked"),
+                        self.t("toast_ip_blocked_msg").format(ip=ip),
+                        "high",
+                    )
+                else:
+                    self.show_toast(
+                        self.t("toast_block_failed"),
+                        self.t("toast_ip_blocked_msg").format(ip=ip),
+                        "warning",
+                    )
+                self._refresh_ip_table(force_firewall=True)
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="IpBlock").start()
 
     def _ip_table_unblock(self, ip: str):
-        """IP tablosundan engeli kaldır — firewall + ThreatEngine senkron."""
+        """IP tablosundan engeli kaldir — off-thread (+ daemon IPC)."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
                 return
         except Exception:
             return
-        auto_response = getattr(self.app, 'auto_response', None)
-        threat_engine = getattr(self.app, 'threat_engine', None)
 
+        def _work():
+            self._firewall_mutate_ip(ip, block=False)
+
+            def _ui():
+                self.show_toast(
+                    self.t("toast_ip_unblocked"),
+                    self.t("toast_ip_unblocked_msg").format(ip=ip),
+                    "info",
+                )
+                self._refresh_ip_table(force_firewall=True)
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="IpUnblock").start()
+
+    def _firewall_mutate_ip(self, ip: str, *, block: bool, reason: str = "gui") -> bool:
+        """Apply block/unblock via SYSTEM daemon IPC when possible, else local AR."""
+        ip = (ip or "").strip()
+        if not ip:
+            return False
+        try:
+            from client_daemon_ipc import is_motor_healthy, block_ip as ipc_block, unblock_ip as ipc_unblock
+            if is_motor_healthy(timeout=1.0):
+                out = ipc_block(ip, reason=reason) if block else ipc_unblock(ip)
+                if out.get("ok"):
+                    return True
+        except Exception:
+            pass
+
+        auto_response = getattr(self.app, "auto_response", None)
+        threat_engine = getattr(self.app, "threat_engine", None)
+        if block:
+            if threat_engine:
+                threat_engine._whitelist_ips.discard(ip)
+            ew = getattr(self.app, "event_watcher", None)
+            if ew and hasattr(ew, "whitelist_ips"):
+                ew.whitelist_ips.discard(ip)
+            if auto_response:
+                auto_response.whitelist_ips.discard(ip)
+                ok = bool(auto_response.block_ip(ip, reason=reason.replace("_", " ")))
+                if ok and threat_engine:
+                    threat_engine._rule_blocked_ips.add(ip)
+                    ctx = threat_engine.get_ip_context(ip)
+                    if ctx:
+                        ctx.is_blocked = True
+                return ok
+            return False
+
+        ok = False
         if auto_response:
-            auto_response.unblock_ip(ip)
+            ok = bool(auto_response.unblock_ip(ip))
         if threat_engine:
             threat_engine._rule_blocked_ips.discard(ip)
             ctx = threat_engine.get_ip_context(ip)
             if ctx:
                 ctx.is_blocked = False
-        self.show_toast(self.t("toast_ip_unblocked"),
-                        self.t("toast_ip_unblocked_msg").format(ip=ip), "info")
-        self._refresh_ip_table()
+            ok = True
+        return ok
 
     def _ip_table_whitelist(self, ip: str):
-        """IP tablosundan güvenli listeye ekle — engeli kaldır + whitelist senkron."""
+        """IP tablosundan guvenli listeye ekle — off-thread."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
                 return
         except Exception:
             return
-        threat_engine = getattr(self.app, 'threat_engine', None)
-        auto_response = getattr(self.app, 'auto_response', None)
 
-        # Engeli varsa önce kaldır
-        if auto_response:
-            auto_response.unblock_ip(ip)
-            auto_response.whitelist_ips.add(ip)
-        if threat_engine:
-            threat_engine._rule_blocked_ips.discard(ip)
-            threat_engine._whitelist_ips.add(ip)
-            ctx = threat_engine.get_ip_context(ip)
-            if ctx:
-                ctx.is_blocked = False
-        ew = getattr(self.app, 'event_watcher', None)
-        if ew and hasattr(ew, 'whitelist_ips'):
-            ew.whitelist_ips.add(ip)
+        def _work():
+            self._firewall_mutate_ip(ip, block=False)
+            threat_engine = getattr(self.app, "threat_engine", None)
+            auto_response = getattr(self.app, "auto_response", None)
+            if auto_response:
+                auto_response.whitelist_ips.add(ip)
+            if threat_engine:
+                threat_engine._rule_blocked_ips.discard(ip)
+                threat_engine._whitelist_ips.add(ip)
+                ctx = threat_engine.get_ip_context(ip)
+                if ctx:
+                    ctx.is_blocked = False
+            ew = getattr(self.app, "event_watcher", None)
+            if ew and hasattr(ew, "whitelist_ips"):
+                ew.whitelist_ips.add(ip)
 
-        self.show_toast(self.t("ip_status_whitelisted"),
-                        self.t("toast_ip_whitelisted_msg").format(ip=ip), "info")
-        self._refresh_ip_table()
+            def _ui():
+                self.show_toast(
+                    self.t("ip_status_whitelisted"),
+                    self.t("toast_ip_whitelisted_msg").format(ip=ip),
+                    "info",
+                )
+                self._refresh_ip_table(force_firewall=True)
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="IpWhitelist").start()
 
     def _ip_table_remove_whitelist(self, ip: str):
         """IP'yi güvenli listeden çıkar."""
@@ -4435,6 +4506,35 @@ class ModernGUI:
             pass
 
     # ─── Dashboard Refresh ─── #
+    def _start_motor_health_poll(self):
+        """Cache daemon motor health off the Tk thread (avoid 400ms stalls)."""
+        if getattr(self, "_motor_poll_thread_started", False):
+            return
+        self._motor_poll_thread_started = True
+        self._cached_motor_ok = False
+
+        def _loop():
+            while True:
+                try:
+                    if not self.root or not self.root.winfo_exists():
+                        return
+                except Exception:
+                    return
+                ok = False
+                try:
+                    from client_daemon_ipc import is_motor_healthy
+                    ok = bool(is_motor_healthy(timeout=0.8))
+                except Exception:
+                    ok = False
+                if not ok:
+                    rc = getattr(self.app, "remote_commands", None)
+                    ok = bool(rc is not None and getattr(rc, "_running", False))
+                self._cached_motor_ok = ok
+                import time as _t
+                _t.sleep(3.0)
+
+        threading.Thread(target=_loop, daemon=True, name="MotorHealthPoll").start()
+
     def _schedule_dashboard_refresh(self):
         """Dashboard kartlarını config aralığında günceller (varsayılan 10 sn)."""
         # Skip until status widgets exist
@@ -4451,7 +4551,7 @@ class ModernGUI:
             and self._ip_table_tick >= ticks_per_ip
         ):
             self._ip_table_tick = 0
-            self._refresh_ip_table()
+            self._refresh_ip_table(force_firewall=False)
 
         ticks_per_intel = max(1, int(60000 / self._refresh_ms))  # ~60 sn
         if not hasattr(self, '_security_tick'):
@@ -4553,15 +4653,13 @@ class ModernGUI:
 
             # 6) API + motor (dashboard poll) — auth alone is not "online"
             api_ok = getattr(self.app, '_last_api_ok', False)
-            motor_ok = False
-            try:
-                from client_daemon_ipc import is_motor_healthy
-                motor_ok = bool(is_motor_healthy(timeout=0.4))
-            except Exception:
-                motor_ok = False
+            motor_ok = bool(getattr(self, "_cached_motor_ok", False))
             if not motor_ok:
                 rc = getattr(self.app, "remote_commands", None)
                 motor_ok = bool(rc is not None and getattr(rc, "_running", False))
+            if not getattr(self, "_motor_poll_started", False):
+                self._motor_poll_started = True
+                self._start_motor_health_poll()
             if api_ok and motor_ok:
                 self._update_card("connection", self.t("dash_connected"), COLORS["green"])
             elif api_ok and not motor_ok:

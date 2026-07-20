@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.43"  # Stale update banner → failed; helper UI heartbeat while NSIS waits
+VERSION = "4.5.44"  # Perf/stability: IP coalesce, IPC block, no failed-scan wipe, winproc
 
 
 CLIENT_VERSION = VERSION  # Main version constant

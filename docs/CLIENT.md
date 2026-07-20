@@ -1,9 +1,9 @@
 # Windows Client — Sözleşme Özeti
 
 > **API:** `https://honeypot.yesnext.com.tr` / `wss://…`  
-> **Durum:** Client **4.5.42**  
+> **Durum:** Client **4.5.44**  
 > (control WS + self_update ACK; GUI update banner ≥4.5.39; Engellenen live-firewall ≥4.5.40;  
-> GUI Clear-all → SYSTEM `CLEAR_FIREWALL` IPC ≥4.5.42)  
+> GUI Clear-all / block → SYSTEM IPC ≥4.5.42–44; perf coalesce ≥4.5.44)  
 > Bu dosya yeni client işi için **kısa referans**; detay: [api/](./api/).
 
 Cloud implementasyonu: [CLOUD.md](./CLOUD.md) (varsa)
@@ -73,9 +73,9 @@ Cloud UI bitişi version eşleşmesiyle yapar; ikinci `install_complete` zorunlu
   - Params: `wipe_all_honeypot_rules` (default true), `ips[]` (yedek per-IP), `reason`
   - Önce honeypot kural wipe, sonra `ips[]` name-template silme
   - Ardından `sync-rules` `blocks:[]` + `clear-data` `scopes:["blocks"]`
-- **GUI Engellenen → Tümünü temizle** (ve Ayarlar firewall cleanup):  
-  unelevated GUI **doğrudan netsh silmez** → IPC `CLEAR_FIREWALL` → Session-0 SYSTEM daemon  
-  (gizli PowerShell sweep). Motor yok / yetki yoksa store+API boşaltılmaz.
+- **GUI Engellenen → Tümünü temizle** / tek IP engelle:  
+  unelevated GUI → IPC (`CLEAR_FIREWALL` / `BLOCK_IP` / `UNBLOCK_IP`) → Session-0 daemon.  
+  Periyodik liste: ProgramData + throttled scan (`force` sadece 🔄 / mutate).
 
 ---
 

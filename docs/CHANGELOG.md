@@ -1,3 +1,10 @@
+# v4.5.65
+- UX: canary tetiklenince yerel tray/toast yok (dashboard/API urgent kalır) — kullanıcıyı korkutmama
+- OneDrive-backed Documents'a canary konmaz (bulut senkronunda görünürlük/kota)
+- Canary'lere NotContentIndexed; Explorer Hidden+System (önceki gibi)
+- IFEO asla SearchIndexer / Defender / OneDrive / shell host süreçlerine uygulanmaz
+- GUI metinleri yumuşatıldı ("tuzak" → "gizli koruma dosyası")
+
 # v4.5.64
 - SYSTEM motor: ProfileList + scan existing `Users\*\Documents\.cloud-honeypot-canary` so interactive-user canaries are watched (4.5.63 gap found in scenario test)
 - Keep quarantine arm-first from 4.5.63

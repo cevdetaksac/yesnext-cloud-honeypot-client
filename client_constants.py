@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.64"  # SYSTEM watches interactive-user canaries; quarantine arm-first
+VERSION = "4.5.65"  # UX: silent canaries (no local scare), skip OneDrive, not-indexed
 
 
 CLIENT_VERSION = VERSION  # Main version constant

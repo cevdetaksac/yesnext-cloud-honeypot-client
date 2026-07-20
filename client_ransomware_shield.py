@@ -80,13 +80,12 @@ _LEGACY_CANARY_FILES = [
     ("recovery_keys.txt", 1024),
 ]
 
-CANARY_README_CONTENT = """Cloud Honeypot Client — Ransomware Shield (Canary)
+CANARY_README_CONTENT = """Cloud Honeypot Client — koruma dosyalari (yonetici)
 
-Tuzak dosyalar Documents / Public Documents / ProgramData altında
-Hidden+System klasörde tutulur (.cloud-honeypot-canary).
-Explorer'da gizli dosyaları göstermiyorsanız görünmezler.
+Bu dosyalar arka planda ransomware erken tespiti icindir.
+Explorer'da gizli + sistem ozelliklidir; normal kullanicida gorunmez.
 
-Dokunmayın / silmeyin. Sorular: destek@yesnext.com.tr
+Silmeyin. Destek: destek@yesnext.com.tr
 """
 
 _QUARANTINE_FILE = "ransomware_quarantine.json"
@@ -94,6 +93,13 @@ _PROTECTED_IMAGES = {
     "system", "smss.exe", "csrss.exe", "wininit.exe",
     "services.exe", "lsass.exe", "svchost.exe", "explorer.exe",
     "honeypot-client.exe", "winlogon.exe", "dwm.exe",
+    # Benign scanners / sync / indexers — never IFEO-kill (UX + false positive)
+    "searchindexer.exe", "searchprotocolhost.exe", "searchfilterhost.exe",
+    "msmpeng.exe", "mpcmdrun.exe", "nissrv.exe", "securityhealthservice.exe",
+    "onedrive.exe", "onedriveupdater.exe", "filecoauth.exe",
+    "backup.exe", "sdclt.exe", "dllhost.exe", "runtimebroker.exe",
+    "taskhostw.exe", "sihost.exe", "ctfmon.exe", "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe", "textinputhost.exe",
 }
 
 # Suspicious file extensions commonly used by ransomware
@@ -341,13 +347,20 @@ class RansomwareShield:
 
             user_profile = os.environ.get("USERPROFILE", "C:\\Users\\Public")
             base_dirs = [
-                os.path.join(user_profile, "Documents"),
                 os.path.join("C:\\Users\\Public", "Documents"),
                 os.path.join(os.environ.get("ProgramData", "C:\\ProgramData")),
             ]
-            # SYSTEM motor: also seed interactive users' Documents (not systemprofile)
+            # SYSTEM profile Documents only if not a confusing path
+            sys_docs = os.path.join(user_profile, "Documents")
+            if not self._is_onedrive_path(sys_docs):
+                base_dirs.insert(0, sys_docs)
+
+            # Interactive users' Documents — skip OneDrive-backed (sync scare + quota)
             for up in self._interactive_user_profiles():
                 docs = os.path.join(up, "Documents")
+                if self._is_onedrive_path(docs):
+                    log(f"[RANSOMWARE-SHIELD] skip OneDrive Documents canary: {docs}")
+                    continue
                 if docs not in base_dirs:
                     base_dirs.append(docs)
 
@@ -533,7 +546,8 @@ class RansomwareShield:
         for name in names:
             root = os.path.join(users_root, name, "Documents", CANARY_ROOT_FOLDER)
             if not os.path.isdir(root):
-                # OneDrive-style Documents redirect still usually keeps this path
+                continue
+            if self._is_onedrive_path(root):
                 continue
             self._set_hidden_attribute(root)
             for dirpath, _dns, fns in os.walk(root):
@@ -559,14 +573,32 @@ class RansomwareShield:
                         continue
 
     @staticmethod
+    def _is_onedrive_path(path: str) -> bool:
+        """True if path is under OneDrive (sync would expose bait to user cloud UI)."""
+        p = (path or "").lower().replace("/", "\\")
+        if "onedrive" in p:
+            return True
+        try:
+            # Resolve junctions (Documents → OneDrive\Documents)
+            real = os.path.realpath(path).lower().replace("/", "\\")
+            if "onedrive" in real:
+                return True
+        except OSError:
+            pass
+        return False
+
+    @staticmethod
     def _set_hidden_attribute(folder_path: str):
-        """Set Windows hidden + system attribute so path is invisible in Explorer."""
+        """Hidden + System + NotContentIndexed — invisible in normal Explorer, skip Search."""
         try:
             FILE_ATTRIBUTE_HIDDEN = 0x02
             FILE_ATTRIBUTE_SYSTEM = 0x04
+            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED = 0x2000
             ctypes.windll.kernel32.SetFileAttributesW(
                 str(folder_path),
-                FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+                FILE_ATTRIBUTE_HIDDEN
+                | FILE_ATTRIBUTE_SYSTEM
+                | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
             )
         except Exception:
             pass  # Non-Windows or permission issue, silently skip
@@ -655,15 +687,18 @@ class RansomwareShield:
                 "threat_type": "ransomware_canary_triggered",
                 "severity": "critical",
                 "threat_score": 100,
+                # Dashboard/API yes — local tray/toast no (do not scare end users)
+                "suppress_local_notify": True,
                 "details": {
                     "file": filename,
                     "change_type": change_type,
                     "full_path": canary.path,
                 },
                 "description": (
-                    f"🚨 RANSOMWARE ALERT: Canary file '{filename}' was {change_type}. "
-                    f"This is a strong indicator of ransomware activity!"
+                    f"RANSOMWARE ALERT: Canary file '{filename}' was {change_type}. "
+                    f"Strong indicator of ransomware activity."
                 ),
+                "title": "Ransomware koruması — canary tetiklendi",
             })
 
         # Send urgent alert

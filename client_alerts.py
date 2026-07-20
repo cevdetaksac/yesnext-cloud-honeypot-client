@@ -246,11 +246,13 @@ class AlertPipeline:
         # Route — kritik / başarılı logon → anında API
         if force_urgent:
             self._send_urgent(alert)
-            self._notify_gui(alert)
-            self._notify_tray(alert)
+            if not alert.get("suppress_local_notify"):
+                self._notify_gui(alert)
+                self._notify_tray(alert)
         elif severity == "warning":
             self._buffer_for_batch(alert)
-            self._notify_gui(alert)
+            if not alert.get("suppress_local_notify"):
+                self._notify_gui(alert)
         else:  # info
             self._buffer_for_batch(alert)
 

@@ -8,6 +8,8 @@ Protocol (newline-terminated, UTF-8):
   CLEAR_FIREWALL
   BLOCK_IP <ip> [reason]
   UNBLOCK_IP <ip>
+  RS_UNLOCK
+  RS_STATUS
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -36,7 +38,7 @@ except Exception:
 def _recv_line(sock: socket.socket, timeout: float = 3.0) -> str:
     sock.settimeout(timeout)
     buf = b""
-    while b"\n" not in buf and len(buf) < 65536:
+    while b"\n" not in buf and len(buf) < 262144:
         chunk = sock.recv(4096)
         if not chunk:
             break
@@ -111,6 +113,22 @@ def unblock_ip(ip: str, timeout: float = 45.0) -> Dict[str, Any]:
         return {"ok": False, "error": "missing_ip"}
     try:
         return request_json(f"UNBLOCK_IP {ip}", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def ransomware_status(timeout: float = 8.0) -> Dict[str, Any]:
+    """Ask SYSTEM motor for ransomware shield stats + quarantine."""
+    try:
+        return request_json("RS_STATUS", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def ransomware_unlock(timeout: float = 20.0) -> Dict[str, Any]:
+    """Clear ransomware IFEO quarantine on SYSTEM motor."""
+    try:
+        return request_json("RS_UNLOCK", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

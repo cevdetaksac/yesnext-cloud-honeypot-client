@@ -378,6 +378,10 @@ class CloudHoneypotClient:
                 self.health_monitor = None
                 self.process_protection = None
 
+        # Wire ransomware shield into remote command executor (created earlier)
+        if getattr(self, "remote_commands", None) is not None and self.ransomware_shield is not None:
+            self.remote_commands.ransomware_shield = self.ransomware_shield
+
         # Cloud threat-intel (daemon only) — soft if API not ready
         self.threat_intel = None
         if ENABLE_THREAT_DETECTION and not self.frontend_only:
@@ -1304,7 +1308,25 @@ class CloudHoneypotClient:
             "frontend_only": frontend_only,
             "remote_commands_running": rc_running,
             "motor_ok": bool(is_motor and rc_running),
+            "rs_quarantine": self._ipc_rs_quarantine_summary(),
         }
+
+    def _ipc_rs_quarantine_summary(self) -> dict:
+        rs = getattr(self, "ransomware_shield", None)
+        if rs is None:
+            return {"active": False, "entries": 0}
+        try:
+            st = rs.get_stats()
+            return {
+                "active": bool(st.get("quarantine_active")),
+                "entries": int(st.get("quarantine_entries") or 0),
+                "trigger": st.get("quarantine_trigger") or "",
+                "locked_at": st.get("quarantine_locked_at") or "",
+                "canary_files": int(st.get("canary_files") or 0),
+                "alerts_total": int(st.get("alerts_total") or 0),
+            }
+        except Exception:
+            return {"active": False, "entries": 0}
 
     def control_server_loop(self, sock):
         """Handle control server connections — SHOW/QUIT + daemon IPC."""
@@ -1384,6 +1406,36 @@ class CloudHoneypotClient:
                         _send(json.dumps({"ok": ok, "ip": ip, "op": op.lower()}, ensure_ascii=False))
                     except Exception as e:
                         log(f"[CTRL] BLOCK/UNBLOCK error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
+                if cmd_u in ("RS_UNLOCK", "UNLOCK_RS_QUARANTINE"):
+                    try:
+                        rs = getattr(self, "ransomware_shield", None)
+                        if rs is None:
+                            _send(json.dumps({"ok": False, "error": "no_ransomware_shield"}))
+                            continue
+                        out = rs.unlock_quarantine(reason="gui_ipc")
+                        _send(json.dumps({"ok": True, **out}, ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] RS_UNLOCK error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
+                if cmd_u in ("RS_STATUS", "RS_QUARANTINE"):
+                    try:
+                        rs = getattr(self, "ransomware_shield", None)
+                        if rs is None:
+                            _send(json.dumps({"ok": False, "error": "no_ransomware_shield"}))
+                            continue
+                        _send(json.dumps({
+                            "ok": True,
+                            "stats": rs.get_stats(),
+                            "quarantine": rs.get_quarantine(),
+                            "detections": rs.get_detections()[-20:],
+                        }, ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] RS_STATUS error: {e}")
                         _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
                     continue
 
@@ -2452,10 +2504,21 @@ class CloudHoneypotClient:
                     self.remote_commands.cleanup_manager = self.cleanup_manager
                 if getattr(self, "health_monitor", None) is not None:
                     self.remote_commands.health_monitor = self.health_monitor
+                if getattr(self, "ransomware_shield", None) is not None:
+                    self.remote_commands.ransomware_shield = self.ransomware_shield
                 log("[MOTOR] RemoteCommandExecutor constructed (daemon ensure)")
         except Exception as e:
             log(f"[MOTOR] ensure construct failed: {e}")
             ok = False
+        # Keep shield wired even if executor already existed
+        try:
+            if (
+                self.remote_commands is not None
+                and getattr(self, "ransomware_shield", None) is not None
+            ):
+                self.remote_commands.ransomware_shield = self.ransomware_shield
+        except Exception:
+            pass
         return ok and self.remote_commands is not None
 
     def _start_emergency_command_bridge(self, reason: str = "") -> None:

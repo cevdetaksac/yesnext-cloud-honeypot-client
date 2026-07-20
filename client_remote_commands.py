@@ -79,6 +79,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",  # aliases
+    "unlock_ransomware_quarantine", "list_ransomware_quarantine",
     "list_sessions", "list_processes", "list_local_users", "snapshot",
     "collect_diagnostics",
     "remote_stream_start", "remote_stream_stop", "remote_input",
@@ -103,6 +104,7 @@ _IR_URGENT_COMMANDS = frozenset({
     "stop_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",
+    "unlock_ransomware_quarantine",
     "clear_firewall",
     "self_update", "check_update",  # dashboard update — same urgency as IR
     "remote_session_prepare", "list_local_users",
@@ -166,12 +168,14 @@ class RemoteCommandExecutor:
         auto_response=None,
         health_monitor=None,
         cleanup_manager=None,
+        ransomware_shield=None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.auto_response = auto_response  # AutoResponse instance
         self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
         self.cleanup_manager = cleanup_manager  # DataCleanupManager (wired after init)
+        self.ransomware_shield = ransomware_shield
 
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
@@ -1780,6 +1784,32 @@ class RemoteCommandExecutor:
     def _cmd_disable_lockdown(self, params: dict) -> dict:
         """Alias for lift_lockdown (V4 prompt naming)."""
         return self._cmd_lift_lockdown(params)
+
+    def _cmd_unlock_ransomware_quarantine(self, params: dict) -> dict:
+        """Clear canary/VSS IFEO quarantine after operator review."""
+        rs = self.ransomware_shield
+        if rs is None:
+            return {"success": False, "error": "RansomwareShield not available"}
+        reason = (params.get("reason") or "dashboard").strip() or "dashboard"
+        try:
+            out = rs.unlock_quarantine(reason=reason)
+            return {
+                "success": bool(out.get("ok")),
+                "message": "Ransomware quarantine unlocked",
+                "data": out,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_list_ransomware_quarantine(self, params: dict) -> dict:
+        rs = self.ransomware_shield
+        if rs is None:
+            return {"success": False, "error": "RansomwareShield not available"}
+        try:
+            q = rs.get_quarantine()
+            return {"success": True, "data": q}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _cmd_snapshot(self, params: dict) -> dict:
         try:

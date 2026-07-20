@@ -1,3 +1,9 @@
+# v4.5.62
+- Canary sertleştirme: `!000_` sort-bait isimler, Hidden+System dosya+klasör, README sadece ProgramData
+- Canary/VSS hit → şüpheli süreci öldür + IFEO karantina; unlock: GUI / `RS_UNLOCK` / `unlock_ransomware_quarantine`
+- Canary kontrol aralığı 15 sn; ek TTP (fsutil USN, wevtutil cl, VSS PowerShell, net stop vss)
+- Frontend ransomware detayı SYSTEM motor IPC (`RS_STATUS`) ile çalışır
+
 # v4.5.61
 
 ## Cloud threat-intel feed (client consumer)

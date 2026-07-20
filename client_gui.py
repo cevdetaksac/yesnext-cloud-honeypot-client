@@ -3735,16 +3735,34 @@ class ModernGUI:
     # ── Detail: Ransomware Shield ── #
     def _detail_ransomware(self):
         """Ransomware shield detayları — tespit edilen olaylar + aksiyon butonları."""
-        popup = self._show_detail_window(f"🧬 {self.t('card_ransomware')}", height=520)
+        popup = self._show_detail_window(f"🧬 {self.t('card_ransomware')}", height=560)
         content = popup._content
 
         rs = getattr(self.app, 'ransomware_shield', None)
-        if not rs:
+        stats = {}
+        detections = []
+        quarantine = {}
+        if rs:
+            stats = rs.get_stats()
+            detections = rs.get_detections()
+            quarantine = rs.get_quarantine() if hasattr(rs, "get_quarantine") else {}
+        else:
+            # Frontend → SYSTEM motor IPC
+            try:
+                from client_daemon_ipc import ransomware_status
+                resp = ransomware_status(timeout=8.0)
+                if resp.get("ok"):
+                    stats = resp.get("stats") or {}
+                    detections = resp.get("detections") or []
+                    quarantine = resp.get("quarantine") or {}
+            except Exception:
+                pass
+
+        if not stats and not rs:
             ctk.CTkLabel(content, text=self.t("detail_no_data"),
                          text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
             return
 
-        stats = rs.get_stats()
         running = stats.get("running", False)
         canary_alerts = stats.get("canary_alerts", 0)
         fs_alerts = stats.get("fs_alerts", 0)
@@ -3752,6 +3770,15 @@ class ModernGUI:
         vss_alerts = stats.get("vss_alerts", 0)
         total_alerts = stats.get("alerts_total", 0)
         canary_files = stats.get("canary_files", 0)
+        q_active = bool(
+            quarantine.get("active")
+            or stats.get("quarantine_active")
+        )
+        q_entries = int(
+            len(quarantine.get("entries") or [])
+            or stats.get("quarantine_entries")
+            or 0
+        )
 
         status_text = "🟢 ACTIVE" if running else "🔴 OFF"
         status_color = COLORS["green"] if running else COLORS["red"]
@@ -3761,6 +3788,24 @@ class ModernGUI:
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=status_color,
         ).pack(anchor="w", padx=8, pady=(0, 4))
+
+        if q_active:
+            ctk.CTkLabel(
+                content,
+                text=self.t("detail_rs_quarantine_active").format(count=q_entries),
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=COLORS["red"],
+            ).pack(anchor="w", padx=8, pady=(0, 4))
+            ctk.CTkButton(
+                content,
+                text=self.t("detail_rs_unlock"),
+                width=220,
+                height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLORS["orange"],
+                hover_color=COLORS.get("orange_hover") or COLORS["orange"],
+                command=lambda: self._unlock_rs_quarantine(popup),
+            ).pack(anchor="w", padx=8, pady=(0, 8))
 
         # Özet istatistikler
         summary_items = [
@@ -3781,7 +3826,6 @@ class ModernGUI:
                          text_color=color).pack(anchor="w", padx=8, pady=1)
 
         # Tespit edilen olaylar — detay tablosu
-        detections = rs.get_detections()
         if detections:
             ctk.CTkLabel(
                 content,
@@ -3792,7 +3836,6 @@ class ModernGUI:
 
             for det in detections[-20:]:  # Son 20 tespit
                 det_type = det.get("type", "unknown")
-                ts = det.get("timestamp", "—")
                 score = det.get("threat_score", 0)
                 score_color = COLORS["red"] if score >= 80 else (
                     COLORS["orange"] if score >= 50 else COLORS["text_dim"])
@@ -3811,6 +3854,8 @@ class ModernGUI:
                     text = f"⚙️ PROCESS: {pname} (PID {pid}) — {reason}"
                 elif det_type == "vss_deletion":
                     text = f"💾 VSS: {det.get('details', 'Shadow copy deletion detected')}"
+                elif det_type == "quarantine_lock":
+                    text = f"🔒 QUARANTINE: {det.get('trigger', 'lock')}"
                 else:
                     text = f"📂 {det_type}: {det.get('details', str(det))}"
 
@@ -3842,6 +3887,36 @@ class ModernGUI:
                 font=ctk.CTkFont(size=13),
                 text_color=COLORS["green"],
             ).pack(anchor="w", padx=8, pady=(8, 4))
+
+    def _unlock_rs_quarantine(self, popup=None):
+        """GUI / IPC: lift ransomware IFEO quarantine."""
+        ok = False
+        msg = ""
+        rs = getattr(self.app, "ransomware_shield", None)
+        try:
+            if rs and hasattr(rs, "unlock_quarantine"):
+                out = rs.unlock_quarantine(reason="gui")
+                ok = bool(out.get("ok"))
+                msg = str(out)
+            else:
+                from client_daemon_ipc import ransomware_unlock
+                resp = ransomware_unlock(timeout=20.0)
+                ok = bool(resp.get("ok"))
+                msg = resp.get("error") or str(resp)
+        except Exception as e:
+            msg = str(e)
+        try:
+            self.show_toast(
+                self.t("detail_rs_unlock_ok") if ok else self.t("detail_rs_unlock_fail"),
+                msg[:180] if msg else "",
+            )
+        except Exception:
+            pass
+        try:
+            if popup is not None and hasattr(popup, "destroy"):
+                popup.destroy()
+        except Exception:
+            pass
 
     # ── Detail: CPU / RAM ── #
     def _detail_cpu_ram(self):

@@ -1,3 +1,15 @@
+# v4.5.48
+
+## Remote Desktop prepare path
+- `list_local_users`, `list_sessions.can_capture`, `remote_session_prepare` (auth + tscon/WTSConnect + JPEG probe).
+- `remote_session_logoff` alias; one-shot password never logged / not stored in history.
+- Docs: `docs/api/05-remote-desktop.md` flow (user → prepare → stream).
+
+### Note (RDP honeypot passwords)
+Cleartext RDP password capture remains a separate CredSSP/NTLM project — not in this release.
+
+---
+
 # v4.5.47
 
 ## Cleanup

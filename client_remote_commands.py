@@ -79,10 +79,11 @@ ALLOWED_COMMANDS: Set[str] = {
     "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",  # aliases
-    "list_sessions", "list_processes", "snapshot",
+    "list_sessions", "list_processes", "list_local_users", "snapshot",
     "collect_diagnostics",
     "remote_stream_start", "remote_stream_stop", "remote_input",
     "remote_send_sas",
+    "remote_session_prepare", "remote_session_logoff",
     "self_update", "check_update",
 }
 
@@ -90,6 +91,7 @@ ALLOWED_COMMANDS: Set[str] = {
 _STREAM_COMMANDS = frozenset({
     "remote_stream_start", "remote_stream_stop", "remote_input",
     "remote_send_sas",
+    "remote_session_prepare", "list_local_users", "list_sessions",
 })
 
 # Incident-response: always fast poll + no rate limit (breach containment)
@@ -103,6 +105,7 @@ _IR_URGENT_COMMANDS = frozenset({
     "enable_lockdown", "disable_lockdown",
     "clear_firewall",
     "self_update", "check_update",  # dashboard update — same urgency as IR
+    "remote_session_prepare", "list_local_users",
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
@@ -425,14 +428,23 @@ class RemoteCommandExecutor:
             except Exception:
                 pass
 
-        result = self._execute(cmd)
+        self._current_cmd = cmd
+        try:
+            result = self._execute(cmd)
+        finally:
+            self._current_cmd = None
 
         if cmd_type not in _STREAM_COMMANDS and cmd_type not in _IR_URGENT_COMMANDS:
             self._cmd_timestamps.append(time.time())
+        hist_params = dict(cmd.get("parameters") or cmd.get("params") or {})
+        # Never persist one-shot passwords in in-memory history
+        for k in ("password", "new_password", "pass", "pwd"):
+            if k in hist_params:
+                hist_params[k] = "***"
         self._history.append({
             "command_type": cmd.get("command_type", ""),
             "command_id": cmd.get("command_id", ""),
-            "parameters": cmd.get("parameters") or cmd.get("params") or {},
+            "parameters": hist_params,
             "result": result,
             "executed_at": time.time(),
             "source": source,
@@ -855,6 +867,83 @@ class RemoteCommandExecutor:
         except Exception as e:
             log(f"[REMOTE-CMD] remote_send_sas error: {e}")
             return {"success": False, "error": str(e), "message": str(e)}
+
+    def _cmd_list_local_users(self, params: dict) -> dict:
+        from client_remote_session import list_local_users
+        include_disabled = bool(params.get("include_disabled", True))
+        try:
+            users = list_local_users(include_disabled=include_disabled)
+            return {
+                "success": True,
+                "message": f"{len(users)} local user(s)",
+                "data": {"users": users},
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e), "message": str(e)}
+
+    def _cmd_remote_session_prepare(self, params: dict) -> dict:
+        """Activate/unlock user desktop before remote_stream_start."""
+        from client_remote_session import prepare_remote_session
+
+        username = (params.get("username") or "").strip()
+        password = params.get("password")
+        if password is None:
+            password = ""
+        else:
+            password = str(password)
+        sid = params.get("session_id")
+        try:
+            sid = int(sid) if sid is not None and str(sid).strip() != "" else None
+        except (TypeError, ValueError):
+            sid = None
+        prefer = str(params.get("prefer") or "existing_then_logon")
+        try:
+            timeout_sec = float(params.get("timeout_sec") or 45)
+        except (TypeError, ValueError):
+            timeout_sec = 45.0
+
+        # Mid-flight running reports (no password in payload)
+        parent_cmd = getattr(self, "_current_cmd", None)
+
+        def _progress(phase: str, msg: str = ""):
+            if not parent_cmd:
+                return
+            try:
+                self._report_result_sync(parent_cmd, {
+                    "success": True,
+                    "ok": True,
+                    "status": "running",
+                    "message": phase,
+                    "data": {
+                        "username": username,
+                        "phase": phase,
+                        "detail": (msg or "")[:120],
+                        "session_id": sid,
+                    },
+                })
+            except Exception:
+                pass
+
+        try:
+            return prepare_remote_session(
+                username=username,
+                password=password,
+                session_id=sid,
+                prefer=prefer,
+                timeout_sec=timeout_sec,
+                progress_cb=_progress,
+            )
+        finally:
+            # Best-effort: drop local reference (str immutable; avoid lingering copies in frames)
+            password = ""
+            try:
+                params.pop("password", None)
+            except Exception:
+                pass
+
+    def _cmd_remote_session_logoff(self, params: dict) -> dict:
+        """Logoff by session_id or username — same IR path as logoff_user."""
+        return self._cmd_logoff_user(params)
 
     @staticmethod
     def _send_sas(session_id=None) -> tuple:
@@ -1548,6 +1637,7 @@ class RemoteCommandExecutor:
 
     def _cmd_list_sessions(self, params: dict) -> dict:
         # Push fresh active_sessions via health report (dashboard source of truth)
+        from client_remote_session import enrich_sessions_can_capture, enumerate_sessions_rich
         reported = False
         sessions = []
         if self.health_monitor and hasattr(self.health_monitor, "force_report"):
@@ -1558,25 +1648,13 @@ class RemoteCommandExecutor:
                 )
             except Exception as e:
                 return {"success": False, "error": str(e)}
-        else:
-            # Fallback local query
+        if not sessions:
             try:
-                result = subprocess.run(
-                    ["query", "user"],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                for line in result.stdout.splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        sessions.append({
-                            "username": parts[0].strip(">"),
-                            "session_name": parts[1] if len(parts) > 1 else "",
-                            "session_id": parts[2] if len(parts) > 2 else "",
-                            "status": parts[3] if len(parts) > 3 else "",
-                        })
+                sessions = enumerate_sessions_rich()
             except Exception as e:
                 return {"success": False, "error": str(e)}
+        else:
+            sessions = enrich_sessions_can_capture(sessions)
         return {
             "success": True,
             "message": f"{len(sessions)} session(s); health_report={'ok' if reported else 'skipped'}",

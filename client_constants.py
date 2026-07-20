@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.47"  # Dead code/file cleanup: archive, release_notes, unused methods
+VERSION = "4.5.48"  # remote_session_prepare + list_local_users; can_capture
 
 
 CLIENT_VERSION = VERSION  # Main version constant

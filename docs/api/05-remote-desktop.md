@@ -1,7 +1,46 @@
 # Remote Desktop
 
 > Cloud / Dashboard API sözleşmeleri — agent prompt’larından birleştirildi.
-> API: `https://honeypot.yesnext.com.tr`
+> API: `https://honeypot.yesnext.com.tr`  
+> Client: **≥ 4.5.48** (`list_local_users` / `remote_session_prepare`)
+
+---
+
+## Akış: kullanıcı seç → prepare → yayın
+
+```
+list_local_users  →  list_sessions (can_capture)
+        ↓
+remote_session_prepare { username, password?, session_id?, timeout_sec }
+        ↓ ready_for_stream + session_id
+remote_stream_start { session_id, username, … }
+        ↓
+remote_stream_stop  /  remote_session_logoff
+```
+
+### `list_local_users`
+`params`: `{ "include_disabled": true }`  
+`data.users[]`: username, sid, enabled, is_admin, last_logon, has_session, session_id, session_status — **şifre yok**.
+
+### `list_sessions`
+Her oturumda `can_capture: true` yalnızca **Active** + interactive (`session_id > 0`).
+
+### `remote_session_prepare`
+Dashboard “Bağlan” — one-shot `password` (RAM only, loglanmaz).
+
+| Durum | Davranış |
+|--------|----------|
+| Active + desktop | `ready_for_stream: true` |
+| Disconnected | `WTSConnectSession` / `tscon` → Active + JPEG probe |
+| Oturum yok | `UNSUPPORTED` (Session 0’dan fresh logon yok; bir kez RDP/console gerekir) |
+| Yanlış şifre | `AUTH_FAILED` / `ACCOUNT_LOCKED` / `ACCOUNT_DISABLED` |
+
+Başarı: `data.ready_for_stream`, `session_id`, `screen.w/h`, `method`.  
+Sonra cloud **aynı `session_id`** ile `remote_stream_start` gönderir.
+
+### Güvenlik
+- Password disk/config/autologon’a yazılmaz; history’de `***`.
+- Session 0’dan sahte siyah JPEG yok — probe fail → `NO_INTERACTIVE_DESKTOP` / `CAPTURE_NO_DESKTOP`.
 
 ---
 

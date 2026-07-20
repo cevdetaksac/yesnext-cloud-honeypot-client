@@ -427,6 +427,11 @@ class SystemHealthMonitor:
                     "duration_sec": duration_sec,
                     "idle_sec": idle_sec,
                     "client_name": "",
+                    "can_capture": (
+                        session_id > 0
+                        and status == "Active"
+                        and protocol not in ("Services",)
+                    ),
                 })
         except Exception as e:
             log(f"[HEALTH] query user failed: {e}")

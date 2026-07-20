@@ -1,3 +1,13 @@
+# v4.5.55
+
+## Remote Desktop: frame ACK input piggyback (AGENT_REMOTE_INPUT_HOTFIX)
+- Cloud drains `inputs[]` on every `POST /api/remote/frame` / `frame-json` response — agent was ignoring them → dead mouse while video worked.
+- `upload_remote_frame` returns `{ok, inputs}`; each frame HTTP post applies the batch.
+- HTTP frame upload every capture (alongside WS) so the queue does not stall.
+- `GET /api/remote/inputs` kept as backup (also while WS is up).
+
+---
+
 # v4.5.54
 
 ## Fix: helper script never ran (Unicode broke PowerShell 5.1)

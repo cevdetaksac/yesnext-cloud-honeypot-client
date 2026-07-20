@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.54"  # Fix update-and-install.ps1 ASCII (PS 5.1 em-dash parse break)
+VERSION = "4.5.55"  # RD frame ACK inputs[] piggyback (remote mouse/keyboard)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

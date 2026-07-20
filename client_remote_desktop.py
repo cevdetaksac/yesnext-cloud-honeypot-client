@@ -9,8 +9,8 @@ Primary:
   wss://…/ws/remote/agent  + Authorization: Bearer …  → binary JPEG + JSON meta/input
   (legacy: ?token= only if api.legacy_token_query=true)
 Fallback:
-  POST /api/remote/frame (+ frame-json)
-  GET  /api/remote/inputs (200–500 ms) when WS down
+  POST /api/remote/frame (+ frame-json) — ACK may include inputs[] (primary input path)
+  GET  /api/remote/inputs (200–500 ms) backup when queue not drained via frame ACK
 
 Commands:
   remote_stream_start / remote_stream_stop / remote_input
@@ -128,6 +128,7 @@ class RemoteDesktopStreamer:
             "frames_failed": 0,
             "bytes_sent": 0,
             "inputs_applied": 0,
+            "inputs_piggyback": 0,
             "inputs_rate_limited": 0,
             "ws_reconnects": 0,
             "http_fallbacks": 0,
@@ -595,11 +596,7 @@ class RemoteDesktopStreamer:
         if ws_live:
             self._transport = "websocket"
 
-        need_http = (
-            not ws_live
-            or seq <= 12
-            or (seq % HTTP_KEYFRAME_EVERY) == 0
-        )
+        need_http = True  # every frame: cloud drains input queue on frame ACK
         http_ok = False
         if need_http:
             http_ok = self._http_send_frame(token, jpeg, w, h, seq)
@@ -623,14 +620,47 @@ class RemoteDesktopStreamer:
     def _http_send_frame(self, token: str, jpeg: bytes, w: int, h: int, seq: int) -> bool:
         if not self.api_client or not hasattr(self.api_client, "upload_remote_frame"):
             return False
-        return bool(self.api_client.upload_remote_frame(
+        result = self.api_client.upload_remote_frame(
             token=token,
             jpeg_bytes=jpeg,
             width=w,
             height=h,
             seq=seq,
             fps=self._fps,
-        ))
+        )
+        # Backward compatible: older callers returned bool
+        if isinstance(result, dict):
+            ok = bool(result.get("ok"))
+            self._apply_input_batch(result.get("inputs") or [])
+            return ok
+        return bool(result)
+
+    def _apply_input_batch(self, events) -> None:
+        """Apply piggybacked / polled remote input events (frame ACK primary path)."""
+        if not events:
+            return
+        applied = 0
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            params = dict(ev)
+            # Normalize alternate shapes from cloud
+            if not params.get("event"):
+                params["event"] = (
+                    params.get("type")
+                    or params.get("name")
+                    or params.get("action")
+                    or ""
+                )
+            # mousedown+mouseup already form a click — never invent an extra click here
+            try:
+                r = self.apply_input(params)
+                if isinstance(r, dict) and r.get("success"):
+                    applied += 1
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] piggyback input error: {e}")
+        if applied:
+            self._stats["inputs_piggyback"] = int(self._stats.get("inputs_piggyback") or 0) + applied
 
     def _grab_jpeg(self):
         """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
@@ -1435,18 +1465,17 @@ class RemoteDesktopStreamer:
             if "event" in params or "text" in params or "key" in params:
                 self.apply_input(params)
 
-    # ── HTTP input poll (only when WS down) ───────────────────────
+    # ── HTTP input poll (backup alongside frame ACK / WS) ─────────
 
     def _http_input_poll_loop(self):
+        """Backup drain via GET /api/remote/inputs (primary = frame ACK inputs[])."""
         while self._running and not self._stop.is_set():
             try:
-                if not self._ws_ok:
-                    token = self.token_getter()
-                    if token and self.api_client and hasattr(self.api_client, "fetch_remote_inputs"):
-                        events = self.api_client.fetch_remote_inputs(token, limit=80) or []
-                        for ev in events:
-                            if isinstance(ev, dict):
-                                self.apply_input(ev)
+                token = self.token_getter()
+                if token and self.api_client and hasattr(self.api_client, "fetch_remote_inputs"):
+                    events = self.api_client.fetch_remote_inputs(token, limit=80) or []
+                    if events:
+                        self._apply_input_batch(events)
             except Exception as e:
                 log(f"[REMOTE-DESKTOP] HTTP input poll error: {e}")
             self._stop.wait(HTTP_INPUT_POLL_SEC)

@@ -730,9 +730,15 @@ class HoneypotAPIClient:
 
     def upload_remote_frame(self, token: str, jpeg_bytes: bytes,
                             width: int, height: int, seq: int,
-                            fps: float = 2.0) -> bool:
-        """POST /api/remote/frame (multipart) — fallback frame-json base64."""
+                            fps: float = 2.0) -> dict:
+        """POST /api/remote/frame (multipart) — fallback frame-json base64.
+
+        Returns ``{"ok": bool, "inputs": list}``. Cloud may piggyback drained
+        remote-input events on the ACK (AGENT_REMOTE_INPUT_HOTFIX).
+        """
         import base64
+
+        empty = {"ok": False, "inputs": []}
         try:
             url = f"{self.base_url}/remote/frame"
             req_params, _, headers = self._prepare_request(None, None, token)
@@ -759,7 +765,7 @@ class HoneypotAPIClient:
                 verify=resolve_tls_verify(),
             )
             if 200 <= r.status_code < 300:
-                return True
+                return {"ok": True, "inputs": self._extract_remote_inputs(r)}
 
             b64 = base64.b64encode(jpeg_bytes).decode("ascii")
             alt = self.api_request(
@@ -776,13 +782,51 @@ class HoneypotAPIClient:
                 verbose_logging=False,
                 token=token,
             )
-            return alt is not None
+            if alt is None:
+                return empty
+            inputs = []
+            if isinstance(alt, dict):
+                inputs = self._inputs_from_payload(alt)
+            elif isinstance(alt, list):
+                inputs = alt
+            return {"ok": True, "inputs": inputs}
         except Exception as e:
             self.log(f"[API] remote frame upload error: {e}")
-            return False
+            return empty
+
+    @staticmethod
+    def _inputs_from_payload(payload) -> list:
+        if not isinstance(payload, dict):
+            return []
+        for key in ("inputs", "events", "items"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return val
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("inputs", "events", "items"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return val
+        if isinstance(data, list):
+            return data
+        return []
+
+    def _extract_remote_inputs(self, response) -> list:
+        """Parse inputs[] from multipart/frame-json HTTP response body."""
+        try:
+            ctype = (response.headers.get("Content-Type") or "").lower()
+            if "json" in ctype or (response.text or "").lstrip().startswith(("{", "[")):
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                return self._inputs_from_payload(data if isinstance(data, dict) else {})
+        except Exception:
+            pass
+        return []
 
     def fetch_remote_inputs(self, token: str, limit: int = 80) -> list:
-        """GET /api/remote/inputs — HTTP fallback input queue when WebSocket is down."""
+        """GET /api/remote/inputs — backup queue (primary = frame ACK inputs[])."""
         try:
             resp = self.api_request(
                 "GET", "remote/inputs",
@@ -794,10 +838,7 @@ class HoneypotAPIClient:
             if isinstance(resp, list):
                 return resp
             if isinstance(resp, dict):
-                for key in ("inputs", "events", "items", "data"):
-                    val = resp.get(key)
-                    if isinstance(val, list):
-                        return val
+                return self._inputs_from_payload(resp)
             return []
         except Exception as e:
             self.log(f"[API] remote inputs poll error: {e}")

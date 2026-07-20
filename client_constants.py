@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.55"  # RD frame ACK inputs[] piggyback (remote mouse/keyboard)
+VERSION = "4.5.56"  # Immortal self-update: ASCII parse-gate + emergency bootstrap
 
 
 CLIENT_VERSION = VERSION  # Main version constant

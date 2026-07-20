@@ -1578,6 +1578,35 @@ def heal_update_machinery(log_func=None) -> None:
                     _log("[UPDATE] Cleared stale update lock")
                 except OSError:
                     pass
+            # Launcher-only storm: PS helper parse-dead — clear lock so next tick can retry
+            try:
+                from client_update_hardening import detect_launcher_only_storm
+                log_path = os.path.join(
+                    os.environ.get("ProgramData", r"C:\ProgramData"),
+                    "YesNext", "CloudHoneypotClient", "update-install.log",
+                )
+                if detect_launcher_only_storm(log_path) and phase.startswith("install"):
+                    try:
+                        os.remove(path)
+                        _log("[UPDATE] Cleared lock after launcher-only storm (helper parse fail)")
+                    except OSError:
+                        pass
+                    try:
+                        from client_update_ui import set_update_ui_status
+                        set_update_ui_status(
+                            "failed",
+                            detail="helper_parse_fail_storm",
+                            error="helper_parse_fail_storm",
+                        )
+                    except Exception:
+                        pass
+                    # Force re-stage good/emergency helper for next attempt
+                    try:
+                        stage_update_install_helper(allow_emergency=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -1799,58 +1828,73 @@ def _update_helper_staging_dir() -> str:
     return base
 
 
-def stage_update_install_helper() -> Optional[str]:
-    """Copy update-and-install.ps1 to ProgramData so INSTDIR overwrite cannot break it.
+def stage_update_install_helper(*, allow_emergency: bool = True) -> Optional[str]:
+    """Stage update-and-install.ps1 under ProgramData (ASCII + parse-validated).
 
-    Windows PowerShell 5.1 mis-parses UTF-8 scripts that contain em-dashes (U+2014)
-    when saved without BOM — the try/catch block then fails to parse and the helper
-    never runs (launcher start only). Always stage ASCII-normalized text.
+    Windows PowerShell 5.1 mis-parses UTF-8-without-BOM scripts that contain
+    em-dashes (U+2014) — launcher logs start then the helper never runs.
+    Never copy2 raw Unicode. On failure, fall back to the embedded emergency
+    ASCII bootstrap so self-update remains possible on Win10/11/Server 2012+.
     """
-    import shutil
+    from client_update_hardening import (
+        normalize_ps1_to_ascii,
+        resolve_helper_source_candidates,
+        validate_powershell_parse,
+        write_ascii_ps1,
+        write_emergency_bootstrap,
+    )
 
-    src_candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "update-and-install.ps1"),
-    ]
-    if getattr(sys, "frozen", False):
-        src_candidates.insert(
-            0,
-            os.path.join(os.path.dirname(sys.executable), "scripts", "update-and-install.ps1"),
-        )
+    dst = os.path.join(_update_helper_staging_dir(), "update-and-install.ps1")
+    src = next((p for p in resolve_helper_source_candidates() if os.path.isfile(p)), None)
+
+    def _try_stage_text(raw: str, tag: str) -> Optional[str]:
+        ascii_body = normalize_ps1_to_ascii(raw)
+        if not write_ascii_ps1(dst, ascii_body):
+            return None
+        ok, detail = validate_powershell_parse(dst)
+        if ok:
+            return dst
         try:
-            mei = getattr(sys, "_MEIPASS", "") or ""
-            if mei:
-                src_candidates.insert(0, os.path.join(mei, "scripts", "update-and-install.ps1"))
+            log_path = os.path.join(
+                os.environ.get("ProgramData", r"C:\ProgramData"),
+                "YesNext", "CloudHoneypotClient", "update-install.log",
+            )
+            with open(log_path, "a", encoding="ascii", errors="replace") as fh:
+                fh.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"helper_stage_parse_fail tag={tag} detail={detail[:200]}\n"
+                )
         except Exception:
             pass
-
-    src = next((p for p in src_candidates if os.path.isfile(p)), None)
-    if not src:
         return None
-    dst = os.path.join(_update_helper_staging_dir(), "update-and-install.ps1")
-    try:
-        raw = open(src, "r", encoding="utf-8", errors="replace").read()
-        # Normalize typographic dashes/quotes that break PS 5.1 UTF-8 parsing
-        for bad, good in (
-            ("\u2014", "-"),
-            ("\u2013", "-"),
-            ("\u2018", "'"),
-            ("\u2019", "'"),
-            ("\u201c", '"'),
-            ("\u201d", '"'),
-            ("\u2026", "..."),
-            ("\u00a0", " "),
-        ):
-            raw = raw.replace(bad, good)
-        raw = raw.encode("ascii", errors="replace").decode("ascii")
-        with open(dst, "w", encoding="ascii", newline="\n") as fh:
-            fh.write(raw)
-        return dst if os.path.isfile(dst) else None
-    except OSError:
+
+    if src:
         try:
-            shutil.copy2(src, dst)
-            return dst
+            with open(src, "r", encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+            staged = _try_stage_text(raw, tag=os.path.basename(src))
+            if staged:
+                return staged
         except OSError:
-            return src if os.path.isfile(src) else None
+            pass
+
+    if allow_emergency:
+        emergency = write_emergency_bootstrap(dst)
+        if emergency:
+            try:
+                log_path = os.path.join(
+                    os.environ.get("ProgramData", r"C:\ProgramData"),
+                    "YesNext", "CloudHoneypotClient", "update-install.log",
+                )
+                with open(log_path, "a", encoding="ascii", errors="replace") as fh:
+                    fh.write(
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        "helper_stage_emergency_bootstrap=1\n"
+                    )
+            except Exception:
+                pass
+            return emergency
+    return None
 
 
 def _shell_execute_runas(file_path: str, params: str = "", *, show_cmd: int = 0) -> int:
@@ -1893,11 +1937,11 @@ def launch_safe_update_install(
     if not installer_path or not os.path.isfile(installer_path):
         return False
 
-    helper = stage_update_install_helper()
+    # Always re-stage helper from package so older ProgramData copies are refreshed
+    helper = stage_update_install_helper(allow_emergency=True)
     if not helper:
         return False
 
-    # Always re-stage helper from package so older ProgramData copies are refreshed
     pid = int(expect_exit_pid if expect_exit_pid is not None else os.getpid())
     already_admin = False
     try:
@@ -1920,6 +1964,26 @@ def launch_safe_update_install(
     stable = stage_installer_for_update(installer_path, version=ver_hint or "latest")
     if stable:
         installer_path = stable
+
+    try:
+        from client_update_hardening import preflight_update_ready
+        ok_pf, pf_detail = preflight_update_ready(installer_path)
+        if not ok_pf:
+            try:
+                log_path = os.path.join(
+                    os.environ.get("ProgramData", r"C:\ProgramData"),
+                    "YesNext", "CloudHoneypotClient", "update-install.log",
+                )
+                with open(log_path, "a", encoding="ascii", errors="replace") as fh:
+                    fh.write(
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"preflight_fail detail={pf_detail}\n"
+                    )
+            except Exception:
+                pass
+            return False
+    except Exception:
+        pass
 
     acquire_update_lock("installing")
     # Stop respawn tasks only. Do NOT QUIT this process here — that raced with
@@ -2157,6 +2221,102 @@ def launch_safe_update_install(
             )
             if _wait_helper_log(10.0):
                 return True
+        except Exception:
+            pass
+
+        # --- Method 5: emergency bootstrap rewrite + WMI/schtasks retry ---
+        # Covers: full helper still broken on disk, parse gate race, AV quarantine.
+        try:
+            from client_update_hardening import write_emergency_bootstrap
+            emergency = write_emergency_bootstrap(helper)
+            if emergency:
+                helper_q = emergency.replace("'", "''")
+                with open(launcher, "w", encoding="ascii", newline="\n") as fh:
+                    fh.write(
+                        "$ErrorActionPreference = 'Continue'\n"
+                        "$logDir = Join-Path $env:ProgramData 'YesNext\\CloudHoneypotClient'\n"
+                        "try {\n"
+                        "  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }\n"
+                        f"  Add-Content -Path (Join-Path $logDir 'update-install.log') "
+                        f"-Value ('[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] launcher start {launch_token}-emg pid=' + $PID) -Encoding ASCII\n"
+                        "} catch {}\n"
+                        f"& '{helper_q}' -InstallerPath '{installer_q}' "
+                        f"-ExpectExitPid {pid} -GraceWaitSec {grace} -KillRounds 4 {flag_str}\n"
+                        "exit $LASTEXITCODE\n"
+                    )
+                # Prefer schtasks SYSTEM one-shot for Session-0 immortality
+                task = f"CloudHoneypot-UpdateEmg-{pid}"
+                subprocess.run(
+                    [
+                        "schtasks", "/Create", "/TN", task, "/TR", ps_cmd,
+                        "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM",
+                        "/RL", "HIGHEST", "/F",
+                    ],
+                    capture_output=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                run = subprocess.run(
+                    ["schtasks", "/Run", "/TN", task],
+                    capture_output=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                helper_seen = bool(run.returncode == 0 and _wait_helper_log(15.0))
+                try:
+                    subprocess.run(
+                        ["schtasks", "/Delete", "/TN", task, "/F"],
+                        capture_output=True,
+                        timeout=10,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    pass
+                if helper_seen:
+                    return True
+        except Exception:
+            pass
+
+        # --- Method 6: last-resort direct emergency bootstrap via schtasks ---
+        try:
+            from client_update_hardening import write_emergency_bootstrap
+            task = f"CloudHoneypot-NsisOnce-{pid}"
+            nsis_launcher = os.path.join(staging, f"run-nsis-{pid}.ps1")
+            if write_emergency_bootstrap(nsis_launcher):
+                nsis_cmd = (
+                    f'powershell.exe -NoProfile -ExecutionPolicy Bypass '
+                    f'-WindowStyle Hidden -File "{nsis_launcher}" '
+                    f'-InstallerPath "{installer_path}" -ExpectExitPid {pid} '
+                    f'-GraceWaitSec {grace} -KillRounds 4 -Silent'
+                )
+                subprocess.run(
+                    [
+                        "schtasks", "/Create", "/TN", task, "/TR", nsis_cmd,
+                        "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM",
+                        "/RL", "HIGHEST", "/F",
+                    ],
+                    capture_output=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                run = subprocess.run(
+                    ["schtasks", "/Run", "/TN", task],
+                    capture_output=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                helper_seen = bool(run.returncode == 0 and _wait_helper_log(18.0))
+                try:
+                    subprocess.run(
+                        ["schtasks", "/Delete", "/TN", task, "/F"],
+                        capture_output=True,
+                        timeout=10,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    pass
+                if helper_seen:
+                    return True
         except Exception:
             pass
 

@@ -1,3 +1,15 @@
+# v4.5.56
+
+## Immortal self-update (Win10/11/Server 2012+)
+- Stage helper as CRLF 7-bit ASCII + PowerShell `Parser` gate before launch (em-dash / UTF-8-no-BOM never ships again).
+- Never `copy2` raw Unicode scripts; on stage/parse failure write embedded **emergency ASCII bootstrap**.
+- Launch ladder: WMI → cmd start → schtasks → breakaway → emergency rewrite → last-resort schtasks bootstrap.
+- Preflight: installer size + free disk on ProgramData/ProgramFiles.
+- Silent update **refuses to exit** without `update-and-install start` (same as dashboard).
+- Heal: detect launcher-only storms and clear stuck lock / re-stage helper.
+
+---
+
 # v4.5.55
 
 ## Remote Desktop: frame ACK input piggyback (AGENT_REMOTE_INPUT_HOTFIX)

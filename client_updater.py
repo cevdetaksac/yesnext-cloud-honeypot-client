@@ -592,7 +592,21 @@ def check_updates_and_apply_silent() -> bool:
                         except Exception:
                             pass
             if not helper_alive:
-                log("[SILENT UPDATE] WARNING: helper log not seen yet — exiting anyway (helper may still run)")
+                log("[SILENT UPDATE] helper log missing after retries — aborting (will not exit into fake install)")
+                try:
+                    release_update_lock(resume_updaters=True)
+                except Exception:
+                    pass
+                try:
+                    from client_update_ui import set_update_ui_status
+                    set_update_ui_status(
+                        "failed",
+                        detail="helper_log_missing",
+                        error="helper_log_missing",
+                    )
+                except Exception:
+                    pass
+                return False
 
             log("[SILENT UPDATE] Helper launched — exiting so install can overwrite EXE safely")
             # Keep update lock; helper clears it after install. Do NOT resume tasks yet.

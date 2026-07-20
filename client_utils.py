@@ -1966,55 +1966,123 @@ def launch_safe_update_install(
                     return False
             return True
 
-        # Already admin / silent SYSTEM path — spawn helper that survives our exit.
-        # Prefer CREATE_BREAKAWAY_FROM_JOB + DETACHED powershell first.
-        # Previous path: schtasks /Run then immediate /Delete often cancelled the
-        # one-shot before powershell started → "helper log not seen" + lock stuck.
-        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-        det_flags = (
-            subprocess.CREATE_NO_WINDOW
-            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-            | CREATE_BREAKAWAY_FROM_JOB
+        # Already admin / silent SYSTEM path — helper MUST survive our exit AND
+        # must write update-install.log BEFORE we return True.
+        # Bug (4.5.49–51): Popen looked alive for 0.4s → return True → parent
+        # exited → child died in job object → no install log → stuck "installing".
+        log_path = os.path.join(
+            os.environ.get("ProgramData", r"C:\ProgramData"),
+            "YesNext", "CloudHoneypotClient", "update-install.log",
         )
         try:
-            proc = subprocess.Popen(
-                [
-                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-WindowStyle", "Hidden", "-File", launcher,
-                ],
-                creationflags=det_flags,
-                close_fds=True,
-                cwd=staging,
-            )
-            time.sleep(0.4)
-            if proc.poll() is None:
-                return True
-            if proc.returncode in (None, 0):
-                log_path = os.path.join(
-                    os.environ.get("ProgramData", r"C:\ProgramData"),
-                    "YesNext", "CloudHoneypotClient", "update-install.log",
+            log_size0 = os.path.getsize(log_path) if os.path.isfile(log_path) else 0
+        except OSError:
+            log_size0 = 0
+        launch_token = f"launch-{pid}-{int(time.time())}"
+
+        def _fresh_helper_log() -> bool:
+            """True only if NEW bytes after spawn contain launcher/helper start."""
+            try:
+                if not os.path.isfile(log_path):
+                    return False
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    fh.seek(max(0, log_size0))
+                    new = fh.read()
+                if not new:
+                    return False
+                if launch_token in new:
+                    return True
+                if "launcher start" in new or "update-and-install start" in new:
+                    return True
+            except Exception:
+                return False
+            return False
+
+        def _wait_helper_log(timeout_sec: float = 12.0) -> bool:
+            deadline = time.time() + timeout_sec
+            while time.time() < deadline:
+                if _fresh_helper_log():
+                    return True
+                time.sleep(0.25)
+            return _fresh_helper_log()
+
+        # Launcher with unique token + Continue (not SilentlyContinue) so failures surface
+        try:
+            with open(launcher, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(
+                    "$ErrorActionPreference = 'Continue'\n"
+                    "$logDir = Join-Path $env:ProgramData 'YesNext\\CloudHoneypotClient'\n"
+                    "try {\n"
+                    "  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }\n"
+                    f"  Add-Content -Path (Join-Path $logDir 'update-install.log') "
+                    f"-Value ('[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] launcher start {launch_token} pid=' + $PID) -Encoding UTF8\n"
+                    "} catch {}\n"
+                    f"& '{helper_q}' -InstallerPath '{installer_q}' "
+                    f"-ExpectExitPid {pid} -GraceWaitSec {grace} -KillRounds 4 {flag_str}\n"
+                    "exit $LASTEXITCODE\n"
                 )
+        except OSError:
+            try:
+                release_update_lock(resume_updaters=True)
+            except Exception:
+                pass
+            return False
+
+        ps_cmd = (
+            f'powershell.exe -NoProfile -ExecutionPolicy Bypass '
+            f'-WindowStyle Hidden -File "{launcher}"'
+        )
+
+        # --- Method 1: WMI Win32_Process.Create (escapes scheduled-task job objects) ---
+        try:
+            import pythoncom
+            import win32com.client
+
+            pythoncom.CoInitialize()
+            try:
+                locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+                svc = locator.ConnectServer(".", "root\\cimv2")
+                process = svc.Get("Win32_Process")
+                startup = svc.Get("Win32_ProcessStartup").SpawnInstance_()
+                startup.ShowWindow = 0
+                # Dynamic Dispatch: (ReturnValue, ProcessId)
+                out = process.Create(ps_cmd, staging, startup)
+                rc_wmi = out[0] if isinstance(out, (tuple, list)) else int(out)
+                if rc_wmi == 0 and _wait_helper_log(10.0):
+                    return True
+            finally:
                 try:
-                    if os.path.isfile(log_path):
-                        with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
-                            if "update-and-install start" in fh.read()[-1200:]:
-                                return True
+                    pythoncom.CoUninitialize()
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Backup: one-shot SYSTEM task — wait for helper log before /Delete
+        # --- Method 2: cmd start /b (classic breakaway from parent job) ---
+        try:
+            subprocess.Popen(
+                [
+                    "cmd.exe", "/c", "start", "", "/b",
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-WindowStyle", "Hidden", "-File", launcher,
+                ],
+                cwd=staging,
+                close_fds=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+            )
+            if _wait_helper_log(10.0):
+                return True
+        except Exception:
+            pass
+
+        # --- Method 3: schtasks UpdateOnce — do NOT delete until fresh log ---
         try:
             task = f"CloudHoneypot-UpdateOnce-{pid}"
-            tr = (
-                f"powershell.exe -NoProfile -ExecutionPolicy Bypass "
-                f"-WindowStyle Hidden -File \"{launcher}\""
-            )
-            create = subprocess.run(
+            subprocess.run(
                 [
-                    "schtasks", "/Create", "/TN", task, "/TR", tr,
+                    "schtasks", "/Create", "/TN", task, "/TR", ps_cmd,
                     "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM",
                     "/RL", "HIGHEST", "/F",
                 ],
@@ -2028,22 +2096,7 @@ def launch_safe_update_install(
                 timeout=15,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            log_path = os.path.join(
-                os.environ.get("ProgramData", r"C:\ProgramData"),
-                "YesNext", "CloudHoneypotClient", "update-install.log",
-            )
-            helper_seen = False
-            if run.returncode == 0:
-                for _ in range(25):
-                    time.sleep(0.3)
-                    try:
-                        if os.path.isfile(log_path):
-                            with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
-                                if "update-and-install start" in fh.read()[-1200:]:
-                                    helper_seen = True
-                                    break
-                    except Exception:
-                        pass
+            helper_seen = bool(run.returncode == 0 and _wait_helper_log(12.0))
             try:
                 subprocess.run(
                     ["schtasks", "/Delete", "/TN", task, "/F"],
@@ -2053,7 +2106,30 @@ def launch_safe_update_install(
                 )
             except Exception:
                 pass
-            if helper_seen or (run.returncode == 0 and create.returncode == 0):
+            if helper_seen:
+                return True
+        except Exception:
+            pass
+
+        # --- Method 4: breakaway Popen — still require fresh log ---
+        try:
+            CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+            det_flags = (
+                subprocess.CREATE_NO_WINDOW
+                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                | CREATE_BREAKAWAY_FROM_JOB
+            )
+            subprocess.Popen(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-WindowStyle", "Hidden", "-File", launcher,
+                ],
+                creationflags=det_flags,
+                close_fds=True,
+                cwd=staging,
+            )
+            if _wait_helper_log(10.0):
                 return True
         except Exception:
             pass

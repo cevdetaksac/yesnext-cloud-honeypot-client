@@ -1262,6 +1262,7 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             except Exception:
                 pass
             _lifecycle_fail(api_client, "launch_helper_failed", from_version, tag)
+            log("[SELF-UPDATE] helper did NOT start (no update-install.log) — aborting exit")
             return {
                 "success": False,
                 "ok": False,
@@ -1271,6 +1272,40 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
                 "to_version": tag,
                 "tag": f"v{tag}" if tag else "",
             }
+
+        # Double-check log — never claim success / exit without a live helper
+        try:
+            log_path = os.path.join(
+                os.environ.get("ProgramData", r"C:\ProgramData"),
+                "YesNext", "CloudHoneypotClient", "update-install.log",
+            )
+            helper_ok = False
+            if os.path.isfile(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    tail = fh.read()[-2400:]
+                helper_ok = (
+                    "launcher start" in tail or "update-and-install start" in tail
+                )
+            if not helper_ok:
+                release_update_lock(resume_updaters=True)
+                from client_update_ui import set_update_ui_status
+                set_update_ui_status(
+                    "failed", from_version=from_version, to_version=tag,
+                    detail="helper_log_missing", error="helper_log_missing",
+                )
+                _lifecycle_fail(api_client, "helper_log_missing", from_version, tag)
+                log("[SELF-UPDATE] helper_log_missing after launch — aborting")
+                return {
+                    "success": False,
+                    "ok": False,
+                    "error": "install_failed",
+                    "detail": "helper_log_missing",
+                    "from_version": from_version,
+                    "to_version": tag,
+                    "tag": f"v{tag}" if tag else "",
+                }
+        except Exception as e:
+            log(f"[SELF-UPDATE] helper log verify error: {e}")
 
         try:
             from client_update_ui import set_update_ui_status

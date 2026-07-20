@@ -1,3 +1,13 @@
+# v4.5.52
+
+## Fix: self_update helper never started (stuck “Kurulum çalışıyor”)
+- Root cause: `launch_safe_update_install` returned True if PowerShell looked alive for 0.4s; parent exited and the child died in a job object — no `update-install.log`, banner stuck on installing.
+- Now requires a **fresh** log line (`launcher start` token / `update-and-install start`) before success.
+- Spawn order: WMI Create → `cmd start /b` → schtasks (delete only after log) → breakaway Popen.
+- `self_update` aborts with `helper_log_missing` instead of exiting into a fake install.
+
+---
+
 # v4.5.51
 
 ## Fix: stuck update banner

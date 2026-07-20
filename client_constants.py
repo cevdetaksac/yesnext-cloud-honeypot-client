@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.51"  # Dismiss stuck update banner; clear obsolete failed status
+VERSION = "4.5.52"  # Helper launch must see fresh update-install.log before success
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -3269,31 +3269,41 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _show_detail_window(self, title: str, width: int = 620, height: int = 480) -> ctk.CTkToplevel:
-        """Reusable detail popup — single themed header (no native Win32 title bar)."""
+        """Reusable detail popup — single themed header (no native Win32 title bar).
+
+        Windows note: do NOT combine overrideredirect + transient + grab_set.
+        That remaps the Toplevel off-screen / invisible while grab freezes the
+        main window (looks like a hang after card click).
+        """
+        # Close previous detail dialog if still open
+        prev = getattr(self, "_active_detail_popup", None)
+        if prev is not None:
+            try:
+                prev.destroy()
+            except Exception:
+                pass
+            self._active_detail_popup = None
+
         popup = ctk.CTkToplevel(self.root)
-        popup.geometry(f"{width}x{height}")
-        popup.configure(fg_color=COLORS["bg"])
+        self._active_detail_popup = popup
         try:
-            popup.transient(self.root)
+            popup.withdraw()
         except Exception:
             pass
+
+        # Frameless BEFORE map — avoids flash of native chrome and Win11 remap bugs
+        try:
+            popup.overrideredirect(True)
+        except Exception:
+            pass
+
+        popup.geometry(f"{width}x{height}")
+        popup.configure(fg_color=COLORS["bg"])
+        # No transient() with overrideredirect — breaks focus/visibility on Windows
         try:
             popup.attributes("-topmost", True)
         except Exception:
             pass
-
-        # Frameless: avoids native title + custom header double chrome / double ✕
-        def _frameless():
-            try:
-                popup.overrideredirect(True)
-            except Exception:
-                pass
-            try:
-                popup.grab_set()
-            except Exception:
-                pass
-
-        popup.after(10, _frameless)
 
         # Center on parent
         try:
@@ -3321,11 +3331,20 @@ class ModernGUI:
             text_color=COLORS["text_bright"],
         )
         title_lbl.pack(side="left", padx=8)
+
+        def _close_detail():
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            if getattr(self, "_active_detail_popup", None) is popup:
+                self._active_detail_popup = None
+
         ctk.CTkButton(
             hdr, text="✕", width=32, height=28,
             font=ctk.CTkFont(size=13), fg_color="transparent",
             hover_color=COLORS["red"], text_color=COLORS["text_bright"],
-            command=popup.destroy,
+            command=_close_detail,
         ).pack(side="right", padx=4)
 
         # Drag window from custom header (no OS title bar)
@@ -3347,13 +3366,33 @@ class ModernGUI:
             w.bind("<B1-Motion>", _on_drag)
 
         try:
-            popup.bind("<Escape>", lambda _e: popup.destroy())
+            popup.bind("<Escape>", lambda _e: _close_detail())
+        except Exception:
+            pass
+
+        def _on_destroy(_event=None):
+            if getattr(self, "_active_detail_popup", None) is popup:
+                self._active_detail_popup = None
+
+        try:
+            popup.bind("<Destroy>", _on_destroy)
         except Exception:
             pass
 
         content = ctk.CTkScrollableFrame(shell, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=8, pady=8)
         popup._content = content  # type: ignore[attr-defined]
+
+        def _show():
+            try:
+                popup.deiconify()
+                popup.lift()
+                popup.focus_force()
+            except Exception:
+                pass
+
+        # Show after widgets exist; never grab_set (modal freeze if map fails)
+        popup.after(1, _show)
         return popup
 
     def _add_detail_table(self, parent, headers: list, rows: list,

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.56"  # Immortal self-update: ASCII parse-gate + emergency bootstrap
+VERSION = "4.5.57"  # Fix detail popup freeze (no grab_set + overrideredirect)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

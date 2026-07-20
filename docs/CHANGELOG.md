@@ -1,3 +1,11 @@
+# v4.5.57
+
+## Fix: dashboard detail popup freezes the app
+- Root cause (v4.5.53): `overrideredirect` applied after map + `transient` + `grab_set` left the dialog invisible while the main window stayed modal-locked.
+- Frameless is set before show; no `grab_set` / no `transient`; lift + focus_force after widgets exist.
+
+---
+
 # v4.5.56
 
 ## Immortal self-update (Win10/11/Server 2012+)

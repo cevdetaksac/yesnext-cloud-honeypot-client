@@ -2213,7 +2213,11 @@ class CloudHoneypotClient:
             result = mb.askyesno("Port Çakışması", message, icon='warning')
             root.destroy()
             if result:
-                subprocess.run(['shutdown', '/r', '/t', '30', '/c', 'RDP port çakışması için yeniden başlatılıyor...'])
+                subprocess.run(
+                    ['shutdown', '/r', '/t', '30', '/c',
+                     'RDP port cakismasi icin yeniden baslatiliyor...'],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                )
         threading.Thread(target=show_warning, daemon=True).start()
 
     def _show_rdp_move_prompt(self):
@@ -3041,7 +3045,11 @@ if __name__ == "__main__":
                     if getattr(sys, 'frozen', False):
                         subprocess.Popen(
                             [exe_path, "--mode=daemon", "--silent"],
-                            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                            creationflags=(
+                                subprocess.DETACHED_PROCESS
+                                | subprocess.CREATE_NEW_PROCESS_GROUP
+                                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                            ),
                         )
                 if has_interactive_user_session():
                     launch_interactive_tray_gui()

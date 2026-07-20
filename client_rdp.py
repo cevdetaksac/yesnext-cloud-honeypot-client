@@ -148,7 +148,10 @@ class RDPManager:
             # PowerShell komutu ile port değerini oku - direkt subprocess kullan
             ps_cmd = f'powershell -Command "Get-ItemProperty -Path \'{registry_path}\' -Name PortNumber | Select-Object -ExpandProperty PortNumber"'
             
-            result = subprocess.run(ps_cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(
+                ps_cmd, shell=True, capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
             
             if result.returncode == 0 and result.stdout:
                 port = int(result.stdout.strip())
@@ -180,14 +183,20 @@ class RDPManager:
             log(f"📝 Hedef yol: {registry_path}")
             log(f"🎯 Yeni port değeri: {new_port}")
             
-            result = subprocess.run(ps_cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(
+                ps_cmd, shell=True, capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
             
             if result.returncode == 0:
                 log(f"✅ Registry başarıyla güncellendi: Port {new_port}")
                 
                 # Doğrulama - port değerini oku
                 verify_cmd = f'powershell -Command "Get-ItemProperty -Path \'{registry_path}\' -Name PortNumber | Select-Object -ExpandProperty PortNumber"'
-                verify_result = subprocess.run(verify_cmd, shell=True, capture_output=True, text=True)
+                verify_result = subprocess.run(
+                    verify_cmd, shell=True, capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                )
                 
                 if verify_result.returncode == 0 and verify_result.stdout:
                     actual_port = verify_result.stdout.strip()

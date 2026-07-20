@@ -1,3 +1,12 @@
+# v4.5.41
+
+## CMD penceresi flaşları
+- Firewall `netsh` taraması (`client_firewall.run_cmd`) artık `CREATE_NO_WINDOW` + `SW_HIDE` ile gizli çalışır.
+- Engellenen yenileme / daemon poll sırasında siyah konsol açılıp kapanmaz.
+- Birkaç diğer gizli olmayan spawn (shutdown, daemon Popen, RDP/helpers) aynı şekilde kapatıldı.
+
+---
+
 # v4.5.40
 
 ## Engellenen listesi düzeltmesi + Tümünü temizle

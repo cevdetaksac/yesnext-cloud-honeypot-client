@@ -1487,7 +1487,13 @@ class InstallerUpdateManager:
             
             if silent:
                 # Silent mode - subprocess.run ile bekle
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                )
                 success = result.returncode == 0
                 if not success:
                     self.log(f"[UPDATE] Installer hatası: {result.stderr}")

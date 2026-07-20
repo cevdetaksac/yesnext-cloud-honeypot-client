@@ -490,8 +490,11 @@ class ClientHelpers:
             # Fallback to simpler check
             try:
                 import subprocess
-                result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq honeypot-client.exe'], 
-                                      capture_output=True, text=True, shell=True)
+                result = subprocess.run(
+                    ['tasklist', '/FI', 'IMAGENAME eq honeypot-client.exe'],
+                    capture_output=True, text=True, shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                )
                 return 'honeypot-client.exe' in result.stdout
             except Exception as e:
                 log(f"Process check error: {e}")

@@ -110,6 +110,7 @@ def run_cmd(cmd: List[str], timeout: int = 20) -> Tuple[int, str, str]:
     # Run command with timeout. Returns (rc, stdout, stderr).
     # Bytes + multi-encoding decode: netsh dumps are often OEM/CP857 and
     # crash text=True (cp1254) → empty stdout → Engellenen always 0.
+    # CREATE_NO_WINDOW: GUI/daemon poll netsh often — never flash a console.
     def _dec(raw: Optional[bytes]) -> str:
         if not raw:
             return ""
@@ -120,14 +121,25 @@ def run_cmd(cmd: List[str], timeout: int = 20) -> Tuple[int, str, str]:
                 continue
         return raw.decode("utf-8", errors="replace")
 
+    kwargs: dict = {
+        "shell": False,
+        "capture_output": True,
+        "text": False,
+        "timeout": timeout if timeout and timeout > 0 else None,
+    }
+    if os.name == "nt":
+        # 0x08000000 = CREATE_NO_WINDOW (hide console for netsh/schtasks/etc.)
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        try:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+            kwargs["startupinfo"] = si
+        except Exception:
+            pass
+
     try:
-        p = subprocess.run(
-            cmd,
-            shell=False,
-            capture_output=True,
-            text=False,
-            timeout=timeout if timeout and timeout > 0 else None,
-        )
+        p = subprocess.run(cmd, **kwargs)
         return p.returncode, _dec(p.stdout), _dec(p.stderr)
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"

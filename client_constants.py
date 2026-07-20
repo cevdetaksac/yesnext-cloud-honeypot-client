@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.40"  # Fix Engellenen netsh scan (name=all + encoding); Clear all button
+VERSION = "4.5.41"  # Hide netsh/cmd console flashes (CREATE_NO_WINDOW on firewall run_cmd)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

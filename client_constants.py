@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.52"  # Helper launch must see fresh update-install.log before success
+VERSION = "4.5.53"  # Frameless detail popups (no double title/close); helper-log updater
 
 
 CLIENT_VERSION = VERSION  # Main version constant

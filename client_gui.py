@@ -3269,24 +3269,58 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _show_detail_window(self, title: str, width: int = 620, height: int = 480) -> ctk.CTkToplevel:
-        """Reusable detail popup penceresi oluşturur. İçerik eklenmek üzere döner."""
+        """Reusable detail popup — single themed header (no native Win32 title bar)."""
         popup = ctk.CTkToplevel(self.root)
-        popup.title(title)
         popup.geometry(f"{width}x{height}")
         popup.configure(fg_color=COLORS["bg"])
-        popup.transient(self.root)
-        popup.attributes("-topmost", True)
-        popup.grab_set()
+        try:
+            popup.transient(self.root)
+        except Exception:
+            pass
+        try:
+            popup.attributes("-topmost", True)
+        except Exception:
+            pass
 
-        # Başlık bandı
-        hdr = ctk.CTkFrame(popup, fg_color=COLORS["accent"], corner_radius=0, height=40)
+        # Frameless: avoids native title + custom header double chrome / double ✕
+        def _frameless():
+            try:
+                popup.overrideredirect(True)
+            except Exception:
+                pass
+            try:
+                popup.grab_set()
+            except Exception:
+                pass
+
+        popup.after(10, _frameless)
+
+        # Center on parent
+        try:
+            self.root.update_idletasks()
+            px = int(self.root.winfo_rootx() + (self.root.winfo_width() - width) / 2)
+            py = int(self.root.winfo_rooty() + (self.root.winfo_height() - height) / 2)
+            popup.geometry(f"{width}x{height}+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            pass
+
+        # Outer border so frameless window still reads as a dialog
+        shell = ctk.CTkFrame(
+            popup, fg_color=COLORS["bg"],
+            border_width=1, border_color=COLORS.get("border", COLORS["accent"]),
+            corner_radius=0,
+        )
+        shell.pack(fill="both", expand=True)
+
+        hdr = ctk.CTkFrame(shell, fg_color=COLORS["accent"], corner_radius=0, height=40)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(
+        title_lbl = ctk.CTkLabel(
             hdr, text=f"  {title}",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text_bright"],
-        ).pack(side="left", padx=8)
+        )
+        title_lbl.pack(side="left", padx=8)
         ctk.CTkButton(
             hdr, text="✕", width=32, height=28,
             font=ctk.CTkFont(size=13), fg_color="transparent",
@@ -3294,8 +3328,30 @@ class ModernGUI:
             command=popup.destroy,
         ).pack(side="right", padx=4)
 
-        # Scrollable içerik alanı
-        content = ctk.CTkScrollableFrame(popup, fg_color="transparent")
+        # Drag window from custom header (no OS title bar)
+        def _start_drag(event):
+            popup._drag_ox = event.x_root - popup.winfo_x()
+            popup._drag_oy = event.y_root - popup.winfo_y()
+
+        def _on_drag(event):
+            try:
+                popup.geometry(
+                    f"+{event.x_root - getattr(popup, '_drag_ox', 0)}"
+                    f"+{event.y_root - getattr(popup, '_drag_oy', 0)}"
+                )
+            except Exception:
+                pass
+
+        for w in (hdr, title_lbl):
+            w.bind("<ButtonPress-1>", _start_drag)
+            w.bind("<B1-Motion>", _on_drag)
+
+        try:
+            popup.bind("<Escape>", lambda _e: popup.destroy())
+        except Exception:
+            pass
+
+        content = ctk.CTkScrollableFrame(shell, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=8, pady=8)
         popup._content = content  # type: ignore[attr-defined]
         return popup

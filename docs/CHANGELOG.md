@@ -1,3 +1,14 @@
+# v4.5.53
+
+## UI: detail popup double title bar
+- Dashboard detail popups (Last Attack, etc.) no longer show native Win32 title + custom header together.
+- Frameless dialog with one themed header, drag-to-move, Escape to close.
+
+## Also in this train
+- v4.5.52 updater fix (fresh `update-install.log` required) — use dashboard self_update to verify.
+
+---
+
 # v4.5.52
 
 ## Fix: self_update helper never started (stuck “Kurulum çalışıyor”)

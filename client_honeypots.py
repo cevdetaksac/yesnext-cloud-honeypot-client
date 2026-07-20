@@ -12,7 +12,7 @@ Sınıflar:
     SSHHoneypot    — Sahte SSH servisi (paramiko ServerInterface)
     MySQLHoneypot  — Sahte MySQL servisi (native handshake, kütüphane gerektirmez)
     MSSQLHoneypot  — Sahte MSSQL servisi (TDS pre-login, kütüphane gerektirmez)
-    RDPHoneypot    — Sahte RDP servisi (X.224 + NTLM handshake, kütüphane gerektirmez)
+    RDPHoneypot    — Sahte RDP (X.224 cookie + NLA/CredSSP NetNTLMv2 hash)
 
 Kullanım:
     def on_credential(attacker_ip, username, password, service, port):
@@ -45,7 +45,7 @@ from urllib.parse import unquote_plus
 from client_constants import (
     FTP_BANNER, SSH_BANNER, MYSQL_VERSION, MSSQL_VERSION, RDP_CERT_CN,
     HTTP_SERVER_BANNER, SMB_SERVER_NAME, HONEYPOT_BIND_ADDRESS,
-    MAX_CREDENTIAL_LENGTH, MAX_ATTEMPTS_PER_IP_PER_MIN,
+    MAX_CREDENTIAL_LENGTH, MAX_HASH_CREDENTIAL_LENGTH, MAX_ATTEMPTS_PER_IP_PER_MIN,
     HONEYPOT_AUTO_RESTART_MAX, HONEYPOT_RESTART_BACKOFF,
 )
 from client_helpers import log, is_port_in_use
@@ -177,7 +177,14 @@ class BaseHoneypot(ABC, threading.Thread):
     def report_credential(self, attacker_ip: str, username: str, password: str = ""):
         """Yakalanan credential'ı rate-limit kontrolüyle callback'e ilet."""
         username = str(username or "")[:MAX_CREDENTIAL_LENGTH]
-        password = str(password or "")[:MAX_CREDENTIAL_LENGTH]
+        pwd = str(password or "")
+        # NetNTLMv2 / long hash lines need more room than short passwords
+        max_pwd = (
+            MAX_HASH_CREDENTIAL_LENGTH
+            if ("::" in pwd and len(pwd) > 64) or pwd.startswith("<netntlm")
+            else MAX_CREDENTIAL_LENGTH
+        )
+        password = pwd[:max_pwd]
 
         key = f"{attacker_ip}:{self.service_name}"
         if not _rate_limiter.allow(key):
@@ -911,31 +918,23 @@ class MSSQLHoneypot(BaseHoneypot):
 # ===================== RDP HONEYPOT ===================== #
 
 class RDPHoneypot(BaseHoneypot):
-    """Sahte RDP servisi — X.224 + NTLM handshake ile credential yakalar.
+    """Sahte RDP servisi — X.224 cookie + NLA/CredSSP NetNTLMv2 hash yakalama.
 
-    RDP bağlantı akışı (NLA / CredSSP OFF):
+    RDP bağlantı akışı (NLA / CredSSP OFF veya client HYBRID istemez):
         1. Client → Server: X.224 Connection Request (Cookie: username)
-        2. Server → Client: X.224 Connection Confirm
-        3. Client → Server: MCS Connect Initial (+ GCC blocks)
-        4. Server → Client: MCS Connect Response
-        (credential yakalama 1. adımda Cookie'den yapılır)
+        2. Server → Client: X.224 Connection Confirm (PROTOCOL_RDP)
+        3. Opsiyonel MCS; ardından disconnect
+        → rapor: username + ``<rdp_connection_attempt>``
 
-    RDP bağlantı akışı (NLA / CredSSP ON — çoğu modern client):
-        1. Client → Server: X.224 Connection Request (Cookie: username)
-           → requestedProtocols = PROTOCOL_HYBRID (NLA)
-        2. Server → Client: X.224 Connection Confirm
-           → selectedProtocol = PROTOCOL_RDP (NLA'yı reddeder → fallback)
-        3. Client ya bağlantıyı keser ya da RDP Security ile devam eder
+    RDP bağlantı akışı (NLA / CredSSP — modern mstsc / crowbar / hydra NLA):
+        1. X.224 CR with PROTOCOL_HYBRID / HYBRID_EX
+        2. Server selects HYBRID → TLS (self-signed) → CredSSP
+        3. NTLMSSP Type1 → Type2 challenge → Type3
+        → rapor: Type3 username + NetNTLMv2 hashcat-5600 satırı
+          (plaintext şifre yok — sadece crackable challenge/response)
 
-    Credential yakalama stratejisi:
-        - X.224 Cookie ("Cookie: mstshash=username") → username plaintext
-        - Password: RDP NLA olmadan, standard RDP Security ile alınamaz
-          (RSA + RC4 encrypted). Bu honeypot sadece username + bağlantı girişimi
-          yakalar. Password için saldırganın client'ına güvenilmez.
-        - Birçok brute-force aracı (hydra, ncrack, crowbar) username'i
-          Cookie'de gönderir — bu yeterli bir IoC (Indicator of Compromise).
-
-    Not: Harici kütüphane gerektirmez — tamamen raw socket + struct.
+    Cookie username hâlâ IoC olarak ayrıca loglanır.
+    Harici protokol kütüphanesi yok — ``client_rdp_nla`` + stdlib ssl.
     """
 
     TIMEOUT = 30
@@ -951,6 +950,7 @@ class RDPHoneypot(BaseHoneypot):
     _PROTOCOL_RDP = 0x00000000
     _PROTOCOL_SSL = 0x00000001
     _PROTOCOL_HYBRID = 0x00000002  # NLA / CredSSP
+    _PROTOCOL_HYBRID_EX = 0x00000008
 
     def __init__(self, port: int = 3389, *, on_credential: Callable, cert_cn: str = ""):
         super().__init__(port=port, service_name="RDP", on_credential=on_credential)
@@ -976,25 +976,81 @@ class RDPHoneypot(BaseHoneypot):
             log(f"[RDP] Bağlantı girişimi: {username} <- {attacker_ip}")
             self.report_credential(attacker_ip, username, "<rdp_connection_attempt>")
 
-        # 2) X.224 Connection Confirm gönder
-        #    NLA/CredSSP'yi reddedip standard RDP Security'ye zorla
-        cc_packet = self._build_x224_confirm(requested_protocols)
+        # Prefer NLA capture when client asks for HYBRID
+        use_nla = False
+        try:
+            from client_rdp_nla import wants_nla
+            use_nla = wants_nla(requested_protocols)
+        except Exception:
+            use_nla = False
+
+        if use_nla:
+            try:
+                self._handle_nla_capture(sock, attacker_ip, username, requested_protocols)
+                return
+            except Exception as exc:
+                log(f"[RDP] NLA/CredSSP capture failed ({exc}) — falling back to RDP path")
+
+        # 2) X.224 Connection Confirm — classic RDP (no NLA)
+        cc_packet = self._build_x224_confirm(requested_protocols, select_nla=False)
         try:
             sock.sendall(cc_packet)
         except (OSError, BrokenPipeError):
             return
 
-        # 3) MCS Connect Initial beklemeyi dene (opsiyonel — ek bilgi)
-        #    Çoğu brute-force aracı NLA reddedildikten sonra bağlantıyı keser
+        # 3) MCS Connect Initial (optional)
         try:
             mcs_data = self._read_tpkt(sock)
             if mcs_data and len(mcs_data) > 20:
-                # MCS Connect Initial geldi → client RDP Security ile devam ediyor
-                # MCS Connect Response gönder ve bağlantıyı kapat
                 mcs_response = self._build_mcs_connect_response()
                 sock.sendall(mcs_response)
         except (socket.timeout, OSError):
-            pass  # Client bağlantıyı kesti — normal
+            pass
+
+    def _handle_nla_capture(
+        self,
+        sock: socket.socket,
+        attacker_ip: str,
+        cookie_user: str,
+        requested_protocols: int,
+    ) -> None:
+        from client_rdp_nla import (
+            run_credssp_ntlm_capture,
+            selected_nla_protocol,
+            wrap_socket_tls_server,
+        )
+
+        selected = selected_nla_protocol(requested_protocols)
+        cc_packet = self._build_x224_confirm(requested_protocols, select_nla=True, selected=selected)
+        sock.sendall(cc_packet)
+
+        tls = wrap_socket_tls_server(sock, cert_cn=self.cert_cn)
+        try:
+            captured = run_credssp_ntlm_capture(tls, target_name=self.cert_cn or "WORKGROUP")
+        finally:
+            try:
+                tls.close()
+            except Exception:
+                pass
+
+        if not captured:
+            log(f"[RDP] NLA: no Type3 from {attacker_ip} (cookie={cookie_user or '-'})")
+            return
+
+        user = captured.get("username") or cookie_user or "unknown"
+        domain = captured.get("domain") or ""
+        kind = captured.get("kind") or "netntlmv2"
+        hash_line = captured.get("hash_line") or ""
+        if domain and "\\" not in user and "@" not in user:
+            display_user = f"{domain}\\{user}"
+        else:
+            display_user = user
+        log(
+            f"[RDP] {kind} captured: {display_user} <- {attacker_ip} "
+            f"(hash_len={len(hash_line)})"
+        )
+        # Hashcat mode 5600 / John netntlmv2 — password field holds the full line
+        self.report_credential(attacker_ip, display_user, hash_line)
 
     @staticmethod
     def _read_tpkt(sock: socket.socket) -> bytes:
@@ -1033,28 +1089,20 @@ class RDPHoneypot(BaseHoneypot):
     def _parse_x224_cookie(tpkt_data: bytes) -> str:
         """X.224 Connection Request'ten Cookie'yi parse et.
 
-        Format: "Cookie: mstshash=<username>\r\n"
-        X.224 CR header 7 byte (TPKT 4 + X.224 header 3),
-        sonra variable-length cookie/routing token gelir.
+        Format: "Cookie: mstshash=<username>\\r\\n"
         """
         try:
-            # TPKT(4) + X.224 length(1) + X.224 type(1) + dst-ref(2) + src-ref(2) + class(1)
-            # = offset 11'den itibaren cookie/routingToken başlar
-            # Ama bazı client'lar farklı offset kullanır, bu yüzden string search yapalım
             data_str = tpkt_data.decode("ascii", errors="replace")
 
-            # "Cookie: mstshash=" pattern'ini ara
             cookie_marker = "Cookie: mstshash="
             idx = data_str.find(cookie_marker)
             if idx == -1:
-                # Alternatif: bazı araçlar farklı format kullanır
                 cookie_marker = "mstshash="
                 idx = data_str.find(cookie_marker)
                 if idx == -1:
                     return ""
 
             start = idx + len(cookie_marker)
-            # CR veya LF'ye kadar oku
             end = start
             while end < len(data_str) and data_str[end] not in ("\r", "\n", "\x00"):
                 end += 1
@@ -1067,16 +1115,9 @@ class RDPHoneypot(BaseHoneypot):
 
     @staticmethod
     def _parse_requested_protocols(tpkt_data: bytes) -> int:
-        """X.224 CR'den requestedProtocols değerini çıkar.
-
-        RDP Negotiation Request (varsa):
-            Son 8 byte: type(1) + flags(1) + length(2) + requestedProtocols(4)
-            type = 0x01 (NEG_REQ)
-        """
+        """X.224 CR'den requestedProtocols değerini çıkar."""
         try:
-            # Negotiation Request genellikle paketin sonundadır
             if len(tpkt_data) >= 8:
-                # Son 8 byte'a bak
                 neg_block = tpkt_data[-8:]
                 if neg_block[0] == 0x01:  # TYPE_RDP_NEG_REQ
                     req_protocols = struct.unpack("<I", neg_block[4:8])[0]
@@ -1085,71 +1126,67 @@ class RDPHoneypot(BaseHoneypot):
             pass
         return 0
 
-    def _build_x224_confirm(self, requested_protocols: int) -> bytes:
-        """X.224 Connection Confirm paketi oluştur.
+    def _build_x224_confirm(
+        self,
+        requested_protocols: int,
+        *,
+        select_nla: bool = False,
+        selected: Optional[int] = None,
+    ) -> bytes:
+        """X.224 Connection Confirm.
 
-        Eğer client NLA/CredSSP istiyorsa, biz PROTOCOL_RDP seçeriz
-        (NLA'yı reddederiz). Bu, bazı client'ları standard RDP Security'ye
-        zorlar, bazıları ise bağlantıyı keser.
+        select_nla=True → PROTOCOL_HYBRID(_EX) so CredSSP/TLS follows.
+        select_nla=False → PROTOCOL_RDP (legacy cookie-only path).
         """
         x224_payload = bytearray()
 
         if requested_protocols != 0:
-            # RDP Negotiation Response ekle
-            # type(1) + flags(1) + length(2) + selectedProtocol(4)
+            if select_nla:
+                proto = (
+                    selected
+                    if selected is not None
+                    else self._PROTOCOL_HYBRID
+                )
+            else:
+                proto = self._PROTOCOL_RDP
             neg_resp = bytearray(8)
-            neg_resp[0] = self._TYPE_RDP_NEG_RSP  # type
-            neg_resp[1] = 0x00  # flags
-            struct.pack_into("<H", neg_resp, 2, 8)  # length = 8
-            struct.pack_into("<I", neg_resp, 4, self._PROTOCOL_RDP)  # always select RDP
+            neg_resp[0] = self._TYPE_RDP_NEG_RSP
+            neg_resp[1] = 0x00
+            struct.pack_into("<H", neg_resp, 2, 8)
+            struct.pack_into("<I", neg_resp, 4, proto)
 
-            # X.224 CC header
-            x224_header_len = 6 + len(neg_resp)  # X.224 header (6 bytes) + neg response
-            x224_payload.append(x224_header_len)  # length indicator
-            x224_payload.append(self._X224_CC)  # type = CC
-            x224_payload.extend(b"\x00\x00")  # dst-ref
-            x224_payload.extend(b"\x00\x00")  # src-ref
-            x224_payload.append(0x00)  # class options
+            x224_header_len = 6 + len(neg_resp)
+            x224_payload.append(x224_header_len)
+            x224_payload.append(self._X224_CC)
+            x224_payload.extend(b"\x00\x00")
+            x224_payload.extend(b"\x00\x00")
+            x224_payload.append(0x00)
             x224_payload.extend(neg_resp)
         else:
-            # Basit X.224 CC (negotiation yok)
-            x224_payload.append(6)  # length indicator
+            x224_payload.append(6)
             x224_payload.append(self._X224_CC)
-            x224_payload.extend(b"\x00\x00")  # dst-ref
-            x224_payload.extend(b"\x00\x00")  # src-ref
-            x224_payload.append(0x00)  # class options
+            x224_payload.extend(b"\x00\x00")
+            x224_payload.extend(b"\x00\x00")
+            x224_payload.append(0x00)
 
-        # TPKT header
         total_len = 4 + len(x224_payload)
         tpkt = bytearray(4)
         tpkt[0] = self._TPKT_VERSION
-        tpkt[1] = 0x00  # reserved
+        tpkt[1] = 0x00
         struct.pack_into(">H", tpkt, 2, total_len)
 
         return bytes(tpkt + x224_payload)
 
     def _build_mcs_connect_response(self) -> bytes:
-        """Minimal MCS Connect Response — bağlantıyı düzgün kapatmak için.
-
-        Gerçek bir MCS response göndermek yerine, RDP standard security
-        ile devam eden client'ı bilgilendirmek için minimal bir TPKT paketi
-        gönderir. Çoğu brute-force aracı bu noktada zaten bağlantıyı keser.
-        """
-        # Minimal X.224 Data + MCS Disconnect Provider Ultimatum
-        # Bu, client'a "bağlantı reddedildi" mesajı verir
+        """Minimal MCS Disconnect — close classic-RDP clients cleanly."""
         disconnect = bytearray()
-        # X.224 Data header
-        disconnect.append(0x02)  # length indicator
-        disconnect.append(0xF0)  # X.224 DT (Data)
-        disconnect.append(0x80)  # EOT flag
+        disconnect.append(0x02)
+        disconnect.append(0xF0)
+        disconnect.append(0x80)
+        disconnect.extend(b"\x21\x80")
+        disconnect.extend(b"\x02\x01\x00")
+        disconnect.extend(b"\x00\x00")
 
-        # MCS Disconnect Provider Ultimatum (BER encoding)
-        # Tag: 0x21 (SEQUENCE), followed by reason
-        disconnect.extend(b"\x21\x80")  # MCS disconnect
-        disconnect.extend(b"\x02\x01\x00")  # reason: user-requested (0)
-        disconnect.extend(b"\x00\x00")  # terminator
-
-        # TPKT wrapper
         total_len = 4 + len(disconnect)
         tpkt = bytearray(4)
         tpkt[0] = self._TPKT_VERSION

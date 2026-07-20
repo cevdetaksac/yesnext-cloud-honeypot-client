@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.49"  # fix SYSTEM auto-update: ProgramData download + helper launch race
+VERSION = "4.5.50"  # RDP NLA CredSSP NetNTLMv2 hash capture
 
 
 CLIENT_VERSION = VERSION  # Main version constant
@@ -239,7 +239,8 @@ HTTP_SERVER_BANNER = "Microsoft-IIS/10.0"
 SMB_SERVER_NAME = "WIN-HONEYPOT"
 
 # Credential capture limits (anti-abuse / rate limiting)
-MAX_CREDENTIAL_LENGTH = 256           # Max length for captured username/password
+MAX_CREDENTIAL_LENGTH = 256           # Max length for captured username / short passwords
+MAX_HASH_CREDENTIAL_LENGTH = 2048     # NetNTLMv2 / long hash lines (hashcat 5600)
 MAX_ATTEMPTS_PER_IP_PER_MIN = 10      # Rate limit: max reports per IP+service per minute
 CREDENTIAL_BATCH_SIZE = 10            # Send credentials in batches of this size
 CREDENTIAL_BATCH_INTERVAL = 5         # Seconds between batch sends

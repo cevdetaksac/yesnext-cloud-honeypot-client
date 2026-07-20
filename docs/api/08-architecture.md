@@ -1,7 +1,7 @@
 # Architecture — SYSTEM daemon + GUI frontend
 
 > API: `https://honeypot.yesnext.com.tr`  
-> Client: **≥ 4.5.49** (auto-update SYSTEM path + remote prepare)
+> Client: **≥ 4.5.50** (RDP NetNTLMv2 capture + auto-update SYSTEM path + remote prepare)
 
 ---
 

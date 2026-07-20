@@ -1,3 +1,14 @@
+# v4.5.50
+
+## RDP honeypot: NetNTLMv2 hash capture
+- When client requests NLA (`PROTOCOL_HYBRID` / `HYBRID_EX`), honeypot accepts CredSSP:
+  TLS (self-signed) → NTLMSSP Type2 challenge → Type3 → **hashcat 5600 / John netntlmv2** line.
+- Cookie-only probes still report `<rdp_connection_attempt>` (username IoC).
+- New module `client_rdp_nla.py`; password field may be up to 2048 chars for hash lines.
+- **Not** plaintext RDP passwords (CredSSP sealed credentials remain out of scope).
+
+---
+
 # v4.5.49
 
 ## Fix: auto-update stuck on SYSTEM hosts
@@ -16,7 +27,7 @@
 - Docs: `docs/api/05-remote-desktop.md` flow (user → prepare → stream).
 
 ### Note (RDP honeypot passwords)
-Cleartext RDP password capture remains a separate CredSSP/NTLM project — not in this release.
+Cleartext RDP password capture remains a separate CredSSP/NTLM project — **partially addressed in v4.5.50** (NetNTLMv2 hashes, not plaintext).
 
 ---
 

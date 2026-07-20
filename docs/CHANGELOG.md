@@ -1,3 +1,12 @@
+# v4.5.51
+
+## Fix: stuck update banner
+- Obsolete `failed` status (e.g. 4.5.43→4.5.45 while already on 4.5.49) is cleared automatically.
+- Banner has an ✕ dismiss button (clears `update_ui_status.json`).
+- Failed banners auto-hide after ~45s; expired status files are deleted.
+
+---
+
 # v4.5.50
 
 ## RDP honeypot: NetNTLMv2 hash capture

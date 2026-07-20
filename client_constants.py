@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.50"  # RDP NLA CredSSP NetNTLMv2 hash capture
+VERSION = "4.5.51"  # Dismiss stuck update banner; clear obsolete failed status
 
 
 CLIENT_VERSION = VERSION  # Main version constant

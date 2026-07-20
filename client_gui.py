@@ -604,7 +604,32 @@ class ModernGUI:
             font=ctk.CTkFont(size=11, family="Consolas"),
             text_color=COLORS["text_dim"],
         )
-        self._update_banner_ver.pack(side="right", padx=(8, 0))
+        self._update_banner_ver.pack(side="right", padx=(8, 4))
+
+        self._update_banner_close = ctk.CTkButton(
+            inner,
+            text="✕",
+            width=28,
+            height=28,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color=COLORS.get("card_hover", COLORS["card"]),
+            text_color=COLORS["text_dim"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._dismiss_update_banner,
+        )
+        self._update_banner_close.pack(side="right", padx=(0, 0))
+
+    def _dismiss_update_banner(self):
+        """User closed the banner — clear ProgramData status so it stays gone."""
+        try:
+            from client_update_ui import clear_update_ui_status
+            clear_update_ui_status()
+        except Exception:
+            pass
+        self._update_banner_done_at = 0.0
+        self._update_banner_last_phase = ""
+        self._hide_update_banner()
 
     def _start_update_banner_poll(self):
         if getattr(self, "_update_banner_poll_started", False):
@@ -663,11 +688,12 @@ class ModernGUI:
         progress = st.get("progress")
         err = (st.get("error") or "").strip()
 
-        # Auto-dismiss success after ~12s
-        if phase == "done":
+        # Auto-dismiss success ~12s; failed ~45s (user can also ✕)
+        dismiss_after = 12 if phase == "done" else (45 if phase == "failed" else 0)
+        if dismiss_after:
             if not self._update_banner_done_at:
                 self._update_banner_done_at = time.time()
-            elif (time.time() - self._update_banner_done_at) > 12:
+            elif (time.time() - self._update_banner_done_at) > dismiss_after:
                 clear_update_ui_status()
                 self._hide_update_banner()
                 self._update_banner_done_at = 0.0

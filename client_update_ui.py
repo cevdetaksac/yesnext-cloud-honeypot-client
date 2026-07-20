@@ -173,23 +173,43 @@ def reconcile_update_ui_with_version(current_version: str) -> Optional[Dict[str,
     if not st:
         return None
     phase = st.get("phase") or ""
-    if phase not in ("accepted", "downloading", "staging", "installing"):
-        return st
     target = _norm_ver(str(st.get("to_version") or ""))
+    from_v = _norm_ver(str(st.get("from_version") or ""))
     cur = _norm_ver(current_version)
     if not cur:
         return st
+
+    # Already on/newer than the update target → never keep a stuck/failed banner
     if target and _ver_tuple(cur) >= _ver_tuple(target):
-        set_update_ui_status(
-            "done",
-            from_version=str(st.get("from_version") or ""),
-            to_version=target or cur,
-            detail="already_on_target_or_newer",
-        )
+        if phase in ("accepted", "downloading", "staging", "installing"):
+            set_update_ui_status(
+                "done",
+                from_version=str(st.get("from_version") or ""),
+                to_version=target or cur,
+                detail="already_on_target_or_newer",
+            )
+            _release_stale_lock()
+            return _read_raw()
+        if phase in ("failed", "done"):
+            # Obsolete failure (e.g. 4.5.43→4.5.45 while running 4.5.49)
+            clear_update_ui_status()
+            _release_stale_lock()
+            return None
+
+    # Moved past from_version with a failed/stale status → clear
+    if (
+        phase == "failed"
+        and from_v
+        and _ver_tuple(cur) > _ver_tuple(from_v)
+    ):
+        clear_update_ui_status()
         _release_stale_lock()
-        return _read_raw()
+        return None
+
+    if phase not in ("accepted", "downloading", "staging", "installing"):
+        return st
+
     # No target recorded but we left from_version behind → obsolete status
-    from_v = _norm_ver(str(st.get("from_version") or ""))
     if from_v and _ver_tuple(cur) > _ver_tuple(from_v) and _phase_age_sec(st) > 60:
         clear_update_ui_status()
         _release_stale_lock()
@@ -218,9 +238,14 @@ def get_update_ui_status(
     ):
         return _mark_stalled(data, "update_stalled")
 
-    if updated and max_age_sec > 0 and (time.time() - updated) > max_age_sec and phase in (
-        "done", "failed",
-    ):
+    # Failed banners: auto-expire sooner (2h wall) and delete the file
+    fail_max = min(max_age_sec, 7200.0)
+    if phase == "failed" and updated and (time.time() - updated) > fail_max:
+        clear_update_ui_status()
+        return None
+
+    if updated and max_age_sec > 0 and (time.time() - updated) > max_age_sec and phase == "done":
+        clear_update_ui_status()
         return None
 
     return data

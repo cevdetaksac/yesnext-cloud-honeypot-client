@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.48"  # remote_session_prepare + list_local_users; can_capture
+VERSION = "4.5.49"  # fix SYSTEM auto-update: ProgramData download + helper launch race
 
 
 CLIENT_VERSION = VERSION  # Main version constant

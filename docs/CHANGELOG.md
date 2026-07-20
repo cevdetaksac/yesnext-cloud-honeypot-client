@@ -1,3 +1,13 @@
+# v4.5.49
+
+## Fix: auto-update stuck on SYSTEM hosts
+- `download_installer` no longer writes to `systemprofile\Desktop` (Errno 2); uses ProgramData `update\` staging.
+- Helper launch: breakaway detached PowerShell first; schtasks UpdateOnce waits for `update-install.log` before `/Delete` (was cancelling the one-shot).
+- Stale `update_in_progress.lock` clears in ~15s when holder PID is dead (was blocking retries for minutes/hours).
+- Silent update waits longer for helper log and retries launch once.
+
+---
+
 # v4.5.48
 
 ## Remote Desktop prepare path

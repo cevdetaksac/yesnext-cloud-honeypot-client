@@ -1287,7 +1287,7 @@ class InstallerUpdateManager:
             return 0
     
     def download_installer(self, download_url: str, progress_callback=None) -> Optional[str]:
-        """Installer'ı Downloads klasörüne sürüm numarası ile indir"""
+        """Download installer to a writable machine-wide folder (never SYSTEM Desktop)."""
         try:
             import requests
             import os
@@ -1308,16 +1308,29 @@ class InstallerUpdateManager:
             except:
                 pass
             
-            # Windows Downloads klasörünü bul
-            downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-            if not os.path.exists(downloads_dir):
-                # Fallback: Desktop
-                downloads_dir = os.path.join(os.path.expanduser("~"), "Desktop")
-                self.log(f"[UPDATE] Downloads klasörü bulunamadı, Desktop kullanılıyor: {downloads_dir}")
-            
-            # Sürüm numarası ile dosya adı oluştur
+            # SYSTEM Session-0 has no real profile: ~/Downloads and ~/Desktop resolve to
+            # C:\Windows\System32\config\systemprofile\... which often does not exist →
+            # open() raises Errno 2 and silent updates look "stuck" for hours.
+            # Always prefer ProgramData staging (same as stage_installer_for_update).
+            downloads_dir = _update_helper_staging_dir()
+            try:
+                # Interactive user installs may prefer Downloads when it exists and is writable
+                user_dl = os.path.join(os.path.expanduser("~"), "Downloads")
+                if (
+                    os.path.isdir(user_dl)
+                    and os.access(user_dl, os.W_OK)
+                    and "systemprofile" not in user_dl.lower()
+                ):
+                    downloads_dir = user_dl
+            except Exception:
+                pass
+
             installer_filename = f"cloud-client-installer-v{version}.exe"
             installer_path = os.path.join(downloads_dir, installer_filename)
+            try:
+                os.makedirs(os.path.dirname(installer_path) or downloads_dir, exist_ok=True)
+            except OSError:
+                pass
             
             self.log(f"[UPDATE] İndirme yeri: {installer_path}")
             
@@ -1462,6 +1475,7 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
                 return False
         age = time.time() - os.path.getmtime(path)
         lock_pid = None
+        lines: list = []
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as fh:
                 lines = fh.read().splitlines()
@@ -1469,6 +1483,7 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
                 lock_pid = int(str(lines[1]).strip())
         except Exception:
             lock_pid = None
+            lines = []
 
         pid_alive = False
         if lock_pid and lock_pid > 0:
@@ -1482,15 +1497,18 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
             except Exception:
                 pid_alive = False
 
-        # Dead holder → stale (failed silent update left lock + disabled tasks)
-        if lock_pid and not pid_alive and age > 90:
+        # Dead holder → stale immediately after a short grace (helper often never
+        # starts; 90s+ blocked every SilentUpdater tick and looked like "hours stuck").
+        phase = str(lines[0]).strip().lower() if lines else ""
+
+        if lock_pid and not pid_alive and age > 15:
             try:
                 os.remove(path)
             except OSError:
                 pass
             return False
 
-        # Absolute ceiling
+        # Absolute ceiling (downloads can be long — touch_update_lock refreshes mtime)
         if age > max_age_sec:
             try:
                 os.remove(path)
@@ -1498,8 +1516,17 @@ def is_update_in_progress(max_age_sec: float = 7200.0) -> bool:
                 pass
             return False
 
-        # "installing" with no live holder after a few minutes
-        if not pid_alive and age > 600:
+        # "installing" with no live holder — helper died or never spawned
+        if phase.startswith("install") and not pid_alive and age > 30:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+
+        # installing lock but holder still "alive" while no helper ever ran (orphaned
+        # after failed schtasks) — hard cap 20 min so hosts recover within the 1h SLA
+        if phase.startswith("install") and age > 1200:
             try:
                 os.remove(path)
             except OSError:
@@ -1515,13 +1542,37 @@ def heal_update_machinery(log_func=None) -> None:
     """Clear stale locks and re-enable update/watchdog tasks after failed updates."""
     _log = log_func or (lambda m: None)
     try:
-        # Force-evaluate stale lock (dead PID)
-        if not is_update_in_progress(max_age_sec=1800.0):
+        # Force-evaluate stale lock (dead PID / short grace)
+        if not is_update_in_progress(max_age_sec=1200.0):
             pass
         path = _update_lock_path()
         if os.path.isfile(path):
             age = time.time() - os.path.getmtime(path)
-            if age > 1800:
+            lock_pid = None
+            phase = ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.read().splitlines()
+                if lines:
+                    phase = str(lines[0]).strip().lower()
+                if len(lines) >= 2:
+                    lock_pid = int(str(lines[1]).strip())
+            except Exception:
+                pass
+            pid_alive = False
+            if lock_pid and lock_pid > 0:
+                try:
+                    SYNCHRONIZE = 0x00100000
+                    h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, int(lock_pid))
+                    if h:
+                        ctypes.windll.kernel32.CloseHandle(h)
+                        pid_alive = True
+                except Exception:
+                    pid_alive = False
+            # Aggressively clear orphan installing locks (helper never logged)
+            if (not pid_alive and age > 15) or age > 1200 or (
+                phase.startswith("install") and age > 120 and not pid_alive
+            ):
                 try:
                     os.remove(path)
                     _log("[UPDATE] Cleared stale update lock")
@@ -1915,15 +1966,53 @@ def launch_safe_update_install(
                     return False
             return True
 
-        # Already admin / silent SYSTEM path — prefer one-shot scheduled task
-        # so Session-0 DETACHED powershell is not lost / hung without a log.
+        # Already admin / silent SYSTEM path — spawn helper that survives our exit.
+        # Prefer CREATE_BREAKAWAY_FROM_JOB + DETACHED powershell first.
+        # Previous path: schtasks /Run then immediate /Delete often cancelled the
+        # one-shot before powershell started → "helper log not seen" + lock stuck.
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        det_flags = (
+            subprocess.CREATE_NO_WINDOW
+            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | CREATE_BREAKAWAY_FROM_JOB
+        )
+        try:
+            proc = subprocess.Popen(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-WindowStyle", "Hidden", "-File", launcher,
+                ],
+                creationflags=det_flags,
+                close_fds=True,
+                cwd=staging,
+            )
+            time.sleep(0.4)
+            if proc.poll() is None:
+                return True
+            if proc.returncode in (None, 0):
+                log_path = os.path.join(
+                    os.environ.get("ProgramData", r"C:\ProgramData"),
+                    "YesNext", "CloudHoneypotClient", "update-install.log",
+                )
+                try:
+                    if os.path.isfile(log_path):
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                            if "update-and-install start" in fh.read()[-1200:]:
+                                return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Backup: one-shot SYSTEM task — wait for helper log before /Delete
         try:
             task = f"CloudHoneypot-UpdateOnce-{pid}"
             tr = (
                 f"powershell.exe -NoProfile -ExecutionPolicy Bypass "
                 f"-WindowStyle Hidden -File \"{launcher}\""
             )
-            subprocess.run(
+            create = subprocess.run(
                 [
                     "schtasks", "/Create", "/TN", task, "/TR", tr,
                     "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM",
@@ -1939,9 +2028,22 @@ def launch_safe_update_install(
                 timeout=15,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            # Task already kicked — delete immediately (no timeout /t 120 cmd windowout).
-            # CREATE_NO_WINDOW|DETACHED_PROCESS + "timeout" previously popped a visible
-            # console ("Waiting for N seconds...") during dashboard self_update.
+            log_path = os.path.join(
+                os.environ.get("ProgramData", r"C:\ProgramData"),
+                "YesNext", "CloudHoneypotClient", "update-install.log",
+            )
+            helper_seen = False
+            if run.returncode == 0:
+                for _ in range(25):
+                    time.sleep(0.3)
+                    try:
+                        if os.path.isfile(log_path):
+                            with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                                if "update-and-install start" in fh.read()[-1200:]:
+                                    helper_seen = True
+                                    break
+                    except Exception:
+                        pass
             try:
                 subprocess.run(
                     ["schtasks", "/Delete", "/TN", task, "/F"],
@@ -1951,29 +2053,16 @@ def launch_safe_update_install(
                 )
             except Exception:
                 pass
-            if run.returncode == 0:
+            if helper_seen or (run.returncode == 0 and create.returncode == 0):
                 return True
         except Exception:
             pass
 
-        proc = subprocess.Popen(
-            [
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", launcher,
-            ],
-            creationflags=subprocess.CREATE_NO_WINDOW
-            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
-            close_fds=True,
-        )
-        # Confirm helper process actually spawned
-        if proc.poll() is not None and proc.returncode not in (None, 0):
-            try:
-                release_update_lock(resume_updaters=True)
-            except Exception:
-                pass
-            return False
-        return True
+        try:
+            release_update_lock(resume_updaters=True)
+        except Exception:
+            pass
+        return False
     except Exception:
         try:
             release_update_lock(resume_updaters=True)

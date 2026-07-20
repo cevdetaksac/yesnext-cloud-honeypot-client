@@ -529,7 +529,10 @@ def check_updates_and_apply_silent() -> bool:
                 silent=True,
                 show_gui_after=show_gui,
                 expect_exit_pid=os.getpid(),
-                elevate=True,
+                # SYSTEM daemon is already elevated; force admin path (breakaway
+                # Popen / UpdateOnce). elevate=True + Session-0 ShellExecute runas
+                # is a no-op when IsUserAnAdmin, but keep explicit False for clarity.
+                elevate=False,
             )
             if not ok:
                 log("[SILENT UPDATE] Failed to launch update helper — falling back to inline install")
@@ -550,23 +553,44 @@ def check_updates_and_apply_silent() -> bool:
                 log(f"[SILENT UPDATE] Fallback installer failed: {result.returncode}")
                 return False
 
-            # Brief wait so helper can open update-install.log before we exit
+            # Wait for helper to open update-install.log before we exit (schtasks can lag)
             log_path = os.path.join(
                 os.environ.get("ProgramData", r"C:\ProgramData"),
                 "YesNext", "CloudHoneypotClient", "update-install.log",
             )
             helper_alive = False
-            for _ in range(10):
+            for _ in range(40):  # ~12s
                 time.sleep(0.3)
                 try:
                     if os.path.isfile(log_path):
                         with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
-                            tail = fh.read()[-800:]
+                            tail = fh.read()[-1200:]
                         if "update-and-install start" in tail:
                             helper_alive = True
                             break
                 except Exception:
                     pass
+            if not helper_alive:
+                log("[SILENT UPDATE] WARNING: helper log not seen — retrying breakaway launch")
+                ok2 = launch_safe_update_install(
+                    staged_installer,
+                    silent=True,
+                    show_gui_after=show_gui,
+                    expect_exit_pid=os.getpid(),
+                    elevate=False,
+                    grace_wait_sec=25,
+                )
+                if ok2:
+                    for _ in range(30):
+                        time.sleep(0.3)
+                        try:
+                            if os.path.isfile(log_path):
+                                with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                                    if "update-and-install start" in fh.read()[-1200:]:
+                                        helper_alive = True
+                                        break
+                        except Exception:
+                            pass
             if not helper_alive:
                 log("[SILENT UPDATE] WARNING: helper log not seen yet — exiting anyway (helper may still run)")
 
@@ -1224,6 +1248,7 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             silent=True,
             show_gui_after=show_gui,
             expect_exit_pid=os.getpid(),
+            # True → auto-clears when IsUserAnAdmin (SYSTEM daemon). Keeps UAC for rare non-admin callers.
             elevate=True,
         )
         if not ok:

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.60"  # Disk full / IDE I/O != ransomware (health classify)
+VERSION = "4.5.61"  # Cloud threat-intel feed consumer (see CLOUD_THREAT_INTEL_API.md)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

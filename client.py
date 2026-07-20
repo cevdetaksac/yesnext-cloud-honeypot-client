@@ -378,6 +378,23 @@ class CloudHoneypotClient:
                 self.health_monitor = None
                 self.process_protection = None
 
+        # Cloud threat-intel (daemon only) — soft if API not ready
+        self.threat_intel = None
+        if ENABLE_THREAT_DETECTION and not self.frontend_only:
+            try:
+                from client_threat_intel import ThreatIntelManager
+                self.threat_intel = ThreatIntelManager(
+                    api_client=self.api_client,
+                    token_getter=lambda: self.state.get("token", ""),
+                    ransomware_shield=self.ransomware_shield,
+                    auto_response=self.auto_response,
+                    on_alert=self.alert_pipeline.handle_alert if self.alert_pipeline else None,
+                )
+                log("[THREAT-INTEL] manager initialized")
+            except Exception as e:
+                log(f"[THREAT-INTEL] init failed: {e}")
+                self.threat_intel = None
+
         # Wire health monitor into remote commands (list_sessions / list_processes push)
         if getattr(self, "remote_commands", None) and getattr(self, "health_monitor", None):
             self.remote_commands.health_monitor = self.health_monitor
@@ -2546,6 +2563,11 @@ class CloudHoneypotClient:
                     log(f"[HEALTH] initial force_report failed: {e}")
             if getattr(self, "process_protection", None):
                 self.process_protection.setup()
+            if getattr(self, "threat_intel", None):
+                try:
+                    self.threat_intel.start()
+                except Exception as e:
+                    log(f"[THREAT-INTEL] start failed: {e}")
             log(f"🛡️ Faz 3 started ({source}: HealthMonitor + sessions/processes)")
         except Exception as e:
             log(f"⚠️ Faz 3 start failed ({source}): {e}")

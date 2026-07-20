@@ -18,6 +18,8 @@ Merkezi dokümantasyon (API sözleşmeleri, changelog, operasyon).
 | Firewall / cleanup | [api/06-firewall-blocks.md](api/06-firewall-blocks.md) |
 | Lifecycle / sessions | [api/07-lifecycle-sessions.md](api/07-lifecycle-sessions.md) |
 | Daemon ↔ frontend (IPC, ownership) | [api/08-architecture.md](api/08-architecture.md) |
+| Threat intel (client contract) | [api/09-threat-intel.md](api/09-threat-intel.md) |
+| **Cloud Threat Intel API (implement)** | [CLOUD_THREAT_INTEL_API.md](CLOUD_THREAT_INTEL_API.md) |
 
 ## Repo kökü
 

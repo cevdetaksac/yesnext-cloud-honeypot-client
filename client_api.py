@@ -616,6 +616,80 @@ class HoneypotAPIClient:
             self.log(f"[API] ransomware event report error: {e}")
             return False
 
+    def fetch_threat_intel(
+        self,
+        token: str,
+        *,
+        since_version: Optional[str] = None,
+        etag: Optional[str] = None,
+        client_version: str = "",
+        os_name: str = "windows",
+    ) -> Optional[dict]:
+        """GET /api/agent/threat-intel — cloud threat bundle (docs/CLOUD_THREAT_INTEL_API.md).
+
+        Returns:
+          {"not_modified": True} on HTTP 304
+          {"bundle": {...}, "etag": "..."} on 200
+          None on error / unavailable endpoint
+        """
+        try:
+            url = f"{self.base_url}/agent/threat-intel"
+            params = {"token": token, "os": os_name or "windows"}
+            if since_version:
+                params["since_version"] = since_version
+            if client_version:
+                params["client_version"] = client_version
+            headers = {}
+            req_params, _, prep_headers = self._prepare_request(params, None, token)
+            if prep_headers:
+                headers.update(prep_headers)
+            if etag:
+                headers["If-None-Match"] = etag if str(etag).startswith('"') else f'"{etag}"'
+
+            r = self.session.get(
+                url,
+                params=req_params or params,
+                headers=headers or None,
+                timeout=30,
+                verify=resolve_tls_verify(),
+            )
+            if r.status_code == 304:
+                return {"not_modified": True}
+            if r.status_code in (404, 501, 503):
+                # Cloud not ready yet — soft fail
+                return None
+            if not (200 <= r.status_code < 300):
+                self.log(f"[API] threat-intel HTTP {r.status_code}")
+                return None
+            try:
+                data = r.json()
+            except Exception:
+                return None
+            if not isinstance(data, dict):
+                return None
+            resp_etag = r.headers.get("ETag") or data.get("etag") or ""
+            return {"bundle": data, "etag": resp_etag}
+        except Exception as e:
+            self.log(f"[API] threat-intel fetch error: {e}")
+            return None
+
+    def ack_threat_intel(self, token: str, bundle_version: str, stats: Optional[dict] = None) -> bool:
+        """POST /api/agent/threat-intel/ack — soft-fail if missing."""
+        try:
+            payload = {
+                "token": token,
+                "bundle_version": bundle_version,
+                "applied_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "stats": stats or {},
+            }
+            resp = self.api_request(
+                "POST", "agent/threat-intel/ack", data=payload, timeout=15, verbose_logging=False,
+            )
+            return isinstance(resp, dict)
+        except Exception as e:
+            self.log(f"[API] threat-intel ack error: {e}")
+            return False
+
     def report_self_protection_event(self, token: str, data: dict) -> bool:
         """POST /api/alerts/self-protection — Self-protection olay bildirimi"""
         try:

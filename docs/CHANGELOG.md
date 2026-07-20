@@ -1,3 +1,13 @@
+# v4.5.61
+
+## Cloud threat-intel feed (client consumer)
+- Daemon polls `GET /api/agent/threat-intel` (ETag/304), caches under ProgramData.
+- Applies firewall IoCs (policy-gated), merges ransomware watch lists, banners/alerts.
+- Cloud SoT — agent does not scrape Abuse.ch/CISA directly.
+- Spec for cloud team: `docs/CLOUD_THREAT_INTEL_API.md` + `docs/api/09-threat-intel.md`.
+
+---
+
 # v4.5.60
 
 ## Health: disk full / IDE I/O is not ransomware

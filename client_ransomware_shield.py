@@ -193,6 +193,11 @@ class RansomwareShield:
         # Recent detections log
         self._detections: deque = deque(maxlen=50)
 
+        # Cloud threat-intel merges (docs/CLOUD_THREAT_INTEL_API.md)
+        self._cloud_extensions: Set[str] = set()
+        self._cloud_processes: Dict[str, str] = {}
+        self._cloud_cmdline_patterns: List = []
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def start(self):
@@ -507,16 +512,29 @@ class RansomwareShield:
                 cmdline_parts = info.get('cmdline') or []
                 cmdline = ' '.join(cmdline_parts)
 
-                # Check process name
+                # Check process name (builtin + cloud intel)
                 if pname in SUSPICIOUS_PROCESSES:
                     reason = SUSPICIOUS_PROCESSES[pname]
                     self._on_suspicious_process(pname, pid, cmdline, reason, 50)
+                elif pname in self._cloud_processes:
+                    reason = self._cloud_processes[pname]
+                    self._on_suspicious_process(pname, pid, cmdline, reason, 55)
 
-                # Check command-line patterns
+                # Check command-line patterns (builtin + cloud)
+                matched = False
                 for pattern, desc, score in SUSPICIOUS_CMD_PATTERNS:
                     if pattern.search(cmdline):
                         self._on_suspicious_process(pname, pid, cmdline, desc, score)
-                        break  # One match per process is enough
+                        matched = True
+                        break
+                if not matched:
+                    for pattern, desc, score in self._cloud_cmdline_patterns:
+                        try:
+                            if pattern.search(cmdline):
+                                self._on_suspicious_process(pname, pid, cmdline, desc, score)
+                                break
+                        except Exception:
+                            continue
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -529,6 +547,64 @@ class RansomwareShield:
             except Exception:
                 self._seen_pids.clear()
 
+    def merge_cloud_intel(self, ransomware_layer: dict) -> int:
+        """Merge cloud threat-intel ransomware layer (extensions / processes / cmdline).
+
+        Does NOT trigger lockdown by itself — local canary/VSS remain authoritative.
+        """
+        if not isinstance(ransomware_layer, dict):
+            return 0
+        n = 0
+        exts = ransomware_layer.get("extensions") or []
+        if isinstance(exts, list):
+            for x in exts:
+                s = str(x or "").strip().lower()
+                if not s:
+                    continue
+                if not s.startswith("."):
+                    s = "." + s
+                self._cloud_extensions.add(s)
+                n += 1
+
+        procs = ransomware_layer.get("process_names") or []
+        if isinstance(procs, list):
+            for p in procs:
+                name = str(p or "").strip().lower()
+                if not name:
+                    continue
+                if not name.endswith(".exe"):
+                    name = name + ".exe"
+                self._cloud_processes[name] = "cloud_threat_intel"
+                n += 1
+
+        patterns = ransomware_layer.get("cmdline_patterns") or []
+        compiled = []
+        if isinstance(patterns, list):
+            for item in patterns:
+                if not isinstance(item, dict):
+                    continue
+                pat = str(item.get("pattern") or "").strip()
+                if not pat:
+                    continue
+                flags = re.I if "i" in str(item.get("flags") or "i").lower() else 0
+                try:
+                    rx = re.compile(pat, flags)
+                except re.error:
+                    continue
+                desc = str(item.get("id") or item.get("description") or "cloud_cmdline")
+                score = 90 if str(item.get("severity") or "").lower() == "critical" else 70
+                compiled.append((rx, desc, score))
+                n += 1
+        if compiled:
+            self._cloud_cmdline_patterns = compiled
+
+        if n:
+            log(f"[RANSOMWARE-SHIELD] merged cloud intel rules={n}")
+        return n
+
+    def get_cloud_extensions(self) -> Set[str]:
+        return set(self._cloud_extensions) | set(SUSPICIOUS_EXTENSIONS)
+
     def _on_suspicious_process(
         self, pname: str, pid: int, cmdline: str, reason: str, score: int
     ):
@@ -536,7 +612,7 @@ class RansomwareShield:
         self._stats["process_alerts"] += 1
         self._stats["total_detections"] += 1
 
-        log(f"[RANSOMWARE-SHIELD] ⚠️ Suspicious process: {pname} (PID {pid}) — {reason}")
+        log(f"[RANSOMWARE-SHIELD] Suspicious process: {pname} (PID {pid}) — {reason}")
 
         detection = {
             "type": "suspicious_process",
@@ -571,7 +647,7 @@ class RansomwareShield:
         # For VSS deletion — trigger emergency lockdown
         if score >= 95 and self.auto_response:
             try:
-                log(f"[RANSOMWARE-SHIELD] 🛑 Emergency lockdown triggered by: {reason}")
+                log(f"[RANSOMWARE-SHIELD] Emergency lockdown triggered by: {reason}")
                 # Kill the suspicious process first
                 try:
                     subprocess.run(

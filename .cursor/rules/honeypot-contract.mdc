@@ -25,12 +25,12 @@ Yoksa: kullanıcıya clone/submodule etmesini söyle; uydurma API yazma.
 4. API/davranış değişikliği → önce `CONTRACT_ROOT` altında MD + CHANGELOG + VERSION bump; sonra kod.
 5. Cloud-only dosyalara (PM2, nginx, dashboard HTML) dokunma / varsayma.
 
-## Sprint odakları
+## SoT
 
-- `agent/CLIENT.md` — Auth, Control WS, Self-update, IR, Remote
-- `agent/register-protection.md` — register `protection.block_rules` (3 fail→block)
-- `agent/remote-input.md` — frame ACK `inputs[]` anında uygula
-- `api/09-threat-intel.md` — GET ETag/304, ACK, WS `threat_intel_updated`
+- Fleet matrix: `FLEET.md` · Production floor: client ≥ **4.5.66** · Contract `VERSION` **1.1.1+**
+- `agent/CLIENT.md`, `register-protection.md`, `ransomware-shield.md`, `remote-input.md`
+- `api/08-architecture.md`, `api/09-threat-intel.md`, `api/03-control-websocket.md`
+- Client `docs/api/*` stub’dır — düzenleme sadece `honeypot-contract` içinde
 
 ## Kurallar
 

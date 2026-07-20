@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Contract: register-protection — 3 fail → block_ip (unit)."""
+
+import unittest
+
+from client_threat_engine import ThreatEngine
+from client_protection_store import normalize_block_rule, apply_block_rules
+
+
+class TestProtectionBlockRules(unittest.TestCase):
+    def setUp(self):
+        self.alerts = []
+
+        def _on_alert(alert, ctx=None):
+            self.alerts.append(alert)
+
+        self.engine = ThreatEngine(on_alert=_on_alert)
+
+    def test_normalize_contract_rdp_fail_3(self):
+        raw = {
+            "id": "rdp-fail-3",
+            "name": "RDP brute force",
+            "enabled": True,
+            "service": "RDP",
+            "event": "failed_auth",
+            "threshold": 3,
+            "window_seconds": 1800,
+            "action": "block_ip",
+            "alert": True,
+        }
+        n = normalize_block_rule(raw)
+        self.assertEqual(n["threshold_count"], 3)
+        self.assertEqual(n["window_minutes"], 30)
+        self.assertIn("block", n["actions"])
+        self.assertEqual(n["services"], "RDP")
+
+    def test_three_rdp_fails_emit_block(self):
+        rules = [
+            {
+                "id": "rdp-fail-3",
+                "name": "RDP brute force",
+                "enabled": True,
+                "service": "RDP",
+                "event": "failed_auth",
+                "threshold": 3,
+                "window_seconds": 1800,
+                "action": "block_ip",
+                "alert": True,
+            }
+        ]
+        apply_block_rules(self.engine, rules, source="unit")
+        ip = "203.0.113.50"
+        for _ in range(3):
+            self.engine.process_event(
+                {
+                    "event_type": "failed_logon",
+                    "source_ip": ip,
+                    "target_service": "RDP",
+                    "username": "Administrator",
+                }
+            )
+        self.assertIn(ip, self.engine._rule_blocked_ips)
+        self.assertGreaterEqual(self.engine._stats["rule_blocks"], 1)
+        self.assertTrue(
+            any("block_ip" in (a.get("auto_response") or []) for a in self.alerts)
+            or any(a.get("severity") == "critical" for a in self.alerts)
+        )
+
+    def test_two_fails_do_not_block(self):
+        apply_block_rules(
+            self.engine,
+            [
+                {
+                    "id": "rdp-fail-3",
+                    "service": "RDP",
+                    "threshold": 3,
+                    "window_seconds": 1800,
+                    "action": "block_ip",
+                    "alert": True,
+                }
+            ],
+            source="unit",
+        )
+        ip = "203.0.113.51"
+        for _ in range(2):
+            self.engine.process_event(
+                {
+                    "event_type": "failed_logon",
+                    "source_ip": ip,
+                    "target_service": "RDP",
+                }
+            )
+        self.assertNotIn(ip, self.engine._rule_blocked_ips)
+
+
+if __name__ == "__main__":
+    unittest.main()

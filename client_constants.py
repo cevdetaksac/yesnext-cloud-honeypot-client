@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.65"  # UX: silent canaries (no local scare), skip OneDrive, not-indexed
+VERSION = "4.5.66"  # Contract: register protection.block_rules + WS threat_intel_updated
 
 
 CLIENT_VERSION = VERSION  # Main version constant

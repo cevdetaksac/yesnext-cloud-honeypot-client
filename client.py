@@ -269,6 +269,14 @@ class CloudHoneypotClient:
                 self.event_watcher = EventLogWatcher(
                     on_event=self.threat_engine.process_event,
                 )
+                # Contract: register-persisted protection.block_rules
+                try:
+                    from client_protection_store import hydrate_threat_engine_from_store
+                    n = hydrate_threat_engine_from_store(self.threat_engine)
+                    if n:
+                        log(f"[PROTECTION] boot hydrate block_rules={n}")
+                except Exception as pe:
+                    log(f"[PROTECTION] boot hydrate skip: {pe}")
                 # Wire ThreatEngine into ServiceManager for honeypot credential scoring
                 self.service_manager._threat_engine = self.threat_engine
                 log("✅ Threat detection modules initialized (v4.0)")
@@ -398,6 +406,10 @@ class CloudHoneypotClient:
             except Exception as e:
                 log(f"[THREAT-INTEL] init failed: {e}")
                 self.threat_intel = None
+
+        # Control WS threat_intel_updated → ThreatIntelManager.sync_once
+        if getattr(self, "remote_commands", None) is not None and self.threat_intel is not None:
+            self.remote_commands.threat_intel = self.threat_intel
 
         # Wire health monitor into remote commands (list_sessions / list_processes push)
         if getattr(self, "remote_commands", None) and getattr(self, "health_monitor", None):
@@ -950,14 +962,26 @@ class CloudHoneypotClient:
 
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
-            # Fetch block rules from dashboard (GET /api/premium/rules)
-            # Empty list → ThreatEngine falls back to DEFAULT_BLOCK_RULES (real-port protection)
-            rules = self.api_client.fetch_block_rules(token)
-            if rules is not None and isinstance(rules, list) and self.threat_engine:
-                self.threat_engine.update_block_rules(rules)
-                log(f"[CONFIG-SYNC] Block rules synced: {len(rules)} rule(s) from API")
-            elif self.threat_engine:
-                log("[CONFIG-SYNC] Block rules fetch empty/unavailable — keeping local defaults")
+            # Contract SoT: protection.block_rules (register + threats/config)
+            applied_prot = False
+            if config and isinstance(config, dict) and self.threat_engine:
+                try:
+                    from client_protection_store import apply_protection_payload
+                    n = apply_protection_payload(
+                        self.threat_engine, config, source="threats/config"
+                    )
+                    applied_prot = n > 0
+                except Exception as pe:
+                    log(f"[CONFIG-SYNC] protection.block_rules apply error: {pe}")
+
+            # Legacy / premium rules endpoint (fallback if config omitted protection)
+            if not applied_prot:
+                rules = self.api_client.fetch_block_rules(token)
+                if rules is not None and isinstance(rules, list) and self.threat_engine:
+                    self.threat_engine.update_block_rules(rules)
+                    log(f"[CONFIG-SYNC] Block rules synced: {len(rules)} rule(s) from API")
+                elif self.threat_engine:
+                    log("[CONFIG-SYNC] Block rules fetch empty/unavailable — keeping local defaults")
         except Exception as e:
             log(f"[CONFIG-SYNC] Error: {e}")
 

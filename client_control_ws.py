@@ -62,11 +62,13 @@ class AgentControlWebSocket:
         token_getter: Optional[Callable[[], str]] = None,
         on_command: Optional[Callable[[dict], None]] = None,
         on_config_hint: Optional[Callable[[dict], None]] = None,
+        on_threat_intel_updated: Optional[Callable[[dict], None]] = None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.on_command = on_command
         self.on_config_hint = on_config_hint
+        self.on_threat_intel_updated = on_threat_intel_updated
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -83,6 +85,7 @@ class AgentControlWebSocket:
             "commands_pushed": 0,
             "results_sent": 0,
             "send_errors": 0,
+            "threat_intel_pushes": 0,
         }
 
     @property
@@ -321,6 +324,20 @@ class AgentControlWebSocket:
                     self.on_config_hint(data)
                 except Exception:
                     pass
+            return
+        if t == "threat_intel_updated":
+            # Contract api/09-threat-intel.md — push → immediate GET sync
+            self._stats["threat_intel_pushes"] = int(
+                self._stats.get("threat_intel_pushes") or 0
+            ) + 1
+            ver = data.get("bundle_version") or data.get("version") or ""
+            log(f"[CONTROL-WS] ← threat_intel_updated bundle={ver}")
+            cb = self.on_threat_intel_updated
+            if cb:
+                try:
+                    cb(data)
+                except Exception as e:
+                    log(f"[CONTROL-WS] threat_intel_updated handler error: {e}")
             return
         if t == "command":
             cmd = data.get("command")

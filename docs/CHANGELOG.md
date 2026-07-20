@@ -1,3 +1,9 @@
+# v4.5.66
+- Contract gap close (`honeypot-contract` 1.0.0):
+  - `POST /register` → `protection.block_rules` ProgramData’ya yazılır; boot + ThreatEngine normalize/apply
+  - `GET /threats/config` → `protection.block_rules` SoT (legacy block-rules fetch fallback)
+  - Control WS `threat_intel_updated` → anında `ThreatIntelManager.sync_once()` (HTTP poll yedek)
+
 # v4.5.65
 - UX: canary tetiklenince yerel tray/toast yok (dashboard/API urgent kalır) — kullanıcıyı korkutmama
 - OneDrive-backed Documents'a canary konmaz (bulut senkronunda görünürlük/kota)

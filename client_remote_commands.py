@@ -176,6 +176,7 @@ class RemoteCommandExecutor:
         self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
         self.cleanup_manager = cleanup_manager  # DataCleanupManager (wired after init)
         self.ransomware_shield = ransomware_shield
+        self.threat_intel = None  # ThreatIntelManager — wired after init (WS push)
 
         self._running = False
         self._poll_thread: Optional[threading.Thread] = None
@@ -226,13 +227,31 @@ class RemoteCommandExecutor:
                 api_client=self.api_client,
                 token_getter=self.token_getter,
                 on_command=lambda cmd: self.handle_incoming_command(cmd, source="ws"),
+                on_threat_intel_updated=self._on_threat_intel_updated,
             )
             self._control_ws.start()
         except Exception as e:
             log(f"[REMOTE-CMD] control WS start failed (HTTP poll only): {e}")
             self._control_ws = None
-        log(f"[REMOTE-CMD] 🚀 Remote command executor started "
+        log(f"[REMOTE-CMD] Remote command executor started "
             f"(poll={POLL_INTERVAL}s, IR={IR_POLL_INTERVAL}s, control_ws=on)")
+
+    def _on_threat_intel_updated(self, data: dict) -> None:
+        """Control WS push → sync threat-intel bundle immediately (contract 09)."""
+        ti = self.threat_intel
+        if ti is None or not hasattr(ti, "sync_once"):
+            log("[REMOTE-CMD] threat_intel_updated ignored — ThreatIntelManager not wired")
+            return
+
+        def _run():
+            try:
+                ok = bool(ti.sync_once())
+                ver = (data or {}).get("bundle_version") or ""
+                log(f"[THREAT-INTEL] WS push sync ok={ok} hint_version={ver}")
+            except Exception as e:
+                log(f"[THREAT-INTEL] WS push sync error: {e}")
+
+        threading.Thread(target=_run, name="ThreatIntel-WSPush", daemon=True).start()
 
     def stop(self):
         """Stop polling, control WS, and remote desktop stream."""

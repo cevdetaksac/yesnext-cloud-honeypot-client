@@ -175,7 +175,10 @@ class HoneypotAPIClient:
             return None
 
     def register_client(self, server_name: str, ip_address: str, machine_id: str = "") -> Optional[str]:
-        """İstemciyi API'ye kaydeder ve bir token alır (machine_id ile upsert tercih edilir)."""
+        """İstemciyi API'ye kaydeder ve bir token alır (machine_id ile upsert tercih edilir).
+
+        Register body ``protection.block_rules`` → ProgramData (ThreatEngine boot/sync).
+        """
         try:
             payload = {"server_name": server_name, "ip": ip_address}
             mid = (machine_id or "").strip()
@@ -185,6 +188,15 @@ class HoneypotAPIClient:
             response = self.api_request("POST", "register", data=payload)
             if response and "token" in response:
                 token = response["token"]
+                try:
+                    prot = response.get("protection")
+                    if isinstance(prot, dict):
+                        from client_protection_store import save_protection
+                        save_protection(prot)
+                        n = len(prot.get("block_rules") or []) if isinstance(prot.get("block_rules"), list) else 0
+                        self.log(f"[PROTECTION] register saved block_rules={n}")
+                except Exception as pe:
+                    self.log(f"[PROTECTION] register persist skip: {pe}")
                 self.log(f"İstemci başarıyla kaydedildi, token alındı: {token[:8]}...")
                 return token
             self.log("İstemci kaydı başarısız oldu veya token alınamadı.")
@@ -1221,6 +1233,9 @@ def register_client_api(
 
     Sends machine_id so the API can upsert and return the SAME durable token
     for this machine (identity must not rotate like a session).
+
+    On success, persists ``protection.block_rules`` from the register body
+    (honeypot-contract agent/register-protection.md) for ThreatEngine boot apply.
     """
     import requests
     
@@ -1244,6 +1259,18 @@ def register_client_api(
             if token:
                 if token_save_func:
                     token_save_func(token)
+                # Contract: protection.block_rules on register response
+                try:
+                    prot = data.get("protection")
+                    if isinstance(prot, dict):
+                        from client_protection_store import save_protection
+                        if save_protection(prot):
+                            n = len(prot.get("block_rules") or []) if isinstance(prot.get("block_rules"), list) else 0
+                            if log_func:
+                                log_func(f"[PROTECTION] register saved block_rules={n}")
+                except Exception as pe:
+                    if log_func:
+                        log_func(f"[PROTECTION] register persist skip: {pe}")
                 if log_func: log_func(f"Client registration successful: {server_name}")
                 return token
         

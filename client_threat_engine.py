@@ -363,21 +363,30 @@ class ThreatEngine:
     def update_block_rules(self, rules: List[dict]):
         """Update API-defined block rules.
 
-        Each rule: {name, services, threshold_count, window_minutes,
-                    actions, enabled, email_cooldown_min, match_usernames}
+        Accepts legacy dashboard shape OR contract protection.block_rules:
+          {id, service, threshold, window_seconds, action, alert, enabled}
+        → normalized to {name, services, threshold_count, window_minutes, actions, enabled}
 
         Empty / all-disabled payload → fall back to DEFAULT_BLOCK_RULES so
         real-port monitoring still blocks when honeypots are stopped.
         """
+        try:
+            from client_protection_store import normalize_block_rule
+            raw = rules or []
+            rules = [normalize_block_rule(r) for r in raw if isinstance(r, dict)]
+            rules = [r for r in rules if r]
+        except Exception:
+            rules = [r for r in (rules or []) if isinstance(r, dict)]
+
         with self._block_rules_lock:
             enabled = [r for r in rules if r.get("enabled", True)] if rules else []
             using_defaults = not enabled
             self._block_rules = enabled if enabled else list(DEFAULT_BLOCK_RULES)
         rule_names = [r.get("name", "?") for r in self._block_rules]
         if using_defaults:
-            log(f"[THREAT] 📋 No dashboard rules — using local defaults: {rule_names}")
+            log(f"[THREAT] No dashboard rules — using local defaults: {rule_names}")
         else:
-            log(f"[THREAT] 📋 Block rules updated: {rule_names}")
+            log(f"[THREAT] Block rules updated: {rule_names}")
 
     def update_whitelist(self, ips: Set[str]):
         """Update whitelisted IPs from dashboard/API."""
@@ -729,17 +738,34 @@ class ThreatEngine:
             if not rule.get("enabled", True):
                 continue
 
-            # Servis eşleştirmesi
-            rule_services_raw = rule.get("services", "")
-            if rule_services_raw:
-                rule_services = {s.strip().upper() for s in rule_services_raw.split(",")}
-                if event_service not in rule_services:
+            # Servis eşleştirmesi (contract: service / services; empty / * = all)
+            rule_services_raw = rule.get("services", "") or rule.get("service", "")
+            if rule_services_raw and str(rule_services_raw).strip() not in ("*", ""):
+                rule_services = {s.strip().upper() for s in str(rule_services_raw).split(",") if s.strip()}
+                if event_service and event_service not in rule_services:
                     continue
 
-            threshold = int(rule.get("threshold_count", 3))
-            window_sec = int(rule.get("window_minutes", 30)) * 60
+            # Contract event filter (default failed_auth)
+            rule_event = str(rule.get("event") or "failed_auth").strip().lower()
+            if rule_event and rule_event not in ("failed_auth", "*", "any"):
+                # Future event kinds — skip unknown for now
+                continue
+
+            threshold = int(
+                rule.get("threshold_count", rule.get("threshold", 3))
+            )
+            if rule.get("window_minutes") is not None:
+                window_sec = int(rule.get("window_minutes", 30)) * 60
+            elif rule.get("window_seconds") is not None:
+                window_sec = int(rule.get("window_seconds", 1800))
+            else:
+                window_sec = 30 * 60
             actions_str = rule.get("actions", "email,block")
-            actions = {a.strip().lower() for a in actions_str.split(",")}
+            if not actions_str and rule.get("action"):
+                actions_str = "block" if "block" in str(rule.get("action")).lower() else "email,block"
+                if rule.get("alert", True) and "email" not in actions_str:
+                    actions_str = f"email,{actions_str}"
+            actions = {a.strip().lower() for a in str(actions_str).split(",") if a.strip()}
 
             # Pencere içindeki failed login sayısı (honeypot credential dahil)
             recent = ctx.get_recent_events(window_sec)
@@ -753,9 +779,9 @@ class ThreatEngine:
 
             # Eşik aşıldı!
             rule_name = rule.get("name", "block_rule")
-            log(f"[THREAT] 🚨 Block rule '{rule_name}' triggered: "
+            log(f"[THREAT] Block rule '{rule_name}' triggered: "
                 f"IP={ip} service={event_service} "
-                f"fails={fail_count}/{threshold} window={rule.get('window_minutes')}m")
+                f"fails={fail_count}/{threshold} window={window_sec}s")
 
             self._rule_blocked_ips.add(ip)
             self._stats["rule_blocks"] += 1

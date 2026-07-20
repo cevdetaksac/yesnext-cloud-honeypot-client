@@ -345,6 +345,11 @@ class RansomwareShield:
                 os.path.join("C:\\Users\\Public", "Documents"),
                 os.path.join(os.environ.get("ProgramData", "C:\\ProgramData")),
             ]
+            # SYSTEM motor: also seed interactive users' Documents (not systemprofile)
+            for up in self._interactive_user_profiles():
+                docs = os.path.join(up, "Documents")
+                if docs not in base_dirs:
+                    base_dirs.append(docs)
 
             self._canaries = []
             for base_dir in base_dirs:
@@ -411,6 +416,7 @@ class RansomwareShield:
                             ))
 
             self._cleanup_legacy_canaries()
+            self._register_existing_canary_trees()
 
             log(
                 f"[RANSOMWARE-SHIELD] Deployed {len(self._canaries)} canary files "
@@ -464,6 +470,93 @@ class RansomwareShield:
                     f.write(CANARY_README_CONTENT)
         except OSError:
             pass
+
+    @staticmethod
+    def _interactive_user_profiles() -> List[str]:
+        """Return interactive user profile dirs (exclude Default/Public/system)."""
+        out: List[str] = []
+        skip = {
+            "public", "default", "default user", "all users",
+            "defaultuser0", "wdagutilityaccount", "systemprofile",
+        }
+        # Preferred: ProfileList (works under SYSTEM)
+        try:
+            import winreg
+            key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as root:
+                i = 0
+                while True:
+                    try:
+                        sid = winreg.EnumKey(root, i)
+                        i += 1
+                    except OSError:
+                        break
+                    if not sid.startswith("S-1-5-21-"):
+                        continue
+                    try:
+                        with winreg.OpenKey(root, sid) as sk:
+                            profile, _ = winreg.QueryValueEx(sk, "ProfileImagePath")
+                    except OSError:
+                        continue
+                    profile = os.path.expandvars(str(profile or "")).strip()
+                    if not profile or not os.path.isdir(profile):
+                        continue
+                    name = os.path.basename(profile).lower()
+                    if name in skip:
+                        continue
+                    out.append(profile)
+        except Exception:
+            pass
+
+        # Fallback: C:\Users\*
+        if not out:
+            users_root = os.path.join(os.environ.get("SystemDrive", "C:"), "Users")
+            try:
+                for name in os.listdir(users_root):
+                    if name.lower() in skip:
+                        continue
+                    path = os.path.join(users_root, name)
+                    if os.path.isdir(path):
+                        out.append(path)
+            except OSError:
+                pass
+        return out
+
+    def _register_existing_canary_trees(self) -> None:
+        """Watch any .cloud-honeypot-canary trees under Users (even if deploy skipped)."""
+        users_root = os.path.join(os.environ.get("SystemDrive", "C:"), "Users")
+        known = {c.path.lower() for c in self._canaries}
+        try:
+            names = os.listdir(users_root)
+        except OSError:
+            return
+        for name in names:
+            root = os.path.join(users_root, name, "Documents", CANARY_ROOT_FOLDER)
+            if not os.path.isdir(root):
+                # OneDrive-style Documents redirect still usually keeps this path
+                continue
+            self._set_hidden_attribute(root)
+            for dirpath, _dns, fns in os.walk(root):
+                for fn in fns:
+                    if not (fn.startswith("!000_") or fn in {x[0] for x in _LEGACY_CANARY_FILES}):
+                        continue
+                    filepath = os.path.join(dirpath, fn)
+                    key = filepath.lower()
+                    if key in known:
+                        continue
+                    try:
+                        self._set_hidden_attribute(filepath)
+                        file_hash = self._file_hash(filepath)
+                        if not file_hash:
+                            continue
+                        self._canaries.append(CanaryState(
+                            path=filepath,
+                            sha256=file_hash,
+                            size=os.path.getsize(filepath),
+                        ))
+                        known.add(key)
+                    except OSError:
+                        continue
 
     @staticmethod
     def _set_hidden_attribute(folder_path: str):
@@ -975,10 +1068,54 @@ class RansomwareShield:
             log(f"[RANSOMWARE-SHIELD] quarantine persist error: {e}")
 
     def _contain_after_hit(self, trigger: str, focus_path: str = "") -> None:
-        """Kill writers of canary path + IFEO-block their images until unlock."""
-        suspects = self._find_suspect_processes(focus_path)
+        """Kill writers of canary path + IFEO-block their images until unlock.
+
+        Arms quarantine immediately (STATUS/GUI), then best-effort attribution.
+        Full open_files() scans can take tens of seconds on busy hosts — must not
+        delay the lockdown flag.
+        """
+        # 1) Arm lock immediately
+        with self._quarantine_lock:
+            entries = list(self._quarantine.get("entries") or [])
+            self._quarantine = {
+                "active": True,
+                "locked_at": self._quarantine.get("locked_at")
+                or datetime.now().isoformat(),
+                "trigger": trigger,
+                "entries": entries,
+            }
+            self._stats["quarantine_active"] = True
+            self._stats["quarantine_entries"] = len(entries)
+            self._persist_quarantine()
+        log(f"[RANSOMWARE-SHIELD] Quarantine ARMED trigger={trigger}")
+
+        # 2) Attribute writers (time-boxed)
+        suspects: List[dict] = []
+        try:
+            holder: List[List[dict]] = [[]]
+
+            def _scan():
+                try:
+                    holder[0] = self._find_suspect_processes(focus_path)
+                except Exception as e:
+                    log(f"[RANSOMWARE-SHIELD] suspect scan error: {e}")
+
+            th = threading.Thread(target=_scan, name="RS-SuspectScan", daemon=True)
+            th.start()
+            th.join(timeout=4.0)
+            if th.is_alive():
+                log("[RANSOMWARE-SHIELD] suspect scan timeout — quarantine stays armed")
+            else:
+                suspects = holder[0] or []
+        except Exception as e:
+            log(f"[RANSOMWARE-SHIELD] suspect scan setup error: {e}")
+
         actions = []
         with self._quarantine_lock:
+            if not self._quarantine.get("active"):
+                # Operator unlocked while we scanned
+                log("[RANSOMWARE-SHIELD] Containment skipped — already unlocked")
+                return
             entries = list(self._quarantine.get("entries") or [])
             known = {
                 (e.get("image") or "").lower()
@@ -1010,14 +1147,8 @@ class RansomwareShield:
                     known.add(image)
                     self._quarantine_images.add(image)
                     actions.append(f"ifeo:{image}")
-            self._quarantine = {
-                "active": True,
-                "locked_at": self._quarantine.get("locked_at")
-                or datetime.now().isoformat(),
-                "trigger": trigger,
-                "entries": entries,
-            }
-            self._stats["quarantine_active"] = True
+            self._quarantine["entries"] = entries
+            self._quarantine["trigger"] = trigger
             self._stats["quarantine_entries"] = len(entries)
             self._persist_quarantine()
 
@@ -1039,7 +1170,10 @@ class RansomwareShield:
         self._detections.append(detection)
 
     def _find_suspect_processes(self, focus_path: str) -> List[dict]:
-        """Best-effort: processes with open handles under canary root / file."""
+        """Best-effort: processes with open handles under canary root / file.
+
+        Bounded: skip protected images, cap process count, ignore AccessDenied fast.
+        """
         out: List[dict] = []
         try:
             import psutil
@@ -1053,7 +1187,6 @@ class RansomwareShield:
             parent = os.path.dirname(focus)
             if parent:
                 roots.add(parent.lower())
-            # canary root (.cloud-honeypot-canary)
             parts = focus.split("\\")
             for i, p in enumerate(parts):
                 if p == CANARY_ROOT_FOLDER.lower() and i > 0:
@@ -1061,7 +1194,11 @@ class RansomwareShield:
                     break
 
         my_pid = os.getpid()
+        checked = 0
+        deadline = time.time() + 3.5
         for proc in psutil.process_iter(["pid", "name", "exe"]):
+            if time.time() > deadline:
+                break
             try:
                 info = proc.info
                 pid = int(info.get("pid") or 0)
@@ -1070,6 +1207,9 @@ class RansomwareShield:
                 pname = (info.get("name") or "").lower()
                 if pname in _PROTECTED_IMAGES:
                     continue
+                checked += 1
+                if checked > 250:
+                    break
                 exe = info.get("exe") or ""
                 matched = False
                 try:

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.62"  # Canary sort-bait + ransomware quarantine/unlock; threat-intel live
+VERSION = "4.5.64"  # SYSTEM watches interactive-user canaries; quarantine arm-first
 
 
 CLIENT_VERSION = VERSION  # Main version constant

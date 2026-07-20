@@ -1,3 +1,12 @@
+# v4.5.64
+- SYSTEM motor: ProfileList + scan existing `Users\*\Documents\.cloud-honeypot-canary` so interactive-user canaries are watched (4.5.63 gap found in scenario test)
+- Keep quarantine arm-first from 4.5.63
+
+# v4.5.63
+- Canary hit: quarantine **immediately armed** (open_files scan time-boxed ≤4s) — STATUS/GUI no longer lag
+- SYSTEM motor seeds canaries into interactive users' Documents (not only systemprofile/Public/ProgramData)
+- Scenario test on DESKTOP-F5SCL3G: threat-intel OK; canary MODIFIED detected; unlock IPC OK
+
 # v4.5.62
 - Canary sertleştirme: `!000_` sort-bait isimler, Hidden+System dosya+klasör, README sadece ProgramData
 - Canary/VSS hit → şüpheli süreci öldür + IFEO karantina; unlock: GUI / `RS_UNLOCK` / `unlock_ransomware_quarantine`

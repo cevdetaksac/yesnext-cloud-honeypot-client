@@ -2585,6 +2585,17 @@ class ModernGUI:
             command=self._refresh_ip_table,
         ).pack(side="right")
 
+        self._ip_clear_blocked_btn = ctk.CTkButton(
+            hdr, text=self.t("ip_btn_clear_all_blocked"),
+            width=118, height=22,
+            font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg"], border_width=1, border_color=COLORS["red"],
+            hover_color="#3a1f28",
+            text_color=COLORS["red"],
+            command=self._clear_all_blocked_ips,
+        )
+        self._ip_clear_blocked_btn.pack(side="right", padx=(0, 6))
+
         # Sekme çubuğu
         tabs = ctk.CTkFrame(sec, fg_color="transparent")
         tabs.pack(fill="x", padx=16, pady=(6, 4))
@@ -2703,11 +2714,19 @@ class ModernGUI:
         self._update_ip_tab_styles()
         self._render_ip_table(getattr(self, "_ip_table_rows", []))
 
-    def _refresh_ip_table(self):
+    def _refresh_ip_table(self, force_firewall: bool = True):
         """ThreatEngine IP pool'undan verileri alıp tabloyu güncelle."""
-        threading.Thread(target=self._collect_ip_table_data, daemon=True).start()
+        threading.Thread(
+            target=self._collect_ip_table_data,
+            kwargs={"force_firewall": bool(force_firewall)},
+            daemon=True,
+        ).start()
 
-    def _collect_ip_table_data(self):
+    def _clear_all_blocked_ips(self):
+        """Engellenen: tüm honeypot firewall kurallarını sil + API bildir."""
+        self._run_cleanup("firewall", refresh_ip_table=True)
+
+    def _collect_ip_table_data(self, force_firewall: bool = False):
         """Arka planda IP verilerini topla (aktivite + engellenen + whitelist).
 
         Frontend-only (SYSTEM daemon): threat_engine is None — Engellenen must
@@ -2733,7 +2752,9 @@ class ModernGUI:
         # Live firewall SoT → ProgramData (throttled). Fixes Engellenen(1) vs hundreds of HP-BLOCK.
         try:
             from client_block_store import refresh_from_live_firewall, load_blocked_map
-            store_meta = refresh_from_live_firewall(min_interval_sec=20.0, force=False)
+            store_meta = refresh_from_live_firewall(
+                min_interval_sec=20.0, force=bool(force_firewall),
+            )
             if not store_meta:
                 store_meta = load_blocked_map(force=True)
             blocked_ips |= set(store_meta.keys())
@@ -5332,7 +5353,7 @@ class ModernGUI:
         self.app.lang = code
         self._rebuild_gui()
 
-    def _run_cleanup(self, scope: str):
+    def _run_cleanup(self, scope: str, refresh_ip_table: bool = False):
         """Ayarlar → Bakım/Temizlik: local | firewall | server | all"""
         cm = getattr(self.app, "cleanup_manager", None)
         if not cm:
@@ -5379,7 +5400,22 @@ class ModernGUI:
                         rules=(result.get("firewall") or {}).get("rules_removed", 0),
                         server="✓" if srv_ok else "—",
                     )
-                self._gui_safe(lambda: messagebox.showinfo(self.t("cleanup_title"), msg))
+                def _done():
+                    messagebox.showinfo(self.t("cleanup_title"), msg)
+                    if refresh_ip_table or scope in ("firewall", "all", "local"):
+                        try:
+                            self._ip_table_tab = "blocked" if scope == "firewall" else getattr(
+                                self, "_ip_table_tab", "activity"
+                            )
+                            self._update_ip_tab_styles()
+                            self._refresh_ip_table(force_firewall=True)
+                        except Exception:
+                            pass
+                        try:
+                            self._refresh_dashboard()
+                        except Exception:
+                            pass
+                self._gui_safe(_done)
             except Exception as e:
                 log(f"[CLEANUP] GUI cleanup error: {e}")
                 self._gui_safe(

@@ -264,7 +264,14 @@ def refresh_from_live_firewall(
         from client_firewall import WindowsFirewallBackend
 
         backend = WindowsFirewallBackend(logger=_NullLog())
-        rules = backend.scan_existing_rules()
+        ok, rules = backend.scan_existing_rules_detailed()
+        if not ok:
+            try:
+                from client_helpers import log
+                log("[BLOCK-STORE] live firewall scan failed — keeping existing store")
+            except Exception:
+                pass
+            return load_blocked_map(force=True)
         # Enrich numbered dashboard rules missing RemoteIP in bulk listing
         enriched = 0
         for r in rules:

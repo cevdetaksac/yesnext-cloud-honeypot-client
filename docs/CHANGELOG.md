@@ -1,3 +1,13 @@
+# v4.5.40
+
+## Engellenen listesi düzeltmesi + Tümünü temizle
+- Root cause: `netsh show rule` without `name=all` fails on Windows → 0 rules.
+- Second cause: `text=True` + cp1254 decode crash on large netsh dumps → empty stdout.
+- Fix: `name=all` + bytes decode (utf-8/cp857/…); failed scan no longer wipes ProgramData store.
+- IP table: **Tümünü temizle** button → delete all HP-BLOCK/HONEYPOT_* rules + `sync-rules []` + `clear-data` scopes=blocks.
+
+---
+
 # v4.5.39
 
 ## GUI: güncelleme durumu banner
@@ -47,7 +57,8 @@ Includes 4.5.36 emergency GUI bridge as safety net.
 
 # Changelog — Cloud Honeypot Client
 
-Otomatik birleştirildi: eski elease_notes_v*.md dosyaları.
+Otomatik birleştirildi: eski 
+elease_notes_v*.md dosyaları.
 Kaynak: GitHub Releases + bu dosya.
 
 ---

@@ -108,15 +108,27 @@ def is_admin() -> bool:
 
 def run_cmd(cmd: List[str], timeout: int = 20) -> Tuple[int, str, str]:
     # Run command with timeout. Returns (rc, stdout, stderr).
+    # Bytes + multi-encoding decode: netsh dumps are often OEM/CP857 and
+    # crash text=True (cp1254) → empty stdout → Engellenen always 0.
+    def _dec(raw: Optional[bytes]) -> str:
+        if not raw:
+            return ""
+        for enc in ("utf-8", "cp857", "cp850", "cp1254", "oem", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode("utf-8", errors="replace")
+
     try:
         p = subprocess.run(
             cmd,
             shell=False,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout if timeout and timeout > 0 else None,
         )
-        return p.returncode, p.stdout or "", p.stderr or ""
+        return p.returncode, _dec(p.stdout), _dec(p.stderr)
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"
     except Exception as e:
@@ -209,6 +221,7 @@ class FirewallBackend:
 class WindowsFirewallBackend(FirewallBackend):
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
+        self.last_scan_ok = True
 
     @staticmethod
     def rule_name_candidates(block_id: str = "", ip_or_cidr: str = "") -> List[str]:
@@ -360,15 +373,42 @@ class WindowsFirewallBackend(FirewallBackend):
         """Scan honeypot block rules: HP-BLOCK-*, HONEYPOT_BLOCK*, legacy.
 
         Returns list of dicts: {name, remoteip, prefix, ip?, legacy?}
+        On enumeration failure returns [] and sets last_scan_ok=False
+        (callers that rebuild ProgramData must not wipe store on failure).
         """
-        rc, out, err = run_cmd([
-            "netsh", "advfirewall", "firewall", "show", "rule",
-            "dir=in", "status=enabled",
-        ], timeout=120)
-        if rc != 0:
-            self.logger.error(f"Failed to enumerate firewall rules: {err}")
-            return []
+        ok, rules = self.scan_existing_rules_detailed()
+        self.last_scan_ok = ok
+        return rules
 
+    def scan_existing_rules_detailed(self) -> Tuple[bool, List[dict]]:
+        """Enumerate honeypot firewall rules.
+
+        Returns (ok, rules). ok=False means netsh listing failed — do not
+        treat as "zero rules" / wipe ProgramData inventory.
+        """
+        # Windows requires name=all (or a specific name). Without it:
+        # "One or more essential parameters were not entered." → empty Engellenen.
+        attempts = (
+            ["netsh", "advfirewall", "firewall", "show", "rule",
+             "name=all", "dir=in", "status=enabled"],
+            ["netsh", "advfirewall", "firewall", "show", "rule",
+             "name=all", "dir=in"],
+        )
+        out = ""
+        err = ""
+        rc = 1
+        for cmd in attempts:
+            rc, out, err = run_cmd(cmd, timeout=180)
+            if rc == 0 and (out or "").strip():
+                break
+        else:
+            self.logger.error(
+                f"Failed to enumerate firewall rules: rc={rc} err={err or out[:200]}"
+            )
+            self.last_scan_ok = False
+            return False, []
+
+        self.last_scan_ok = True
         rules: List[dict] = []
         current: dict = {}
         for line in out.splitlines():
@@ -430,7 +470,7 @@ class WindowsFirewallBackend(FirewallBackend):
                 # Convert underscored IP back to dotted when applicable
                 entry["ip"] = suffix.replace("_", ".")
             result.append(entry)
-        return result
+        return True, result
 
     def migrate_legacy_rule(self, old_name: str, ip: str, remoteip: str) -> bool:
         """Rename a legacy HONEYPOT_THREAT_BLOCK_ rule to HP-BLOCK-{ip}.

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.39"  # GUI top banner for dashboard self_update status
+VERSION = "4.5.40"  # Fix Engellenen netsh scan (name=all + encoding); Clear all button
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.57"  # Fix detail popup freeze (no grab_set + overrideredirect)
+VERSION = "4.5.58"  # One GUI/tray per session (Local mutex + show handoff)
 
 
 CLIENT_VERSION = VERSION  # Main version constant
@@ -292,6 +292,9 @@ FILE_HEARTBEAT_INTERVAL = 60  # File heartbeat interval (was 10s, optimized to 6
 # Singleton mutex — DAEMON only (GUI frontends do not take this)
 SINGLETON_MUTEX_NAME = "Global\\CloudHoneypotClient_Singleton"
 DAEMON_MUTEX_NAME = "Global\\CloudHoneypotClient_Daemon"
+# Per-session GUI/tray singleton (Local\\ = one frontend per Windows session)
+GUI_MUTEX_NAME = "Local\\CloudHoneypotClient_GUI"
+GUI_SHOW_EVENT_NAME = "Local\\CloudHoneypotClient_ShowGUI"
 
 # ===================== TIMING CONFIGURATION ===================== #
 

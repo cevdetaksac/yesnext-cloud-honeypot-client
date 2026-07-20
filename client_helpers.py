@@ -163,23 +163,29 @@ def get_active_interactive_session_id() -> int:
 
 
 def interactive_frontend_running() -> bool:
-    """True if honeypot-client is already running in a user session (session id > 0)."""
+    """True if honeypot-client GUI/tray is already running in a user session (session id > 0)."""
     try:
         import ctypes
         import psutil
         from ctypes import wintypes
 
+        me = os.getpid()
         kernel32 = ctypes.windll.kernel32
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
+                pid = int(proc.info.get("pid") or 0)
+                if pid == me:
+                    continue
                 name = (proc.info.get("name") or "").lower()
                 cmdline = " ".join(proc.info.get("cmdline") or [])
                 if "honeypot-client" not in name and "client.py" not in cmdline:
                     continue
                 if "--watchdog" in cmdline or "--silent-update" in cmdline:
                     continue
+                if "--mode=daemon" in cmdline or "--daemon" in cmdline:
+                    continue
                 sid = wintypes.DWORD()
-                if kernel32.ProcessIdToSessionId(int(proc.info["pid"]), ctypes.byref(sid)):
+                if kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
                     if int(sid.value) > 0:
                         return True
             except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError, ValueError):

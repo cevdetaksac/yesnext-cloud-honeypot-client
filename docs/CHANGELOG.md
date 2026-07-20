@@ -1,3 +1,12 @@
+# v4.5.58
+
+## Fix: duplicate tray/GUI instances
+- Frontend/tray skipped the singleton check → two "Security" windows / tray icons.
+- Per-session `Local\CloudHoneypotClient_GUI` mutex: second launch exits.
+- Named show-event + window restore handoff so the existing UI comes to front.
+
+---
+
 # v4.5.57
 
 ## Fix: dashboard detail popup freezes the app

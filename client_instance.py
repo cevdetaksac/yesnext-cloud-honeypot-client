@@ -24,12 +24,22 @@ import win32api
 import winerror
 import psutil
 
-from client_constants import SINGLETON_MUTEX_NAME, DAEMON_MUTEX_NAME, CONTROL_HOST, CONTROL_PORT
+from client_constants import (
+    SINGLETON_MUTEX_NAME,
+    DAEMON_MUTEX_NAME,
+    GUI_MUTEX_NAME,
+    GUI_SHOW_EVENT_NAME,
+    CONTROL_HOST,
+    CONTROL_PORT,
+)
 from client_helpers import log
 
 # Keep mutex handle alive for process lifetime
 _MUTEX_HANDLE = None
 _DAEMON_MUTEX_HANDLE = None
+_GUI_MUTEX_HANDLE = None
+_GUI_SHOW_EVENT_HANDLE = None
+_GUI_SHOW_WATCHER_STARTED = False
 
 
 def try_acquire_daemon_mutex() -> bool:
@@ -68,6 +78,128 @@ def try_acquire_mutex_soft() -> bool:
     except Exception as e:
         log(f"ERROR: Soft mutex acquire failed: {e}")
         return False
+
+
+def try_acquire_gui_mutex() -> bool:
+    """Acquire per-session GUI/tray mutex. False if another frontend already owns it."""
+    global _GUI_MUTEX_HANDLE
+    try:
+        mutex = win32event.CreateMutex(None, False, GUI_MUTEX_NAME)
+        last_error = win32api.GetLastError()
+        if last_error == winerror.ERROR_ALREADY_EXISTS:
+            try:
+                win32api.CloseHandle(mutex)
+            except Exception:
+                pass
+            return False
+        _GUI_MUTEX_HANDLE = mutex
+        return True
+    except Exception as e:
+        log(f"ERROR: GUI mutex acquire failed: {e}")
+        return False
+
+
+def signal_existing_gui_show() -> bool:
+    """Pulse Local show-event so the running tray/GUI raises its window."""
+    try:
+        handle = win32event.CreateEvent(None, False, False, GUI_SHOW_EVENT_NAME)
+        win32event.SetEvent(handle)
+        try:
+            win32api.CloseHandle(handle)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        log(f"[SINGLETON] signal_existing_gui_show failed: {e}")
+        return False
+
+
+def activate_existing_gui_windows() -> bool:
+    """Best-effort: restore/foreground any honeypot window in this session."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        pids = set(list_interactive_honeypot_pids())
+        if not pids:
+            return False
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _enum(hwnd, _lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in pids:
+                return True
+            # Include hidden / iconic (tray-minimized main window)
+            if user32.IsWindow(hwnd):
+                found.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(_enum, 0)
+        SW_RESTORE = 9
+        raised = 0
+        for hwnd in found:
+            try:
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.SetForegroundWindow(hwnd)
+                raised += 1
+            except Exception:
+                pass
+        if raised:
+            log(f"[SINGLETON] Raised {raised} existing GUI window(s)")
+            return True
+    except Exception as e:
+        log(f"[SINGLETON] activate_existing_gui_windows failed: {e}")
+    return False
+
+
+def handoff_to_existing_gui() -> bool:
+    """Ask the already-running frontend to show; return True if we should exit."""
+    signaled = signal_existing_gui_show()
+    activated = activate_existing_gui_windows()
+    # Control-port SHOW hits the daemon (NOGUI) in frontend architecture — keep as last try
+    try:
+        request_show_existing(timeout=0.6)
+    except Exception:
+        pass
+    ok = bool(signaled or activated or has_interactive_honeypot())
+    if ok:
+        log("[SINGLETON] Existing GUI/tray present — handoff done, new instance will exit")
+    return ok
+
+
+def start_gui_show_watcher(show_callback) -> None:
+    """Daemon thread: wait for Local show-event and call show_callback (Tk-safe via callback)."""
+    global _GUI_SHOW_EVENT_HANDLE, _GUI_SHOW_WATCHER_STARTED
+    if _GUI_SHOW_WATCHER_STARTED or not callable(show_callback):
+        return
+    _GUI_SHOW_WATCHER_STARTED = True
+    try:
+        import threading
+
+        _GUI_SHOW_EVENT_HANDLE = win32event.CreateEvent(
+            None, False, False, GUI_SHOW_EVENT_NAME
+        )
+
+        def _loop():
+            while True:
+                try:
+                    rc = win32event.WaitForSingleObject(_GUI_SHOW_EVENT_HANDLE, 5000)
+                    if rc == win32event.WAIT_OBJECT_0:
+                        try:
+                            show_callback()
+                        except Exception as e:
+                            log(f"[SINGLETON] show_callback error: {e}")
+                except Exception:
+                    time.sleep(1.0)
+
+        threading.Thread(target=_loop, name="GuiShowWatcher", daemon=True).start()
+        log("[SINGLETON] GUI show watcher started")
+    except Exception as e:
+        log(f"[SINGLETON] start_gui_show_watcher failed: {e}")
+        _GUI_SHOW_WATCHER_STARTED = False
 
 
 def mutex_already_held() -> bool:

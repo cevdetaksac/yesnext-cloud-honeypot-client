@@ -2894,6 +2894,23 @@ class CloudHoneypotClient:
                     self.root.deiconify(); self.root.lift(); self.root.focus_force()
             except: pass
         self.show_cb = _show_window
+
+        # Second launch (--mode=tray / desktop shortcut) pulses Local show-event
+        try:
+            from client_instance import start_gui_show_watcher
+
+            def _show_from_event():
+                try:
+                    self._gui_safe(self.show_cb)
+                except Exception:
+                    try:
+                        self.show_cb()
+                    except Exception:
+                        pass
+
+            start_gui_show_watcher(_show_from_event)
+        except Exception as e:
+            log(f"[SINGLETON] GUI show watcher not started: {e}")
         
         # GUI sağlık durumu izleme başlat
         self.root.after(self.gui_health['health_check_interval'] * 1000, self.check_gui_health)
@@ -3111,11 +3128,20 @@ if __name__ == "__main__":
             try_acquire_mutex_soft()
         except Exception:
             pass
+    elif want_frontend or want_tray:
+        # One tray/GUI per Windows session — never spawn a second Security window
+        from client_instance import try_acquire_gui_mutex, handoff_to_existing_gui
+        if not try_acquire_gui_mutex():
+            log("GUI/tray already running in this session — handing off SHOW and exiting")
+            try:
+                handoff_to_existing_gui()
+            except Exception as e:
+                log(f"GUI handoff error: {e}")
+            sys.exit(0)
     else:
-        if not (want_frontend or want_tray):
-            if not check_singleton(operation_mode, allow_steal=False):
-                log("ERROR: Cannot start - another instance is running or mutex failed")
-                sys.exit(2)
+        if not check_singleton(operation_mode, allow_steal=False):
+            log("ERROR: Cannot start - another instance is running or mutex failed")
+            sys.exit(2)
 
     # ===== SIMPLIFIED MODE-BASED EXECUTION =====
     

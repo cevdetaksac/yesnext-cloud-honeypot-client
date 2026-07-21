@@ -118,13 +118,12 @@ Hedef: Yeni korumaların yanlış pozitif veya restart storm ile sistemi
 etkilemesini önleyecek test/telemetri tabanı; mevcut command-signing ve
 update-integrity boşluklarını kapatmak.
 
-- [ ] **SR-001 — Resilience SLO'ları:** motor detect/restart süresi, Guardian
-  health, restart sayısı, backoff ve `last_good_version` ölçümleri.
-- [ ] **SR-002 — Restart-storm breaker:** kısa pencerede tekrar çöküşte sınırlı
-  exponential backoff; servis tamamen bırakılmaz, dashboard'a degraded alarmı.
-- [ ] **SR-003 — Guardian kurulum sağlığı:** `service_installed=true` fakat
-  `service_ok=false` durumunu otomatik onar; SCM exit code ve recovery action
-  telemetrisi ekle.
+- [~] **SR-001 — Resilience SLO'ları:** `client_resilience` + STATUS/health
+  additive `resilience{}` (draft); cloud ignore-until-promoted.
+- [~] **SR-002 — Restart-storm breaker:** motor/Guardian recovery için bounded
+  exponential backoff; storm bayrağı; stand-down (update/PIN) ayrımı.
+- [~] **SR-003 — Guardian kurulum sağlığı:** motor cross-watch
+  `ensure_guardian_with_backoff`; WIN32_EXIT_CODE okuma; installed-but-down heal.
 - [~] **ZT-600 — İmzasız komutları reddet:**
   Observe hazır (`inspect_command_signature` + yerel `signature_*` sayaçları);
   invalid hâlâ reject, missing hâlâ soft-allow. Enforce ancak cloud %100 imza
@@ -250,8 +249,8 @@ Kabul:
 
 ## Faz 3 — ETW tabanlı davranışsal ransomware sensörü
 
-- [ ] **RANS-301 — ETW provider PoC:** file create/write/rename/delete olaylarını
-  PID/process-start-time ile ilişkilendir; gereken privilege/provider'ı belge.
+- [~] **RANS-301 — ETW provider PoC:** `client_etw_shadow` shadow yüzeyi +
+  event-loss sayaçları (auto-containment kapalı; gerçek provider henüz bağlı değil).
 - [ ] **RANS-302 — Kayıp olay telemetrisi:** dropped events, buffer pressure,
   provider restart ve `psutil`/Event Log fallback.
 - [ ] **RANS-303 — Korelasyon motoru:** file fan-out + rename + entropy/extension
@@ -344,9 +343,9 @@ Kabul:
 ### P0 — Sonraki güvenlik sprinti
 
 - [~] **ZT-600** Observe telemetry landed; missing-sig enforce blocked on cloud/contract
-  - [ ] SR-001 Resilience SLO + dashboard telemetry
-  - [ ] SR-002 Restart-storm breaker
-  - [ ] SR-003 Guardian `installed but not running` self-heal
+  - [~] SR-001 Resilience SLO + local/status telemetry (cloud promote pending)
+  - [~] SR-002 Restart-storm breaker
+  - [~] SR-003 Guardian `installed but not running` self-heal
   - [ ] SUP-001 Authenticode signing pipeline
   - [ ] **SUP-001b** Update path'te WinVerifyTrust
   - [ ] SUP-002 SBOM/provenance
@@ -354,7 +353,7 @@ Kabul:
   - [ ] **REV-101/102** Binary exposure threat model + embedded secret CI scan
   - [ ] **REV-104** Runtime Authenticode/module integrity tasarımı
   - [~] **ID-401** Event Log 4723/4724 parola değişimi/reset (client sensor)
-  - [ ] RANS-301 ETW read-only PoC
+  - [~] RANS-301 ETW shadow PoC surface (provider attach later)
   - [ ] ZT-601 Canonical asymmetric command envelope tasarımı
 
 ### P1 — P0 ölçümleri yeşil olduktan sonra

@@ -1405,6 +1405,7 @@ class CloudHoneypotClient:
             "persistence": self._ipc_persistence_summary(),
             "network_guard": self._ipc_network_guard_summary(),
             "ransomware_running": self._ipc_rs_running(),
+            "resilience": self._ipc_resilience_summary(),
         }
 
     def _ipc_rs_running(self) -> bool:
@@ -1442,6 +1443,20 @@ class CloudHoneypotClient:
             rc = getattr(self, "remote_commands", None)
             daemon_ok = bool(is_motor and rc and getattr(rc, "_running", False))
             return get_persistence_status(daemon_ok_override=daemon_ok)
+        except Exception:
+            return {}
+
+    def _ipc_resilience_summary(self) -> dict:
+        try:
+            persistence = self._ipc_persistence_summary()
+            nested = persistence.get("resilience")
+            if isinstance(nested, dict) and nested:
+                return nested
+            from client_resilience import snapshot
+            return snapshot(
+                guardian_installed=persistence.get("service_installed"),
+                guardian_running=persistence.get("service_ok"),
+            )
         except Exception:
             return {}
 
@@ -2864,8 +2879,14 @@ class CloudHoneypotClient:
                     if is_operator_stop_active():
                         time.sleep(30)
                         continue
-                    from client_guardian_service import ensure_guardian_service_running
-                    ensure_guardian_service_running()
+                    try:
+                        from client_resilience import ensure_guardian_with_backoff
+                        ensure_guardian_with_backoff()
+                    except Exception:
+                        from client_guardian_service import (
+                            ensure_guardian_service_running,
+                        )
+                        ensure_guardian_service_running()
                 except Exception:
                     pass
                 time.sleep(30)

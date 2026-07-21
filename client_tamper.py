@@ -231,7 +231,7 @@ def get_persistence_status(daemon_ok_override=None) -> dict:
         op_stop = is_operator_stop_active()
     except Exception:
         op_stop = False
-    return {
+    out = {
         "service_ok": svc_ok,
         "service_installed": svc_inst,
         "daemon_ok": daemon_ok,
@@ -241,3 +241,12 @@ def get_persistence_status(daemon_ok_override=None) -> dict:
         "last_tamper_ts": _last_tamper_ts,
         "tamper_count_24h": _tamper_count_24h,
     }
+    try:
+        from client_resilience import snapshot
+        out["resilience"] = snapshot(
+            guardian_installed=svc_inst,
+            guardian_running=svc_ok,
+        )
+    except Exception:
+        pass
+    return out

@@ -194,31 +194,60 @@ def resurrect_motor() -> bool:
 def guardian_watch_loop(stop_event=None, interval_sec: float = 10.0) -> None:
     log("[GUARDIAN] watch loop started")
     while stop_event is None or not stop_event.is_set():
+        sleep_for = float(interval_sec)
         try:
             if _legitimate_stand_down():
+                try:
+                    from client_resilience import note_stand_down
+                    note_stand_down("update_or_operator_stop")
+                except Exception:
+                    pass
                 if stop_event is not None:
-                    stop_event.wait(interval_sec)
+                    stop_event.wait(sleep_for)
                 else:
-                    time.sleep(interval_sec)
+                    time.sleep(sleep_for)
                 continue
             if not is_motor_healthy(timeout=0.9):
-                log("[GUARDIAN] motor unhealthy — resurrecting")
-                t0 = time.monotonic()
-                ok = resurrect_motor()
-                ms = int((time.monotonic() - t0) * 1000)
-                if not ok:
+                try:
+                    from client_resilience import (
+                        record_recovery_attempt,
+                        should_attempt_recovery,
+                    )
+                    allowed, wait = should_attempt_recovery("daemon")
+                except Exception:
+                    allowed, wait = True, 0
+                if not allowed:
+                    log(f"[GUARDIAN] motor recovery deferred backoff={wait}s")
+                    sleep_for = max(sleep_for, float(wait))
+                else:
+                    log("[GUARDIAN] motor unhealthy — resurrecting")
+                    t0 = time.monotonic()
+                    ok = resurrect_motor()
+                    ms = int((time.monotonic() - t0) * 1000)
                     try:
-                        from client_tamper import report_tamper
-                        report_tamper(reason="motor_down", leg="service",
-                                      resurrected=False, resurrect_ms=ms)
+                        from client_resilience import record_recovery_attempt
+                        record_recovery_attempt(
+                            "daemon", ok=ok, duration_ms=ms
+                        )
                     except Exception:
                         pass
+                    if not ok:
+                        try:
+                            from client_tamper import report_tamper
+                            report_tamper(
+                                reason="motor_down",
+                                leg="service",
+                                resurrected=False,
+                                resurrect_ms=ms,
+                            )
+                        except Exception:
+                            pass
         except Exception as e:
             log(f"[GUARDIAN] watch error: {e}")
         if stop_event is not None:
-            stop_event.wait(interval_sec)
+            stop_event.wait(sleep_for)
         else:
-            time.sleep(interval_sec)
+            time.sleep(sleep_for)
 
 
 def run_guardian_mode():

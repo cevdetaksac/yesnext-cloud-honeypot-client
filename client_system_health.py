@@ -1192,7 +1192,11 @@ class SystemHealthMonitor:
         }
         try:
             from client_tamper import get_persistence_status
-            payload["snapshot"]["persistence"] = get_persistence_status()
+            persistence = get_persistence_status()
+            payload["snapshot"]["persistence"] = persistence
+            # Additive draft field — cloud ignores until contract promotion.
+            if isinstance(persistence.get("resilience"), dict):
+                payload["snapshot"]["resilience"] = persistence["resilience"]
         except Exception:
             pass
         try:

@@ -55,6 +55,33 @@ class FakeMailbox:
         return True
 
 
+class FakeConnectedMedia:
+    available = True
+    active = True
+
+    def __init__(self):
+        self.frames = []
+
+    def publish_frame(self, jpeg, metadata=None):
+        self.frames.append((jpeg, metadata))
+        return True
+
+    def status(self):
+        return {
+            "available": True,
+            "active": True,
+            "connection_state": "connected",
+            "ice_state": "completed",
+            "codec": "H264",
+        }
+
+    def capabilities(self):
+        return {"webrtc": True, "codecs": ["H264"]}
+
+    def stop(self):
+        return None
+
+
 def _make(running=True, api=None):
     rd = RemoteDesktopStreamer(api_client=api, token_getter=lambda: "tok")
     rd._running = running
@@ -64,6 +91,48 @@ def _make(running=True, api=None):
 
 
 class TestTransportSelection(unittest.TestCase):
+    def test_connected_media_drops_pending_jpeg_and_skips_ws_http(self):
+        api = FakeApi()
+        media = FakeConnectedMedia()
+        rd = RemoteDesktopStreamer(
+            api_client=api, token_getter=lambda: "tok", media_transport=media
+        )
+        rd._running = True
+        rd._ws_ok = True
+        rd._pending_frame = b"stale-jpeg"
+        rd._dispatch_frame("tok", JPEG, 1280, 720, 1)
+        self.assertEqual(len(media.frames), 1)
+        self.assertIsNone(rd._pending_frame)
+        self.assertEqual(api.uploads, [])
+        self.assertEqual(rd._transport, "webrtc")
+
+    def test_ws_flush_never_sends_binary_while_media_connected(self):
+        rd = RemoteDesktopStreamer(
+            api_client=FakeApi(),
+            token_getter=lambda: "tok",
+            media_transport=FakeConnectedMedia(),
+        )
+        rd._running = True
+        rd._q_put_text('{"t":"meta"}')
+        rd._q_put_frame(JPEG)
+        ws = FakeWS()
+        rd._ws_flush_out(ws)
+        self.assertTrue(ws.sent)
+        self.assertTrue(all(opcode is None for _payload, opcode in ws.sent))
+        self.assertIsNone(rd._pending_frame)
+
+    def test_media_capture_settings_ignore_jpeg_fps_quality(self):
+        rd = RemoteDesktopStreamer(
+            api_client=FakeApi(),
+            token_getter=lambda: "tok",
+            media_transport=FakeConnectedMedia(),
+        )
+        rd._fps = 4.0
+        rd._quality = 25
+        fps, quality, _width = rd._effective_capture_settings()
+        self.assertEqual(fps, 30.0)
+        self.assertEqual(quality, 78)
+
     def test_ws_healthy_sends_no_http(self):
         api = FakeApi()
         rd = _make(api=api)

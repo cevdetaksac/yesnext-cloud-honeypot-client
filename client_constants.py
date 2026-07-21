@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.0"  # Remote Desktop v2: persistent session helper, input v2, adaptive media, optional WebRTC/H.264
+VERSION = "4.9.1"  # WebRTC smoothness + P1 security/resilience observe package
 
 
 CLIENT_VERSION = VERSION  # Main version constant

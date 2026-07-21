@@ -12,11 +12,15 @@ import os, importlib
 # The normal production build excludes them and advertises JPEG fallback only.
 _webrtc_hidden = []
 _webrtc_enabled = os.environ.get('HONEYPOT_WEBRTC') == '1'
-_webrtc_excludes = [] if _webrtc_enabled else ['aiortc', 'av']
+_webrtc_excludes = [] if _webrtc_enabled else ['aiortc', 'av', 'dxcam']
 if _webrtc_enabled:
     try:
         from PyInstaller.utils.hooks import collect_submodules
-        _webrtc_hidden = collect_submodules('aiortc') + collect_submodules('av')
+        _webrtc_hidden = (
+            collect_submodules('aiortc')
+            + collect_submodules('av')
+            + collect_submodules('dxcam')
+        )
     except Exception:
         _webrtc_hidden = []
 
@@ -36,7 +40,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('certs/*.ico', 'certs'), ('certs/*.png', 'certs'), ('certs/*.bmp', 'certs'), ('client_config.json', '.'), ('client_lang.json', '.'), ('client_memory_restart.py', '.'), ('client_daemon_ipc.py', '.'), ('client_lifecycle.py', '.'), ('client_update_ui.py', '.'), ('client_winproc.py', '.'), ('client_remote_session.py', '.'), ('memory_restart.ps1', '.'), ('scripts/kill-honeypot.ps1', 'scripts'), ('scripts/update-and-install.ps1', 'scripts'), ('client_gui.py', '.'), ('client_gui_lock.py', '.'), ('client_logon_challenge.py', '.'), ('client_eventlog.py', '.'), ('client_threat_engine.py', '.'), ('client_alerts.py', '.'), ('client_auto_response.py', '.'), ('client_remote_commands.py', '.'), ('client_silent_hours.py', '.'), ('client_ransomware_shield.py', '.'), ('client_system_health.py', '.'), ('client_self_protection.py', '.'), ('client_performance.py', '.'), ('client_guardian_service.py', '.'), ('client_operator_stop.py', '.'), ('client_tamper.py', '.'), ('client_autologon.py', '.'), ('client_network_guard.py', '.'), (os.path.join(ctk_path, 'assets'), 'customtkinter/assets')] + _certifi_datas,
-    hiddenimports=['client_memory_restart', 'client_daemon_ipc', 'client_lifecycle', 'client_update_ui', 'client_winproc', 'client_remote_session', 'client_rdp_nla', 'client_honeypots', 'client_service_manager', 'client_gui', 'client_gui_lock', 'client_logon_challenge', 'client_eventlog', 'client_threat_engine', 'client_alerts', 'client_auto_response', 'client_remote_commands', 'client_remote_desktop', 'client_rd_adaptive', 'client_rd_media', 'client_rd_session_helper', 'client_silent_hours', 'client_ransomware_shield', 'client_system_health', 'client_self_protection', 'client_performance', 'client_guardian_service', 'client_operator_stop', 'client_tamper', 'client_autologon', 'client_network_guard', 'customtkinter', 'darkdetect', 'paramiko', 'psutil', 'websocket', 'websocket.websocket', 'win32event', 'win32api', 'winerror', 'win32security', 'ntsecuritycon', 'win32serviceutil', 'win32service', 'servicemanager', 'certifi', 'cryptography'] + _webrtc_hidden,
+    hiddenimports=['client_memory_restart', 'client_daemon_ipc', 'client_lifecycle', 'client_update_ui', 'client_winproc', 'client_remote_session', 'client_rdp_nla', 'client_honeypots', 'client_service_manager', 'client_gui', 'client_gui_lock', 'client_logon_challenge', 'client_eventlog', 'client_threat_engine', 'client_alerts', 'client_auto_response', 'client_remote_commands', 'client_remote_desktop', 'client_rd_adaptive', 'client_rd_media', 'client_rd_session_helper', 'client_silent_hours', 'client_ransomware_shield', 'client_system_health', 'client_self_protection', 'client_performance', 'client_guardian_service', 'client_operator_stop', 'client_tamper', 'client_autologon', 'client_network_guard', 'client_integrity', 'client_command_envelope', 'client_resilience_p1', 'client_offline_queue', 'client_identity_correlation', 'client_device_identity', 'client_operator_keys', 'customtkinter', 'darkdetect', 'paramiko', 'psutil', 'websocket', 'websocket.websocket', 'win32event', 'win32api', 'winerror', 'win32security', 'ntsecuritycon', 'win32serviceutil', 'win32service', 'servicemanager', 'certifi', 'cryptography'] + _webrtc_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['rthook_ssl_certs.py'],

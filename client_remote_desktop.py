@@ -136,6 +136,11 @@ class RemoteDesktopStreamer:
         self._requested_fps = DEFAULT_FPS
         self._requested_quality = DEFAULT_QUALITY
         self._requested_max_width = DEFAULT_MAX_WIDTH
+        # WebRTC capture pacing is independent from JPEG-era stream knobs.
+        self._media_fps = 30.0
+        self._media_quality = 78
+        self._media_mode_applied = False
+        self._dxcam = None
         self._adaptive = AdaptiveStreamController(
             DEFAULT_FPS, DEFAULT_QUALITY, DEFAULT_MAX_WIDTH
         )
@@ -271,6 +276,7 @@ class RemoteDesktopStreamer:
             self._use_user_helper = False
             self._helper_frame_id = 0
             self._helper_frame_misses = 0
+            self._media_mode_applied = False
             self._drag_active = False
 
             # ── Resolve target WTS session (dashboard picker) ──
@@ -529,6 +535,12 @@ class RemoteDesktopStreamer:
             self._media.stop()
         except Exception:
             pass
+        try:
+            if self._dxcam is not None:
+                self._dxcam.stop()
+        except Exception:
+            pass
+        self._dxcam = None
         self._media_session_id = ""
         self._stop_persistent_helper()
         self._close_ws()
@@ -545,6 +557,16 @@ class RemoteDesktopStreamer:
         return self._running
 
     def get_status(self) -> dict:
+        media = self._media.status()
+        media_ready = self._media_ready()
+        media["effective_capture_fps"] = (
+            self._media_fps if media_ready else self._fps
+        )
+        media["capture_quality"] = (
+            self._media_quality if media_ready else self._quality
+        )
+        media.setdefault("encoder", "aiortc" if media.get("available") else "")
+        media.setdefault("target_bitrate_bps", None)
         return {
             "streaming": self._running,
             "transport": self._transport,
@@ -558,8 +580,8 @@ class RemoteDesktopStreamer:
                 "max_width": self._requested_max_width,
             },
             "effective": {
-                "fps": self._fps,
-                "quality": self._quality,
+                "fps": self._media_fps if media_ready else self._fps,
+                "quality": self._media_quality if media_ready else self._quality,
                 "max_width": self._max_width,
             },
             "seq": self._seq,
@@ -580,7 +602,7 @@ class RemoteDesktopStreamer:
                 "last_capture_mono_ms": int(self._last_capture_mono * 1000),
                 "last_send_mono_ms": int(self._last_send_mono * 1000),
             },
-            "media": self._media.status(),
+            "media": media,
             "capabilities": self._capabilities(),
             "stats": dict(self._stats),
         }
@@ -839,6 +861,38 @@ class RemoteDesktopStreamer:
 
     # ── Capture loop ──────────────────────────────────────────────
 
+    def _media_ready(self) -> bool:
+        try:
+            status = self._media.status()
+            return bool(
+                status.get("active")
+                and status.get("connection_state") == "connected"
+                and status.get("ice_state") in ("connected", "completed")
+            )
+        except Exception:
+            return False
+
+    def _effective_capture_settings(self) -> Tuple[float, int, int]:
+        if self._media_ready():
+            return self._media_fps, self._media_quality, self._max_width
+        return self._fps, self._quality, self._max_width
+
+    def _sync_media_capture_mode(self) -> None:
+        ready = self._media_ready()
+        if ready == self._media_mode_applied:
+            return
+        self._media_mode_applied = ready
+        if self._persistent_helper_connected():
+            fps, quality, max_width = self._effective_capture_settings()
+            self._session_helper.update_config({
+                "fps": fps, "quality": quality, "max_width": max_width,
+            })
+        if ready:
+            # Drop any JPEG captured before DTLS/ICE became ready.
+            with self._out_lock:
+                self._pending_frame = None
+        self._enqueue_meta(force=True)
+
     def _capture_loop(self):
         while self._running and not self._stop.is_set():
             t0 = time.time()
@@ -857,11 +911,13 @@ class RemoteDesktopStreamer:
                         f"no frames in {CAPTURE_FAIL_SECONDS:.0f}s (screen still empty)")
                     self.stop(reason="CAPTURE_NO_DESKTOP")
                     break
+                self._sync_media_capture_mode()
                 self._capture_and_send()
             except Exception as e:
                 self._stats["frames_failed"] += 1
                 log(f"[REMOTE-DESKTOP] Frame error: {e}")
-            interval = 1.0 / max(self._fps, 0.5)
+            effective_fps, _quality, _width = self._effective_capture_settings()
+            interval = 1.0 / max(effective_fps, 0.5)
             elapsed = time.time() - t0
             self._stop.wait(max(0.02, interval - elapsed))
 
@@ -876,12 +932,14 @@ class RemoteDesktopStreamer:
                 if not self._start_persistent_helper():
                     jpeg, w, h = self._grab_via_user_helper()
                 else:
+                    effective_fps, _quality, _width = self._effective_capture_settings()
                     jpeg, w, h = self._grab_via_persistent_helper(
-                        max(0.5, 2.0 / max(self._fps, 1.0))
+                        max(0.08, 2.0 / max(effective_fps, 1.0))
                     )
             else:
+                effective_fps, _quality, _width = self._effective_capture_settings()
                 jpeg, w, h = self._grab_via_persistent_helper(
-                    max(0.5, 2.0 / max(self._fps, 1.0))
+                    max(0.08, 2.0 / max(effective_fps, 1.0))
                 )
         else:
             jpeg, w, h = self._grab_jpeg()
@@ -959,6 +1017,10 @@ class RemoteDesktopStreamer:
             if self._media.publish_frame(jpeg, media_metadata):
                 self._transport = "webrtc"
                 self._last_activity = time.time()
+                # A stale JPEG may already be waiting from pre-connect. Remove
+                # it so the WS sender cannot compete with connected WebRTC.
+                with self._out_lock:
+                    self._pending_frame = None
                 return
         except Exception as exc:
             self._on_media_fallback(str(exc))
@@ -1155,13 +1217,33 @@ class RemoteDesktopStreamer:
 
         img = None
         method = "none"
+        # WebRTC media mode: prefer Desktop Duplication (dirty/present driven)
+        # when the optional dxcam runtime is packaged. Falls back safely.
+        if self._media_ready():
+            try:
+                import dxcam  # type: ignore
+                if self._dxcam is None:
+                    self._dxcam = dxcam.create(output_color="RGB")
+                frame = self._dxcam.grab(region=(
+                    origin_x,
+                    origin_y,
+                    origin_x + native_w,
+                    origin_y + native_h,
+                ))
+                if frame is not None:
+                    img = Image.fromarray(frame)
+                    method = "dxgi-desktop-duplication"
+            except Exception:
+                # Optional capability: no warning spam on hosts without dxcam.
+                self._dxcam = None
         # Prefer GDI BitBlt (more reliable than ImageGrab under elevation / DPI)
-        try:
-            img = self._grab_gdi()
-            if img is not None:
-                method = "gdi"
-        except Exception as e:
-            log(f"[REMOTE-DESKTOP] GDI grab failed: {e}")
+        if img is None:
+            try:
+                img = self._grab_gdi()
+                if img is not None:
+                    method = "gdi"
+            except Exception as e:
+                log(f"[REMOTE-DESKTOP] GDI grab failed: {e}")
 
         if img is None or self._is_mostly_black(img):
             try:
@@ -1224,16 +1306,19 @@ class RemoteDesktopStreamer:
         if native_w <= 0 or native_h <= 0:
             self._screen_w, self._screen_h = img.size
 
-        if img.width > self._max_width:
-            ratio = self._max_width / float(img.width)
-            new_size = (self._max_width, max(1, int(img.height * ratio)))
+        _fps, effective_quality, effective_max_width = (
+            self._effective_capture_settings()
+        )
+        if img.width > effective_max_width:
+            ratio = effective_max_width / float(img.width)
+            new_size = (effective_max_width, max(1, int(img.height * ratio)))
             resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else Image.BILINEAR
             img = img.resize(new_size, resample)
 
         self._capture_w, self._capture_h = img.size
         rgb = img.convert("RGB")
 
-        quality = self._quality
+        quality = effective_quality
         jpeg = None
         for _ in range(6):
             buf = io.BytesIO()
@@ -2019,7 +2104,11 @@ class RemoteDesktopStreamer:
                 ws.send(json.dumps(self._hello_payload()))
                 self._enqueue_meta(force=True)
                 # Re-push last good frame so viewer is not blank while waiting
-                if self._last_good_jpeg and self._last_good_wh[0] > 0:
+                if (
+                    not self._media_ready()
+                    and self._last_good_jpeg
+                    and self._last_good_wh[0] > 0
+                ):
                     self._enqueue_ws_frame(
                         self._last_good_jpeg,
                         self._last_good_wh[0],
@@ -2066,6 +2155,15 @@ class RemoteDesktopStreamer:
     def _enqueue_meta(self, force: bool = False):
         if not force and self._seq % META_EVERY_N_FRAMES != 0:
             return
+        media = self._media.status()
+        media["effective_capture_fps"] = (
+            self._media_fps if self._media_ready() else self._fps
+        )
+        media["capture_quality"] = (
+            self._media_quality if self._media_ready() else self._quality
+        )
+        media.setdefault("encoder", "aiortc" if media.get("available") else "")
+        media.setdefault("target_bitrate_bps", None)
         meta = {
             "t": "meta",
             "protocol": 2,
@@ -2088,7 +2186,7 @@ class RemoteDesktopStreamer:
             "last_send_mono_ms": int(self._last_send_mono * 1000),
             "session_id": self._target_session_id,
             "username": self._target_username or "",
-            "media": self._media.status(),
+            "media": media,
         }
         self._q_put_text(json.dumps(meta))
 
@@ -2138,9 +2236,15 @@ class RemoteDesktopStreamer:
             with self._out_lock:
                 if self._pending_text:
                     payload = self._pending_text.popleft()
-                elif self._pending_frame is not None:
+                elif self._pending_frame is not None and not self._media_ready():
                     frame = self._pending_frame
                     self._pending_frame = None
+                elif self._pending_frame is not None:
+                    # Connected WebRTC owns video. Drop stale JPEG rather than
+                    # queueing/sending duplicate bandwidth.
+                    self._pending_frame = None
+                    self._stats["frames_coalesced"] += 1
+                    continue
                 else:
                     break
             try:

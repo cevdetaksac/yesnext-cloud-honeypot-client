@@ -78,7 +78,7 @@ if (Test-Path $venvPython) {
 # binaries. Never produce a build that advertises WebRTC without the runtime.
 if ($WebRTC) {
     Write-Host "   WebRTC/H.264 release profile enabled" -ForegroundColor Cyan
-    & $PYTHON -c "import aiortc, av"
+    & $PYTHON -c "import aiortc, av, dxcam"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: WebRTC runtime is missing." -ForegroundColor Red
         Write-Host "Install it with: $PYTHON -m pip install -r requirements-webrtc.txt" -ForegroundColor Yellow

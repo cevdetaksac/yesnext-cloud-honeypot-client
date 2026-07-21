@@ -335,7 +335,9 @@ def run_session_helper(host: str, port: int, secret_hex: str, session_id: int) -
 
     rd = RemoteDesktopStreamer()
     rd._running = True
-    rd._fps = max(1.0, min(float(config.get("fps", 6.0)), 10.0))
+    # JPEG fallback normally stays <=10 fps; WebRTC media mode can request
+    # 30-60 fps independently through update_config.
+    rd._fps = max(1.0, min(float(config.get("fps", 6.0)), 60.0))
     rd._quality = max(20, min(int(config.get("quality", 35)), 85))
     rd._max_width = max(640, min(int(config.get("max_width", 1280)), 1920))
     rd._monitor_index = max(0, int(config.get("monitor", 0)))
@@ -374,7 +376,7 @@ def run_session_helper(host: str, port: int, secret_hex: str, session_id: int) -
             if kind == "S":
                 break
             if kind == "C":
-                rd._fps = max(1.0, min(float(header.get("fps", rd._fps)), 10.0))
+                rd._fps = max(1.0, min(float(header.get("fps", rd._fps)), 60.0))
                 rd._quality = max(20, min(int(header.get("quality", rd._quality)), 85))
                 rd._max_width = max(
                     640, min(int(header.get("max_width", rd._max_width)), 1920)

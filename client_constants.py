@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.8.3"  # Dashboard PIN set/reset (set_gui_pin/clear_gui_pin) + IP table quick block/whitelist buttons
+VERSION = "4.8.4"  # Whitelist cloud SoT fix: GUI merges threats/config whitelist_ips (frontend-only add no longer no-op/wipe)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

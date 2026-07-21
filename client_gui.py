@@ -3668,6 +3668,13 @@ class ModernGUI:
             except Exception:
                 pass
 
+        # Cloud SoT — frontend-only GUI'de engine setleri boş; whitelist
+        # threats/config'ten okunmazsa tablo hep "Whitelist boş" gösterir.
+        try:
+            whitelist_ips |= self._cloud_whitelist_ips(force=bool(force_firewall))
+        except Exception:
+            pass
+
         skip = {"local", "", "127.0.0.1", "::1"}
 
         for ip, ctx in contexts.items():
@@ -4019,12 +4026,40 @@ class ModernGUI:
             ok = True
         return ok
 
-    def _persist_whitelist_to_cloud(self) -> bool:
-        """Push the effective local whitelist set to threats/config immediately."""
+    def _cloud_whitelist_ips(self, force: bool = False) -> set:
+        """Cloud threats/config whitelist_ips — SoT (frontend GUI'de engine yok).
+
+        60 sn cache'lenir; add/remove sonrası effective config ile tazelenir.
+        """
+        now = time.time()
+        cached = getattr(self, "_wl_cloud_cache", None)
+        if (
+            not force
+            and cached is not None
+            and now - getattr(self, "_wl_cloud_ts", 0) < 60
+        ):
+            return set(cached)
+        token = self.app.state.get("token", "")
+        if not token or not getattr(self.app, "api_client", None):
+            return set(cached or [])
+        cfg = self.app.api_client.fetch_threat_config(token)
+        if isinstance(cfg, dict) and "whitelist_ips" in cfg:
+            self._wl_cloud_cache = set(cfg.get("whitelist_ips") or [])
+            self._wl_cloud_ts = now
+        return set(getattr(self, "_wl_cloud_cache", set()) or set())
+
+    def _persist_whitelist_to_cloud(self, add=None, remove=None) -> bool:
+        """Merge-update cloud whitelist_ips (cloud SoT — never blind overwrite).
+
+        Frontend-only GUI has no engine objects; reading only local sets used
+        to push an empty list and wipe the cloud whitelist. Start from the
+        cloud's current set, union local engine sets (daemon-mode GUI), then
+        apply the explicit add/remove delta.
+        """
         token = self.app.state.get("token", "")
         if not token or not getattr(self.app, "api_client", None):
             return False
-        ips = set()
+        ips = self._cloud_whitelist_ips(force=True)
         te = getattr(self.app, "threat_engine", None)
         ar = getattr(self.app, "auto_response", None)
         ew = getattr(self.app, "event_watcher", None)
@@ -4034,10 +4069,21 @@ class ModernGUI:
             ips |= set(ar.whitelist_ips or [])
         if ew and hasattr(ew, "whitelist_ips"):
             ips |= set(ew.whitelist_ips or [])
+        for ip in (add or []):
+            ips.add(ip)
+        for ip in (remove or []):
+            ips.discard(ip)
         resp = self.app.api_client.update_threat_config(
             token, {"whitelist_ips": sorted(ips)}
         )
-        return isinstance(resp, dict)
+        if not isinstance(resp, dict):
+            return False
+        effective = resp.get("whitelist_ips")
+        self._wl_cloud_cache = (
+            set(effective) if isinstance(effective, list) else set(ips)
+        )
+        self._wl_cloud_ts = time.time()
+        return True
 
     def _ip_table_whitelist(self, ip: str):
         """IP tablosundan guvenli listeye ekle — off-thread + cloud persist."""
@@ -4063,7 +4109,7 @@ class ModernGUI:
             ew = getattr(self.app, "event_watcher", None)
             if ew and hasattr(ew, "whitelist_ips"):
                 ew.whitelist_ips.add(ip)
-            synced = self._persist_whitelist_to_cloud()
+            synced = self._persist_whitelist_to_cloud(add=[ip])
 
             def _ui():
                 self.show_toast(
@@ -4098,7 +4144,7 @@ class ModernGUI:
             auto_response.whitelist_ips.discard(ip)
 
         def _work():
-            synced = self._persist_whitelist_to_cloud()
+            synced = self._persist_whitelist_to_cloud(remove=[ip])
 
             def _ui():
                 self.show_toast(

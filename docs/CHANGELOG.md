@@ -1,3 +1,9 @@
+# v4.8.4
+- **Whitelist "eklendi ama görünmüyor" fix (cloud SoT):** frontend-only GUI'de engine nesneleri (`threat_engine`/`auto_response`/`event_watcher`) `None` olduğundan whitelist ekleme yalnız yerel setlere yazmaya çalışıyor, buluta **boş liste** gönderiyor (mevcut cloud whitelist'i silme riski) ve tablo hep "Whitelist boş" kalıyordu. Artık:
+  - `_persist_whitelist_to_cloud(add/remove)` bulutun güncel `whitelist_ips`'ini okur, yerel setlerle birleştirir, açık add/remove deltasını uygular — asla kör overwrite yapmaz.
+  - IP tablosu whitelist sekmesi bulut `threats/config.whitelist_ips`'i de okur (60 sn cache; add/remove sonrası effective response ile tazelenir).
+- 5 yeni unit test (merge, wipe koruması, remove, cache, tokensız) + canlı round-trip doğrulaması (1.1.1.1 add → cloud'da göründü → tabloda "Güvenli" satırı → remove → temiz).
+
 # v4.8.3
 - **Dashboard'dan GUI PIN yönetimi:** yeni uzak komutlar `set_gui_pin` (pin 4-12 hane, confirm gate, PIN result/log'a asla yazılmaz) ve `clear_gui_pin` (PIN sıfırlama). SYSTEM daemon `gui_lock.json`'u yazar; GUI süreci dosya mtime'ından dış değişikliği algılayıp hash'i yeniden yükler ve aktif oturum kilidini düşürür — restart gerekmez. Hesap bağlıysa (`is_account_linked()`) tüm PIN diyaloglarında "Hesabınız bağlı — PIN kodunuzu dashboard üzerinden tanımlayabilir veya sıfırlayabilirsiniz" ipucu gösterilir (PIN unutma kurtarma yolu).
 - **IP Listeleri hızlı aksiyon butonları:** tablo başlığının sağ üstüne **＋ IP Engelle** ve **＋ Whitelist'e Ekle** eklendi. Modal input ile IP alınır, `ipaddress` ile doğrulanır (geçersiz → toast), PIN gate'inden geçer ve satır aksiyonlarıyla aynı yolu kullanır (daemon IPC block/unblock + whitelist'in `POST /api/threats/config` sync'i).

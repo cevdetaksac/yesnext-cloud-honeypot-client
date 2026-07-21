@@ -359,6 +359,66 @@ def _rotate_history(payload: dict) -> None:
         pass
 
 
+def load_baseline_version(version: int) -> Optional[dict]:
+    """Load and verify a retained baseline version for controlled rollback."""
+    try:
+        path = os.path.join(
+            BASELINE_HISTORY_DIR, f"network_baseline.{int(version)}.json"
+        )
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if verify_baseline(data) else None
+    except Exception:
+        return None
+
+
+def plan_network_restore(
+    baseline: dict,
+    targets: Optional[List[str]] = None,
+) -> List[dict]:
+    """NET-501 pure dry-run plan; never executes a command."""
+    do = lambda name: targets is None or name in targets
+    plan: List[dict] = []
+    if do("adapter"):
+        for adapter in baseline.get("adapters", []):
+            if str(adapter.get("state")).lower() == "up" and adapter.get("name"):
+                plan.append({
+                    "target": "adapter",
+                    "action": "enable",
+                    "interface": adapter["name"],
+                })
+    if do("dns"):
+        for adapter in baseline.get("adapters", []):
+            dns = adapter.get("dns") or []
+            if dns and adapter.get("name"):
+                plan.append({
+                    "target": "dns",
+                    "action": "set",
+                    "interface": adapter["name"],
+                    "servers": list(dns)[:8],
+                })
+    if do("firewall"):
+        enabled = [
+            profile for profile in ("domain", "private", "public")
+            if (baseline.get("firewall") or {}).get(profile) == "on"
+        ]
+        plan.append({
+            "target": "firewall",
+            "action": "enable_profiles",
+            "profiles": enabled,
+        })
+    if do("mapped_drive"):
+        for drive in baseline.get("mapped_drives", []):
+            if drive.get("persistent") and drive.get("letter") and drive.get("unc"):
+                plan.append({
+                    "target": "mapped_drive",
+                    "action": "reconnect",
+                    "letter": drive["letter"],
+                    "unc": drive["unc"],
+                })
+    return plan[:128]
+
+
 # ── Detection scoring (pure, testable) ───────────────────────────────
 
 def score_signals(net_cut: bool, fs_storm: bool, suspicious_origin: bool,
@@ -651,10 +711,27 @@ class NetworkGuard:
     # -- D: recovery --
 
     def restore_network(self, baseline: Optional[dict] = None,
-                        targets: Optional[List[str]] = None) -> dict:
+                        targets: Optional[List[str]] = None,
+                        dry_run: bool = False,
+                        rollback_version: Optional[int] = None) -> dict:
+        if rollback_version is not None:
+            baseline = load_baseline_version(int(rollback_version))
+            if not baseline:
+                return {"error": "rollback_baseline_not_found_or_invalid"}
         baseline = baseline or self._last_baseline or load_baseline()
         if not baseline:
             return {"error": "no_baseline"}
+        if not verify_baseline(baseline):
+            return {"error": "baseline_signature_invalid"}
+        plan = plan_network_restore(baseline, targets)
+        if dry_run:
+            return {
+                "dry_run": True,
+                "baseline_version": baseline.get("version"),
+                "plan": plan,
+                "restore_actions": [],
+                "connectivity": check_connectivity(),
+            }
         do = lambda t: (targets is None or t in targets)
         actions: List[str] = []
 
@@ -690,7 +767,14 @@ class NetworkGuard:
         # verify connectivity after restore
         conn = check_connectivity()
         log(f"[NET-GUARD] restore actions={actions} internet_ok={conn['internet_ok']}")
-        return {"restore_actions": actions, "connectivity": conn}
+        return {
+            "dry_run": False,
+            "baseline_version": baseline.get("version"),
+            "rollback_version": rollback_version,
+            "plan": plan,
+            "restore_actions": actions,
+            "connectivity": conn,
+        }
 
     # -- E: alert --
 

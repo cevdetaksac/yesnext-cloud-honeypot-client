@@ -27,6 +27,38 @@ class TestEtwShadow(unittest.TestCase):
         self.assertEqual(sample["ops"]["rename"], 1)
         self.assertEqual(sample["provider_restarts"], 1)
         self.assertFalse(sample["auto_containment"])
+
+    def test_correlation_is_bounded_shadow_only(self):
+        sensor = EtwShadowSensor(window_sec=60)
+        for idx in range(35):
+            sensor.ingest_test_event(
+                op="write",
+                pid=4242,
+                path=f"C:/data/file-{idx}.docx",
+                image="sample.exe",
+                process_start_time=1.0,
+            )
+        for idx in range(22):
+            sensor.ingest_test_event(
+                op="rename",
+                pid=4242,
+                path=f"C:/data/renamed-{idx}.locked",
+                image="sample.exe",
+                process_start_time=1.0,
+            )
+        sample = sensor.sample()
+        correlation = sample["correlation"]
+        self.assertEqual(correlation["mode"], "shadow")
+        self.assertFalse(correlation["auto_containment"])
+        self.assertEqual(correlation["candidate_count"], 1)
+        candidate = correlation["candidates"][0]
+        self.assertEqual(candidate["pid"], 4242)
+        self.assertIn("file_fanout", candidate["signals"])
+        self.assertIn("rename_burst", candidate["signals"])
+        self.assertIn("write_burst", candidate["signals"])
+        # Raw file paths and image names must never leave the sensor.
+        self.assertNotIn("file-1.docx", str(sample))
+        self.assertNotIn("sample.exe", str(sample))
         self.assertFalse(sample["available"])
 
 

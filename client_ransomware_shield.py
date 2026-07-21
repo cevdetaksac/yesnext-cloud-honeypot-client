@@ -287,6 +287,28 @@ class RansomwareShield:
         s = dict(self._stats)
         s["running"] = self._running
         s["canary_files"] = len(self._canaries)
+        # DEC-201/202 bounded coverage inventory; no user paths leave host.
+        intact = 0
+        covered_roots = set()
+        for canary in self._canaries:
+            try:
+                if os.path.isfile(canary.path):
+                    intact += 1
+                marker = canary.path.lower().split(
+                    CANARY_ROOT_FOLDER.lower(), 1
+                )[0]
+                covered_roots.add(marker)
+            except Exception:
+                pass
+        s["canary_coverage"] = {
+            "mode": "observe",
+            "configured": bool(self.canary_enabled),
+            "files_total": len(self._canaries),
+            "files_intact": intact,
+            "files_missing": max(0, len(self._canaries) - intact),
+            "roots_covered": len(covered_roots),
+            "coverage_ok": bool(self._canaries) and intact == len(self._canaries),
+        }
         s["alerts_total"] = (
             s.get("canary_alerts", 0)
             + s.get("fs_alerts", 0)

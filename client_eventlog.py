@@ -156,6 +156,11 @@ class EventLogWatcher:
             "started_at": 0.0,
             "channels_active": 0,
         }
+        try:
+            from client_identity_correlation import PasswordBurstCorrelator
+            self.identity_correlator = PasswordBurstCorrelator()
+        except Exception:
+            self.identity_correlator = None
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -275,6 +280,11 @@ class EventLogWatcher:
             "watched_ids": sorted(
                 {eid for ids in WATCHED_CHANNELS.values() for eid in ids}
             ),
+            "password_burst": (
+                getattr(self, "identity_correlator").status()
+                if getattr(self, "identity_correlator", None) is not None
+                else None
+            ),
         }
 
     def update_whitelist(self, ips: Set[str]):
@@ -319,6 +329,11 @@ class EventLogWatcher:
                 return
 
             self._stats["events_processed"] += 1
+            try:
+                if self.identity_correlator is not None:
+                    self.identity_correlator.record(event)
+            except Exception:
+                pass
 
             # Forward to threat engine (non-blocking)
             try:

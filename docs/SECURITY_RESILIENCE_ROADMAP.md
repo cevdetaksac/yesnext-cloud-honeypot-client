@@ -375,19 +375,29 @@ Kabul:
 
 ### P1 — P0 ölçümleri yeşil olduktan sonra
 
-- [ ] RES-103 signed heartbeat
-- [ ] RES-105 SACL/access audit
-- [ ] RES-106 ACL drift monitor
-- [ ] RANS-302/303 ETW event-loss + correlation
-- [ ] DEC-201/202 canary coverage
-- [ ] DEC-205/206 kaynak limitli tarpit (banner'dan sonra)
-- [ ] DEC-208/209 fingerprint-resistance + bypass-aware sensor coverage
-- [ ] NET-501/502 restore dry-run + rollback
-- [ ] OOB-501 offline signed queue
-- [ ] ID-402/403 password-change burst correlation + dashboard görünümü
-- [ ] ZT-602/603 hardware-backed operator signing + agent verification
-- [ ] ZT-605b TLS/interception/cloud-compromise test matrisi
-- [ ] DEV-601 TPM device identity PoC
+- [~] RES-103 signed-heartbeat candidate (`client_resilience_p1`; default off,
+  canonical cloud wire/replay/coverage pending)
+- [~] RES-105 SACL/access audit (bounded DACL fingerprint landed; SACL privilege
+  inventory and canonical health schema pending)
+- [~] RES-106 ACL drift monitor (local HMAC baseline, observe-only, no mutation)
+- [~] RANS-302/303 ETW event-loss + bounded fan-out/rename/write correlation
+  (real provider attach/corpus/cloud detection batch pending)
+- [~] DEC-201/202 canary coverage counts (path-free health; matrix expansion pending)
+- [~] DEC-205/206 protocol-aware decoy + resource budgets already present;
+  `BaseHoneypot.get_health` exposes handler/rate/backlog saturation
+- [~] DEC-208/209 static fingerprint profile is honestly reported and bypass
+  coverage required; contract-controlled profiles/corpus evaluation pending
+- [~] NET-501/502 restore dry-run plan + signed retained-version rollback selector
+  (automatic connectivity rollback intentionally not enabled)
+- [~] OOB-501 DPAPI+HMAC bounded/idempotent offline queue primitive; ingest/ACK
+  contract before alert-pipeline wiring
+- [~] ID-402/403 password-change burst correlation in Event Log health; no raw
+  identities/passwords and no auto-lockout (dashboard schema pending)
+- [~] ZT-602/603 public operator-key metadata/rotation scaffold; asymmetric
+  verify disabled until canonical algorithm/key endpoint promotion
+- [~] ZT-605b TLS/interception/cloud-compromise test matrix documented in
+  `docs/P1_SECURITY_RESILIENCE_CLIENT.md`
+- [~] DEV-601 read-only TPM capability PoC; no key generation, enrollment or lock
 
 ### P2 — Kontrollü pilot
 

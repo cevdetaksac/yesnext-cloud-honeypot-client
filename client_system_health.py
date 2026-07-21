@@ -1230,6 +1230,21 @@ class SystemHealthMonitor:
                 payload["snapshot"]["network_guard"] = ng.status()
         except Exception:
             pass
+        # RES-105/106: default-off, observe-only ACL fingerprint/drift summary.
+        # Raw ACLs and principal names never leave the host.
+        try:
+            from client_resilience_p1 import acl_drift_enabled, acl_drift_status
+            if acl_drift_enabled():
+                payload["snapshot"]["access_integrity"] = acl_drift_status(token)
+        except Exception:
+            pass
+        # DEV-601 read-only TPM capability PoC; no key generation/enrollment.
+        try:
+            from client_device_identity import observe_enabled, probe_tpm
+            if observe_enabled():
+                payload["snapshot"]["device_identity"] = probe_tpm()
+        except Exception:
+            pass
 
         runtime = self._build_agent_runtime()
         if runtime:

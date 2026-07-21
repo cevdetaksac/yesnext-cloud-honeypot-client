@@ -2427,13 +2427,21 @@ class RemoteCommandExecutor:
             return {"success": False, "error": "NetworkGuard not available"}
         try:
             targets = params.get("targets")
-            out = ng.restore_network(targets=targets)
+            dry_run = bool(params.get("dry_run", False))
+            rollback_version = params.get("rollback_version")
+            out = ng.restore_network(
+                targets=targets,
+                dry_run=dry_run,
+                rollback_version=rollback_version,
+            )
             ok = "error" not in out
             self._recovery_audit("network_restore",
                                  f"targets={targets or 'all'} "
+                                 f"dry_run={dry_run} "
                                  f"actions={len(out.get('restore_actions') or [])}")
             return {"success": ok,
-                    "message": "Network restore attempted",
+                    "message": ("Network restore plan generated"
+                                if dry_run else "Network restore attempted"),
                     "data": out}
         except Exception as e:
             return {"success": False, "error": str(e)}

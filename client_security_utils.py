@@ -13,6 +13,8 @@ from typing import Any, Dict, Mapping, Optional
 _SENSITIVE_KEYS = frozenset({
     "token", "password", "secret", "authorization", "api_key", "apikey",
     "access_token", "refresh_token", "credential", "passwd",
+    "pin", "gui_pin", "turn_credential", "turn_password", "turn_username",
+    "ice_credential", "private_key", "client_secret",
 })
 
 _TOKEN_RE = re.compile(

@@ -105,9 +105,55 @@ class EtwShadowSensor:
             recent = [e for e in self._events if e[0] >= cutoff]
             by_op: Dict[str, int] = {}
             by_pid: Dict[int, int] = {}
-            for _ts, op, pid, _path, _image, _start in recent:
-                by_op[op] = by_op.get(op, 0) + 1
+            unique_paths: Dict[int, set] = {}
+            identities: Dict[int, set] = {}
+            for _ts, op, pid, path, image, start in recent:
+                normalized_op = str(op).strip().lower()
+                by_op[normalized_op] = by_op.get(normalized_op, 0) + 1
                 by_pid[pid] = by_pid.get(pid, 0) + 1
+                if path:
+                    unique_paths.setdefault(pid, set()).add(path.lower())
+                identities.setdefault(pid, set()).add((image.lower(), start))
+
+            # RANS-303 shadow correlation: bounded, explainable signals only.
+            # This is telemetry, not a ransomware verdict or containment input.
+            correlated = []
+            write_ops = {"write", "fileio/write", "rename", "fileio/rename"}
+            for pid, count in by_pid.items():
+                path_count = len(unique_paths.get(pid, set()))
+                identity_count = len(identities.get(pid, set()))
+                pid_events = [
+                    e for e in recent
+                    if e[2] == pid and str(e[1]).strip().lower() in write_ops
+                ]
+                rename_count = sum(
+                    1 for e in pid_events
+                    if "rename" in str(e[1]).strip().lower()
+                )
+                write_count = len(pid_events) - rename_count
+                score = 0
+                signals = []
+                if path_count >= 25:
+                    score += 35
+                    signals.append("file_fanout")
+                if rename_count >= 20:
+                    score += 30
+                    signals.append("rename_burst")
+                if write_count >= 30:
+                    score += 25
+                    signals.append("write_burst")
+                if identity_count > 1:
+                    score += 10
+                    signals.append("pid_identity_changed")
+                if score:
+                    correlated.append({
+                        "pid": pid,
+                        "score": min(score, 100),
+                        "signals": signals,
+                        "events": count,
+                        "unique_paths": path_count,
+                    })
+            correlated.sort(key=lambda item: item["score"], reverse=True)
             return {
                 "available": bool(self._available),
                 "mode": self._mode,
@@ -123,6 +169,17 @@ class EtwShadowSensor:
                 "buffer_pressure": bool(
                     self._dropped > 0 or len(self._events) > 4000
                 ),
+                "correlation": {
+                    "mode": "shadow",
+                    "auto_containment": False,
+                    "candidates": correlated[:8],
+                    "candidate_count": len(correlated),
+                    "thresholds": {
+                        "file_fanout": 25,
+                        "rename_burst": 20,
+                        "write_burst": 30,
+                    },
+                },
                 "error": self._error,
             }
 

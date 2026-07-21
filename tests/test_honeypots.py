@@ -15,6 +15,16 @@ class TestHTTPFormParse(unittest.TestCase):
         self.assertEqual(user, "admin@local")
         self.assertEqual(pwd, "Pass#123")
 
+    def test_health_exposes_budgets_without_credentials(self):
+        hp = HTTPHoneypot(port=8080, on_credential=lambda *a: None)
+        health = hp.get_health()
+        self.assertTrue(health["resource_budgeted"])
+        self.assertTrue(health["protocol_aware"])
+        self.assertGreater(health["handler_limit"], 0)
+        self.assertGreater(health["rate_limit_per_ip_min"], 0)
+        self.assertEqual(health["fingerprint_profile"], "static_legacy")
+        self.assertNotIn("credential", str(health).lower())
+
 
 class TestRateLimiter(unittest.TestCase):
     def test_allows_under_limit(self):

@@ -172,6 +172,24 @@ class BaseHoneypot(ABC, threading.Thread):
             return "error"
         return "started" if self.running else "stopped"
 
+    def get_health(self) -> dict:
+        """DEC-205/206/208/209 bounded deception health (no credentials)."""
+        return {
+            "service": self.service_name,
+            "port": self.port,
+            "status": self.get_status(),
+            "handler_limit": _HONEYPOT_MAX_HANDLERS,
+            "handlers_rejected": int(self._handlers_rejected),
+            "backlog": int(self.backlog),
+            "rate_limit_per_ip_min": int(MAX_ATTEMPTS_PER_IP_PER_MIN),
+            "resource_budgeted": True,
+            "protocol_aware": self.service_name in {
+                "SSH", "RDP", "SMB", "FTP", "MYSQL", "MSSQL", "HTTP"
+            },
+            "fingerprint_profile": "static_legacy",
+            "bypass_coverage_required": True,
+        }
+
     # ---------- credential reporting ----------
 
     def report_credential(self, attacker_ip: str, username: str, password: str = ""):

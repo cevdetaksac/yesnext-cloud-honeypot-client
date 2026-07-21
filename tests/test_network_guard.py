@@ -49,6 +49,35 @@ class TestConnectivityDiff(unittest.TestCase):
         d = ng.diff_connectivity(base, cur)
         self.assertFalse(d["net_cut"])
 
+
+class TestRestorePlan(unittest.TestCase):
+    def test_dry_run_plan_is_pure_and_bounded(self):
+        baseline = {
+            "adapters": [{
+                "name": "Ethernet", "state": "up",
+                "dns": ["1.1.1.1", "8.8.8.8"],
+            }],
+            "firewall": {"domain": "on", "private": "on", "public": "off"},
+            "mapped_drives": [{
+                "letter": "Z:", "unc": r"\\server\share", "persistent": True,
+            }],
+        }
+        plan = ng.plan_network_restore(baseline)
+        self.assertTrue(any(item["target"] == "adapter" for item in plan))
+        self.assertTrue(any(item["target"] == "dns" for item in plan))
+        self.assertTrue(any(item["target"] == "firewall" for item in plan))
+        self.assertTrue(any(item["target"] == "mapped_drive" for item in plan))
+        self.assertLessEqual(len(plan), 128)
+
+    def test_target_filter_only_plans_requested_area(self):
+        baseline = {
+            "adapters": [{"name": "Ethernet", "state": "up", "dns": ["1.1.1.1"]}],
+            "firewall": {"domain": "on"},
+            "mapped_drives": [],
+        }
+        plan = ng.plan_network_restore(baseline, targets=["dns"])
+        self.assertEqual({item["target"] for item in plan}, {"dns"})
+
     def test_adapter_down_reported_but_not_cut_when_online(self):
         base = {"connectivity": {"internet_ok": True},
                 "adapters": [{"name": "Ethernet", "state": "up"}]}

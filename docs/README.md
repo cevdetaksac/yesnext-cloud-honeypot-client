@@ -13,5 +13,6 @@
 | **Operasyon** | [OPERATIONS.md](OPERATIONS.md) |
 | **Güvenlik** | [SECURITY.md](SECURITY.md) |
 | **Security & Resilience yol haritası** | [SECURITY_RESILIENCE_ROADMAP.md](SECURITY_RESILIENCE_ROADMAP.md) |
+| **P1 client implementation record** | [P1_SECURITY_RESILIENCE_CLIENT.md](P1_SECURITY_RESILIENCE_CLIENT.md) |
 
 Eski `docs/api/*` dosyaları contract’a taşındı / oradan devam eder. Yeni API işi **contract** üzerinde başlar.

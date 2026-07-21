@@ -1208,10 +1208,25 @@ class CloudHoneypotClient:
                 prev_linked = is_account_linked()
             except Exception:
                 pass
+            system_context = self._build_system_context()
+            # RES-103 candidate is default-off until its canonical wire is
+            # promoted. Observe mode signs the exact heartbeat status tuple.
+            try:
+                from client_resilience_p1 import build_heartbeat_observe
+                proof = build_heartbeat_observe(
+                    token,
+                    hostname=SERVER_NAME,
+                    status=status_override,
+                    running=bool(self.state.get("running", False)),
+                )
+                if proof:
+                    system_context["heartbeat_proof"] = proof
+            except Exception:
+                pass
             ok = self.api_client.send_heartbeat(
                 token, ip, SERVER_NAME,
                 self.state.get("running", False), status_override,
-                system_context=self._build_system_context()
+                system_context=system_context
             )
             self._last_heartbeat_ok = ok
             # Heartbeat may carry account_linked — refresh top-bar badge if changed

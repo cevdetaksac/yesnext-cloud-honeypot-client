@@ -3788,22 +3788,16 @@ class ModernGUI:
             text_color=COLORS["red"],
         ).pack(anchor="w", padx=4, pady=(0, 8))
 
-        # Top saldırgan IP'leri 
-        threat_engine = getattr(self.app, 'threat_engine', None)
-        if not threat_engine:
-            ctk.CTkLabel(content, text=self.t("detail_no_data"),
-                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
-            return
+        # Top saldırgan IP'leri — yerel engine (daemon) yoksa IPC ile motordan al.
+        attackers = self._collect_top_attackers()
 
-        contexts = threat_engine.get_all_contexts()
-        top_ips = sorted(
-            [(ip, ctx) for ip, ctx in contexts.items()
-             if ip not in ("local", "", "127.0.0.1", "::1") and ctx.failed_attempts > 0],
-            key=lambda x: x[1].failed_attempts, reverse=True,
-        )[:25]
-
-        if not top_ips:
-            ctk.CTkLabel(content, text=self.t("detail_no_attacks"),
+        if not attackers:
+            # Bulut toplamı > 0 ama motorda anlık IP context yoksa (ör. saldırılar
+            # geçmişte kaydedildi / GUI frontend) kullanıcıya boş ekran değil,
+            # bağlamlı bir açıklama göster.
+            msg = self.t("detail_no_attacks") if total == 0 else \
+                self.t("detail_attacks_cloud_only").format(total=total)
+            ctk.CTkLabel(content, text=msg, justify="left",
                          text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
             return
 
@@ -3812,17 +3806,21 @@ class ModernGUI:
                     self.t("detail_score"), self.t("ip_col_last_time")]
         rows = []
         actions = []
-        for ip, ctx in top_ips:
-            services = "/".join(list(ctx.services_targeted)[:2]) if ctx.services_targeted else "—"
+        for atk in attackers:
+            ip = atk["ip"]
+            svc_list = atk.get("services") or []
+            services = "/".join(svc_list[:2]) if svc_list else "—"
+            last_seen = atk.get("last_seen") or 0
             try:
-                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M:%S")
+                ts = datetime.fromtimestamp(last_seen).strftime("%d.%m %H:%M:%S") \
+                    if last_seen else "—"
             except Exception:
                 ts = "—"
-            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
-                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
-            rows.append([ip, services, str(ctx.failed_attempts),
-                         (str(ctx.threat_score), score_color), ts])
-            # Engelle butonu
+            score = atk.get("threat_score", 0)
+            score_color = COLORS["red"] if score >= 80 else (
+                COLORS["orange"] if score >= 40 else COLORS["text_dim"])
+            rows.append([ip, services, str(atk.get("failed_attempts", 0)),
+                         (str(score), score_color), ts])
             _ip = ip
             actions.append([
                 (self.t("ip_btn_block"), COLORS["red"],
@@ -3831,6 +3829,45 @@ class ModernGUI:
 
         self._add_detail_table(content, headers, rows,
                                col_widths=[130, 70, 65, 55, 110], row_actions=actions)
+
+    def _collect_top_attackers(self, limit: int = 25) -> list:
+        """Top attacker rows from the local engine, or the SYSTEM motor via IPC.
+
+        The GUI usually runs frontend-only (SYSTEM daemon owns the threat
+        engine), so reading ``self.app.threat_engine`` alone leaves the popup
+        empty. Fall back to the daemon IPC snapshot in that case.
+        """
+        threat_engine = getattr(self.app, "threat_engine", None)
+        if threat_engine is not None:
+            try:
+                contexts = threat_engine.get_all_contexts() or {}
+                blocked = set(getattr(threat_engine, "_rule_blocked_ips", set()) or set())
+                rows = [
+                    {
+                        "ip": ip,
+                        "services": list(ctx.services_targeted or []),
+                        "failed_attempts": int(ctx.failed_attempts),
+                        "threat_score": int(ctx.threat_score),
+                        "last_seen": float(ctx.last_seen or 0),
+                        "is_blocked": bool(ctx.is_blocked or ip in blocked),
+                    }
+                    for ip, ctx in contexts.items()
+                    if ip not in ("local", "", "127.0.0.1", "::1")
+                    and (ctx.failed_attempts > 0 or ctx.threat_score > 0)
+                ]
+                rows.sort(key=lambda r: r["failed_attempts"], reverse=True)
+                return rows[:limit]
+            except Exception as e:
+                log(f"[GUI] local top-attacker read failed: {e}")
+
+        try:
+            from client_daemon_ipc import threat_top
+            resp = threat_top()
+            if resp.get("ok"):
+                return list(resp.get("attackers") or [])[:limit]
+        except Exception as e:
+            log(f"[GUI] IPC threat_top failed: {e}")
+        return []
 
     # ── Detail: Oturum Saldırıları ── #
     def _detail_session_attacks(self):
@@ -6149,10 +6186,12 @@ class ModernGUI:
 
     def _open_logs(self):
         try:
+            from client_log_retention import daily_log_path
+            current_log = daily_log_path(LOG_FILE)
             if os.name == "nt":
-                os.startfile(LOG_FILE)
+                os.startfile(current_log)
             else:
-                webbrowser.open(f"file://{LOG_FILE}")
+                webbrowser.open(f"file://{current_log}")
         except Exception as e:
             log(f"open_logs error: {e}")
             messagebox.showerror(self.t("error"), self.t("log_file_error").format(error=e))

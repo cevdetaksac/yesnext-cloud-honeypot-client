@@ -25,12 +25,13 @@ Publish via GitHub Releases (`cevdetaksac/yesnext-cloud-honeypot-client`).
 
 1. **Central API** — urgent/batch alerts (`POST /api/alerts/urgent` …) — contract `agent/threat-engine.md`
 2. **Optional local webhook** — `notifications.webhook_url` in `client_config.json`
-3. **Local logs** — `%APPDATA%\YesNext\CloudHoneypotClient\threats.log` (or ProgramData paths)
+3. **Local logs** — `client-YYYY-MM-DD.log`, `threats-YYYY-MM-DD.log`,
+   `lifecycle-YYYY-MM-DD.log`; local calendar-day files, automatic 7-day retention
 4. Forward via Winlogbeat / NXLog as needed
 
 ## Token Rotation
 
-If `client.log` was exposed:
+If a `client-YYYY-MM-DD.log` file was exposed:
 
 1. Revoke token in dashboard
 2. Delete ProgramData `token.dat` (`%ProgramData%\YesNext\CloudHoneypotClient\`)

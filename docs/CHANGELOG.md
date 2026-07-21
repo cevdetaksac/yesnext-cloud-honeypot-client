@@ -1,3 +1,10 @@
+# v4.7.6
+- **Toplam Saldırı popup fix:** kart bulut `attack-count` (kümülatif) gösterirken detay popup yalnızca yerel `threat_engine`'i okuyordu. GUI frontend-only çalıştığında engine `None` olduğundan popup her zaman "Veri bulunamadı" veriyordu. Yeni `THREAT_TOP` IPC komutu ile motordan gerçek saldırgan listesi çekilir; motorda anlık IP context yoksa boş ekran yerine bulut toplamı + açıklama gösterilir.
+- **Günlük log retention:** ana client, threat ve lifecycle logları artık doğrudan `*-YYYY-MM-DD.log` dosyalarına yazılır; yerel gün değişiminde yeni dosyaya geçer ve yalnızca son 7 takvim gününü tutar.
+- Daemon + Guardian için gece yarısı rename yarışını önlemek amacıyla klasik timed rename yerine doğrudan tarihli dosya kullanılır.
+- `update-install.log` aktif/liveness adı korunur; helper başlangıcında eski tarihli satırlar `update-install-YYYY-MM-DD.log` arşivlerine ayrılır ve 7 gün retention uygulanır.
+- GUI “Logları Aç” aksiyonu güncel tarihli client logunu açar. Eski `.1`/`.2` rotasyonları retention süresi dolunca temizlenir.
+
 # v4.7.5
 - **Update/tamper handoff hotfix:** `update-and-install.ps1` artık `update_in_progress.lock` dosyasını yeni daemon `Ensure-DaemonMotor` ile hazır olduktan sonra temizler. Önceden lock daemon boot'tan önce siliniyor; planlı installer kapanışı yeni motor tarafından `unexpected_exit` / `agent_tamper` sayılıyordu.
 

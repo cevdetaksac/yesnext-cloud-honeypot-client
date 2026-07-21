@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.5"  # Hotfix: retain update lock through new daemon boot (no false tamper)
+VERSION = "4.7.6"  # Daily client/threat/lifecycle/update logs; 7-day retention
 
 
 CLIENT_VERSION = VERSION  # Main version constant
@@ -315,6 +315,7 @@ SERVICE_WATCHDOG_INTERVAL = 15       # Service watchdog check interval (was WATC
 # Log file settings
 LOG_MAX_BYTES = 10 * 1024 * 1024    # 10 MB
 LOG_BACKUP_COUNT = 5                 # Number of backup files
+LOG_RETENTION_DAYS = 7               # Daily logs: today + previous 6 days
 LOG_ENCODING = "utf-8"
 
 # Log format
@@ -503,7 +504,7 @@ __all__ = [
     'API_STARTUP_DELAY', 'RDP_TRANSITION_TIMEOUT',
     
     # Logging
-    'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT', 'LOG_ENCODING', 'LOG_TIME_FORMAT',
+    'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT', 'LOG_RETENTION_DAYS', 'LOG_ENCODING', 'LOG_TIME_FORMAT',
     
     # API settings
     'API_MAX_QUICK_RETRIES', 'API_QUICK_RETRY_DELAY', 'API_SLOW_RETRY_DELAY', 'API_REQUEST_TIMEOUT',

@@ -16,7 +16,7 @@ Channels:
   2. API Batch     — buffered POST to /api/events/batch
   3. GUI Toast     — desktop notification via CustomTkinter
   4. Tray Popup    — Windows balloon via pystray
-  5. Local Log     — threats.log (RotatingFileHandler)
+  5. Local Log     — threats-YYYY-MM-DD.log (7-day retention)
 
 Includes deduplication and rate limiting per IP+threat_type.
 
@@ -31,10 +31,11 @@ import socket
 import threading
 import time
 from collections import defaultdict, deque
-from logging.handlers import RotatingFileHandler
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from client_constants import APP_DIR, LOG_RETENTION_DAYS
 from client_helpers import log
+from client_log_retention import DailyRetentionFileHandler
 
 # ── Constants ─────────────────────────────────────────────────────
 
@@ -104,8 +105,6 @@ _URGENT_IMMEDIATE_TYPES = {
 
 # Local threat log config
 THREAT_LOG_FILE = "threats.log"
-THREAT_LOG_MAX_BYTES = 5 * 1024 * 1024   # 5 MB
-THREAT_LOG_BACKUP_COUNT = 3
 
 
 # ── Alert Pipeline ────────────────────────────────────────────────
@@ -688,16 +687,15 @@ class AlertPipeline:
     # ── Local Threat Log ──────────────────────────────────────────
 
     def _setup_threat_logger(self) -> logging.Logger:
-        """Set up a dedicated rotating log file for threats."""
+        """Set up a dedicated daily retained log file for threats."""
         logger = logging.getLogger("threats")
         logger.setLevel(logging.INFO)
 
         if not logger.handlers:
             try:
-                handler = RotatingFileHandler(
-                    THREAT_LOG_FILE,
-                    maxBytes=THREAT_LOG_MAX_BYTES,
-                    backupCount=THREAT_LOG_BACKUP_COUNT,
+                handler = DailyRetentionFileHandler(
+                    os.path.join(APP_DIR, THREAT_LOG_FILE),
+                    retention_days=LOG_RETENTION_DAYS,
                     encoding="utf-8",
                 )
                 formatter = logging.Formatter(

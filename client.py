@@ -1393,6 +1393,41 @@ class CloudHoneypotClient:
         except Exception:
             return {}
 
+    def _ipc_threat_top_payload(self, limit: int = 25) -> dict:
+        """Top attacker contexts for GUI frontends that hold no local engine."""
+        te = getattr(self, "threat_engine", None)
+        if te is None:
+            return {"ok": True, "attackers": [], "total": 0, "engine": False}
+        try:
+            contexts = te.get_all_contexts() or {}
+        except Exception:
+            contexts = {}
+        try:
+            blocked = set(getattr(te, "_rule_blocked_ips", set()) or set())
+        except Exception:
+            blocked = set()
+        rows = []
+        for ip, ctx in contexts.items():
+            if ip in ("local", "", "127.0.0.1", "::1"):
+                continue
+            if ctx.failed_attempts <= 0 and ctx.threat_score <= 0:
+                continue
+            rows.append({
+                "ip": ip,
+                "services": list(ctx.services_targeted or []),
+                "failed_attempts": int(ctx.failed_attempts),
+                "threat_score": int(ctx.threat_score),
+                "last_seen": float(ctx.last_seen or 0),
+                "is_blocked": bool(ctx.is_blocked or ip in blocked),
+            })
+        rows.sort(key=lambda r: r["failed_attempts"], reverse=True)
+        return {
+            "ok": True,
+            "engine": True,
+            "attackers": rows[: max(1, int(limit))],
+            "total": len(rows),
+        }
+
     def _ipc_rs_quarantine_summary(self) -> dict:
         rs = getattr(self, "ransomware_shield", None)
         if rs is None:
@@ -1501,6 +1536,14 @@ class CloudHoneypotClient:
                         _send(json.dumps({"ok": True, **out}, ensure_ascii=False))
                     except Exception as e:
                         log(f"[CTRL] RS_UNLOCK error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
+                if cmd_u == "THREAT_TOP":
+                    try:
+                        _send(json.dumps(self._ipc_threat_top_payload(), ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] THREAT_TOP error: {e}")
                         _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
                     continue
 

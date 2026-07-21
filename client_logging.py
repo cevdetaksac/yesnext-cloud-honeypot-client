@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Client Logging — Rotating file + console logger with ms timestamps.
+Client Logging — daily retained file + console logger with ms timestamps.
 
-RotatingFileHandler (10 MB × 5 backups), UTF-8 encoding.
+Date-named files retained for 7 calendar days, UTF-8 encoding.
 CustomFormatter adds millisecond-precision timestamps.
 
 Key exports:
@@ -15,12 +15,12 @@ Key exports:
 
 import logging
 import datetime as dt
-from logging.handlers import RotatingFileHandler
 
 from client_constants import (
-    LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_ENCODING,
+    LOG_FILE, LOG_RETENTION_DAYS, LOG_ENCODING,
     LOG_TIME_FORMAT,
 )
+from client_log_retention import DailyRetentionFileHandler
 
 # ===================== LOGGING SETUP ===================== #
 
@@ -31,7 +31,7 @@ class CustomFormatter(logging.Formatter):
             datefmt or LOG_TIME_FORMAT)[:-3]
 
 def setup_logging() -> bool:
-    """Initialize modern rotating file logger with console output"""
+    """Initialize daily retained file logger with console output."""
     try:
         from client_constants import DEBUG_MODE
         log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
@@ -44,12 +44,22 @@ def setup_logging() -> bool:
         logger.setLevel(log_level)
         logger.propagate = False
         
-        # Clear existing handlers
-        logger.handlers.clear()
+        # Mode changes can reinitialize logging in the same process. Close old
+        # file handles before replacing them so dated files are never leaked.
+        for old_handler in list(logger.handlers):
+            logger.removeHandler(old_handler)
+            try:
+                old_handler.close()
+            except Exception:
+                pass
         
         # Create handlers with optimized configuration
         handlers = [
-            RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding=LOG_ENCODING),
+            DailyRetentionFileHandler(
+                LOG_FILE,
+                retention_days=LOG_RETENTION_DAYS,
+                encoding=LOG_ENCODING,
+            ),
             logging.StreamHandler()
         ]
         

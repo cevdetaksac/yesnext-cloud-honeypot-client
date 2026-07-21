@@ -10,6 +10,7 @@ Protocol (newline-terminated, UTF-8):
   UNBLOCK_IP <ip>
   RS_UNLOCK
   RS_STATUS
+  THREAT_TOP
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -115,6 +116,14 @@ def unblock_ip(ip: str, timeout: float = 45.0) -> Dict[str, Any]:
         return request_json(f"UNBLOCK_IP {ip}", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def threat_top(timeout: float = 4.0) -> Dict[str, Any]:
+    """Ask SYSTEM motor for top attacker contexts (frontend has no engine)."""
+    try:
+        return request_json("THREAT_TOP", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "attackers": [], "total": 0}
 
 
 def ransomware_status(timeout: float = 8.0) -> Dict[str, Any]:

@@ -50,7 +50,8 @@ class TestWriteAndParse(unittest.TestCase):
         # write_ascii_ps1 normalizes — so result must be ascii
         self.assertTrue(write_ascii_ps1(path, "try { } catch { } # \u2014 dash"))
         self.assertTrue(assert_file_is_ascii(path))
-        data = open(path, "rb").read()
+        with open(path, "rb") as fh:
+            data = fh.read()
         self.assertNotIn(b"\xe2\x80\x94", data)
 
     def test_broken_utf8_emdash_file_fails_ascii_gate(self):
@@ -70,7 +71,8 @@ class TestWriteAndParse(unittest.TestCase):
         )
         src = os.path.normpath(src)
         self.assertTrue(os.path.isfile(src), f"missing {src}")
-        raw = open(src, "r", encoding="utf-8", errors="replace").read()
+        with open(src, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
         dst = os.path.join(self._tdir, "update-and-install.ps1")
         self.assertTrue(write_ascii_ps1(dst, raw))
         ok, detail = validate_powershell_parse(dst)
@@ -91,6 +93,19 @@ class TestWriteAndParse(unittest.TestCase):
             ensure_idx,
             "update lock must be cleared only after the new daemon is ready",
         )
+
+    def test_update_log_retention_runs_before_first_main_log_line(self):
+        src = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "scripts", "update-and-install.ps1",
+        ))
+        with open(src, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+        main_idx = raw.index("# -- Main --")
+        main = raw[main_idx:]
+        retention_idx = main.index("Initialize-UpLogRetention")
+        first_log_idx = main.index('Write-UpLog "=== update-and-install start ==="')
+        self.assertLess(retention_idx, first_log_idx)
 
     def test_emergency_bootstrap_parses(self):
         dst = os.path.join(self._tdir, "emergency.ps1")

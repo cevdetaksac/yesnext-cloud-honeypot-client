@@ -48,6 +48,39 @@ function Write-UpLog([string]$Message) {
     } catch {}
 }
 
+function Initialize-UpLogRetention {
+    try {
+        $dir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $active = Join-Path $dir "update-install.log"
+        if (Test-Path $active) {
+            $todayStamp = Get-Date -Format "yyyy-MM-dd"
+            $currentLines = New-Object System.Collections.Generic.List[string]
+            foreach ($line in @(Get-Content -LiteralPath $active -ErrorAction SilentlyContinue)) {
+                if ($line -match '^\[(\d{4}-\d{2}-\d{2})\]' -and $Matches[1] -ne $todayStamp) {
+                    $archive = Join-Path $dir "update-install-$($Matches[1]).log"
+                    Add-Content -LiteralPath $archive -Value $line -Encoding UTF8
+                } else {
+                    [void]$currentLines.Add([string]$line)
+                }
+            }
+            Set-Content -LiteralPath $active -Value $currentLines -Encoding UTF8 -Force
+        }
+        $cutoff = (Get-Date).Date.AddDays(-6)
+        Get-ChildItem -Path $dir -Filter "update-install-????-??-??.log" -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                try {
+                    $stamp = $_.BaseName.Substring("update-install-".Length)
+                    [datetime]::ParseExact(
+                        $stamp, "yyyy-MM-dd",
+                        [Globalization.CultureInfo]::InvariantCulture
+                    ) -lt $cutoff
+                } catch { $false }
+            } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
 function Set-UpdateLock([string]$Reason) {
     try {
         $dir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
@@ -319,6 +352,7 @@ function Wait-CallerExit([int]$PidToWait, [int]$TimeoutSec) {
 }
 
 # -- Main --
+Initialize-UpLogRetention
 Write-UpLog "=== update-and-install start ==="
 Write-UpLog "Installer=$InstallerPath Silent=$Silent ShowGui=$ShowGuiAfter ExpectExitPid=$ExpectExitPid Grace=$GraceWaitSec"
 

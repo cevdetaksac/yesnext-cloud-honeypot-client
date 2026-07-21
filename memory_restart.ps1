@@ -9,9 +9,10 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ProgramDataDir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
-$LifecycleLog = Join-Path $ProgramDataDir "lifecycle.log"
+$LogDate = Get-Date -Format "yyyy-MM-dd"
+$LifecycleLog = Join-Path $ProgramDataDir "lifecycle-$LogDate.log"
 $LifecycleQueue = Join-Path $ProgramDataDir "lifecycle_queue.jsonl"
-$LegacyLog = Join-Path $env:TEMP "honeypot_memory_restart.log"
+$LegacyLog = Join-Path $env:TEMP "honeypot_memory_restart-$LogDate.log"
 
 function Ensure-Dir([string]$Path) {
     if (-not (Test-Path $Path)) {
@@ -27,6 +28,25 @@ function Write-Lifecycle {
         [hashtable]$Details = @{}
     )
     Ensure-Dir $ProgramDataDir
+    try {
+        $cutoff = (Get-Date).Date.AddDays(-6)
+        Get-ChildItem -Path $ProgramDataDir -Filter "lifecycle-????-??-??.log" -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                try {
+                    $stamp = $_.BaseName.Substring("lifecycle-".Length)
+                    [datetime]::ParseExact($stamp, "yyyy-MM-dd", [Globalization.CultureInfo]::InvariantCulture) -lt $cutoff
+                } catch { $false }
+            } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $env:TEMP -Filter "honeypot_memory_restart-????-??-??.log" -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                try {
+                    $stamp = $_.BaseName.Substring("honeypot_memory_restart-".Length)
+                    [datetime]::ParseExact($stamp, "yyyy-MM-dd", [Globalization.CultureInfo]::InvariantCulture) -lt $cutoff
+                } catch { $false }
+            } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch {}
     $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $hostName = $env:COMPUTERNAME
     $detailJson = "{}"

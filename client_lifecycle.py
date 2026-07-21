@@ -3,7 +3,7 @@
 Client lifecycle logger — crash / watchdog / memory-restart events.
 
 Writes to:
-  %ProgramData%\\YesNext\\CloudHoneypotClient\\lifecycle.log
+  %ProgramData%\\YesNext\\CloudHoneypotClient\\lifecycle-YYYY-MM-DD.log
   %ProgramData%\\YesNext\\CloudHoneypotClient\\lifecycle_queue.jsonl  (pending API)
 
 Best-effort POST /api/alerts/lifecycle when token + API available.
@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
+from client_log_retention import cleanup_daily_logs, current_local_date, daily_log_path
+
 _MACHINE_DIR = os.path.join(
     os.environ.get("ProgramData", r"C:\ProgramData"),
     "YesNext",
@@ -27,9 +29,10 @@ _MACHINE_DIR = os.path.join(
 )
 LIFECYCLE_LOG = os.path.join(_MACHINE_DIR, "lifecycle.log")
 LIFECYCLE_QUEUE = os.path.join(_MACHINE_DIR, "lifecycle_queue.jsonl")
-_MAX_LOG_BYTES = 2 * 1024 * 1024
+_LOG_RETENTION_DAYS = 7
 _MAX_QUEUE_LINES = 200
 _lock = threading.Lock()
+_last_cleanup_day = None
 
 
 def _ensure_dir() -> None:
@@ -58,18 +61,17 @@ def _version() -> str:
         return ""
 
 
-def _rotate_log_if_needed() -> None:
-    try:
-        if os.path.isfile(LIFECYCLE_LOG) and os.path.getsize(LIFECYCLE_LOG) > _MAX_LOG_BYTES:
-            bak = LIFECYCLE_LOG + ".1"
-            try:
-                if os.path.isfile(bak):
-                    os.remove(bak)
-            except OSError:
-                pass
-            os.replace(LIFECYCLE_LOG, bak)
-    except OSError:
-        pass
+def _current_lifecycle_log() -> str:
+    global _last_cleanup_day
+    day = current_local_date()
+    if day != _last_cleanup_day:
+        cleanup_daily_logs(
+            LIFECYCLE_LOG,
+            _LOG_RETENTION_DAYS,
+            today=day,
+        )
+        _last_cleanup_day = day
+    return daily_log_path(LIFECYCLE_LOG, day)
 
 
 def _append_queue(event: dict) -> None:
@@ -122,8 +124,7 @@ def emit(
 
     with _lock:
         try:
-            _rotate_log_if_needed()
-            with open(LIFECYCLE_LOG, "a", encoding="utf-8") as f:
+            with open(_current_lifecycle_log(), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except OSError:
             pass

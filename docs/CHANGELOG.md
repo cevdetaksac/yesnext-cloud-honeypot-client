@@ -1,3 +1,10 @@
+# v4.9.0
+- **Remote Desktop v2:** Session 0 artık her kare için yeni proses + geçici JPEG üretmiyor. Seçili WTS oturumunda tek, kalıcı ve HMAC doğrulamalı helper; görüntüyü bellekte taşır ve mouse/klavyeyi aynı oturumda uygular.
+- **Akıcı transport:** Sağlıklı agent WebSocket'i görüntünün tek yolu; HTTP yalnız bağlantı yokken fallback. En güncel kare mailbox'ı eski kare kuyruğunu ve çift upload'ı kaldırır; gerçek gönderim/coalesce metrikleri ayrı izlenir.
+- **Input v2 + mobil kullanım:** Move flood kritik `mousedown`/`mouseup`/wheel/key olaylarını düşüremez. Relative trackpad, direct-touch, tap/double-tap/long-press, güvenli drag ve iki parmak yatay/dikey scroll; çoklu monitör negatif origin koordinatları desteklenir. Input içeriği loglanmaz.
+- **Adaptif yayın:** Capture/send baskısına göre FPS, JPEG kalite ve çözünürlük kontrollü düşer; stabil pencerede kademeli toparlanır. Requested/effective değerler ve gecikme/backpressure telemetrisi status/meta içinde raporlanır.
+- **WebRTC/H.264 hazırlığı:** Opsiyonel `aiortc`/`av` runtime ile H.264 öncelikli WebRTC, strict stream/session signaling, kısa ömürlü cloud STUN/TURN credential tüketimi ve data-channel input hazırdır. Runtime veya cloud signaling yoksa mevcut JPEG/WS otomatik fallback olmaya devam eder. Varsayılan build WebRTC bağımlılıklarını içermez; yayın profili `build.ps1 -WebRTC` kullanır ve runtime eksikse dürüstçe fail olur.
+
 # v4.8.5
 - **Dashboard "Kaldırılıyor…" takılı kalma fix:** Client yerel firewall kuralını siliyordu ve `pending-unblocks` kuyruğunu boşaltıyordu, ama `POST /api/agent/block-removed` ACK'i yalnız `block_ids` taşıyordu. Canlı probe: aynı endpoint `ip` ile `updated>0` dönüyor, `block_ids`-only ile çoğu zaman `updated:0` — cloud "removing" satırını kapatmıyor, dashboard butonu sonsuza dek "Kaldırılıyor…" kalıyor. FW-SYNC artık ACK'te **hem `block_ids` (int) hem `ips`/`ip`** gönderir; `updated=0` olursa IP başına fallback ACK dener. Yanıt `updated=` artık loglanır.
 - AutoResponse unblock raporu da `updated=` değerini loglar (`updated=0` uyarısı).

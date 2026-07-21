@@ -1,6 +1,6 @@
 Cloud Honeypot Client
 =====================
-**Current Version: 4.8.5**
+**Current Version: 4.9.0**
 
 Cloud Honeypot Client; belirlediğiniz servis portlarını güvene alıp ters tünel üzerinden Honeypot servisine ileten, tepside (tray) çalışan bir Windows istemcisidir. Açık kaynak geliştirilir; sunucu/dashboard tarafındaki gelişmiş özellikler ayrıca lisanslanabilir.
 
@@ -29,6 +29,10 @@ Derleme
 - Gereksinimler: Python 3.11/3.12, pip, PyInstaller, NSIS
 - Build: `powershell -ExecutionPolicy Bypass -File build.ps1`
   - Çıktı: `cloud-client-installer.exe` (~20 MB)
+- WebRTC/H.264 release profili:
+  - `python -m pip install -r requirements-webrtc.txt`
+  - `powershell -ExecutionPolicy Bypass -File build.ps1 -WebRTC`
+  - Runtime doğrulanamazsa build hata verir; normal build yalnız JPEG/WS fallback yayınlar.
 
 İmzalama (isteğe bağlı)
 - Üretim için OV/EV Code Signing sertifikası önerilir.

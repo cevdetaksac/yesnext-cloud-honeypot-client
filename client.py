@@ -3256,6 +3256,12 @@ if __name__ == "__main__":
     parser.add_argument("--show-gui", action="store_true", help="Force show GUI window (used by installer launch)")
     parser.add_argument("--rd-capture-once", metavar="PATH", default=None,
                         help="Capture one desktop JPEG to PATH and exit (Session 0 helper)")
+    parser.add_argument("--rd-session-helper", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--rd-helper-host", default="127.0.0.1", help=argparse.SUPPRESS)
+    parser.add_argument("--rd-helper-port", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--rd-helper-secret", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--rd-helper-session", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--debug", action="store_true", help="Debug mode: verbose logs, skip consent, optional no admin")
     args = parser.parse_args()
     
@@ -3347,6 +3353,23 @@ if __name__ == "__main__":
         except Exception as e:
             try:
                 log(f"--rd-capture-once failed: {e}")
+            except Exception:
+                pass
+            sys.exit(1)
+
+    if getattr(args, "rd_session_helper", False):
+        try:
+            from client_rd_session_helper import run_session_helper
+            ok = run_session_helper(
+                args.rd_helper_host,
+                args.rd_helper_port,
+                args.rd_helper_secret,
+                args.rd_helper_session,
+            )
+            sys.exit(0 if ok else 1)
+        except Exception as e:
+            try:
+                log(f"--rd-session-helper failed: {e}")
             except Exception:
                 pass
             sys.exit(1)

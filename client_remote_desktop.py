@@ -20,14 +20,15 @@ from __future__ import annotations
 
 import io
 import json
-import queue
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Callable, Optional, Tuple
 from urllib.parse import urlencode
 
 from client_helpers import log
+from client_rd_adaptive import AdaptiveStreamController
 
 # Defaults tuned for smooth dashboard viewing (prompt: 5–10 fps, q~30–40)
 DEFAULT_FPS = 6.0
@@ -36,9 +37,15 @@ DEFAULT_MAX_WIDTH = 1280
 TARGET_FRAME_BYTES = 320 * 1024       # aim ≤ ~320 KB
 MAX_FRAME_BYTES = 2 * 1024 * 1024
 IDLE_STOP_SECONDS = 300
-INPUT_RATE_LIMIT = 60                 # allow drag moves
+INPUT_RATE_LIMIT = 60                 # legacy alias (kept for backward compat)
 INPUT_RATE_WINDOW = 1.0
-HTTP_INPUT_POLL_SEC = 0.30
+MOVE_RATE_LIMIT = 60                  # absolute/relative pointer moves per window
+MOVE_RATE_WINDOW = 1.0
+CRIT_RATE_LIMIT = 240                 # critical edges: tracked but never rejected
+HTTP_INPUT_POLL_SEC = 0.30            # WS down → poll fast (primary input path)
+HTTP_INPUT_POLL_SEC_WS = 2.0          # WS healthy → poll slowly (compat backup only)
+CRIT_ACK_TIMEOUT = 0.2               # short synchronous ACK for critical edges only
+OUT_TEXT_MAXLEN = 32                  # retained control/meta frames (latest-frame queue)
 WS_RECONNECT_SEC = 3.0
 META_EVERY_N_FRAMES = 5
 BLACK_MEAN_THRESHOLD = 6.0            # nearly-black capture → skip send
@@ -47,6 +54,35 @@ MIN_JPEG_BYTES = 1500                 # API rejects tinier frames ("Frame too sm
 MIN_GOOD_JPEG_BYTES = 5 * 1024        # healthy 1280q35 frame is usually ≥5KB
 CAPTURE_FAIL_SECONDS = 10.0           # no frames in this window → fail stream
 PROBE_TIMEOUT_SEC = 12.0              # SYSTEM→user CreateProcessAsUser needs cold-start room
+
+# Absolute pointer moves (normalized 0..1). Subject to the move budget only.
+ABS_MOVE_EVENTS = frozenset({"move", "mousemove"})
+# Relative pointer moves (dx/dy). Subject to the move budget only.
+REL_MOVE_EVENTS = frozenset({
+    "move_relative", "mousemove_relative", "rmove", "trackpad_move",
+})
+
+
+def _is_relative_pointer(event: str, params: dict) -> bool:
+    if event in REL_MOVE_EVENTS:
+        return True
+    if event == "pointer" and str(params.get("mode") or "").lower() == "relative":
+        return True
+    if event == "drag_move" and str(params.get("mode") or "").lower() in (
+        "relative", "trackpad",
+    ):
+        return True
+    return False
+
+
+def _is_move_event(event: str, params: dict) -> bool:
+    if event in ABS_MOVE_EVENTS:
+        return True
+    if event == "pointer":
+        return True
+    if event == "drag_move":
+        return True
+    return _is_relative_pointer(event, params)
 
 
 def _api_to_ws_agent_url(api_base: str, token: str = "") -> str:
@@ -82,6 +118,7 @@ class RemoteDesktopStreamer:
         self,
         api_client=None,
         token_getter: Optional[Callable[[], str]] = None,
+        media_transport=None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
@@ -96,22 +133,42 @@ class RemoteDesktopStreamer:
         self._fps = DEFAULT_FPS
         self._quality = DEFAULT_QUALITY
         self._max_width = DEFAULT_MAX_WIDTH
+        self._requested_fps = DEFAULT_FPS
+        self._requested_quality = DEFAULT_QUALITY
+        self._requested_max_width = DEFAULT_MAX_WIDTH
+        self._adaptive = AdaptiveStreamController(
+            DEFAULT_FPS, DEFAULT_QUALITY, DEFAULT_MAX_WIDTH
+        )
         self._seq = 0
         self._last_activity = 0.0
         self._screen_w = 0
         self._screen_h = 0
+        self._screen_x = 0
+        self._screen_y = 0
         self._capture_w = 0
         self._capture_h = 0
+        self._last_capture_mono = 0.0
+        self._last_send_mono = 0.0
+        self._last_helper_capture_ms = 0.0
+        self._stream_id = ""
+        self._media_session_id = ""
 
         self._ws = None
         self._ws_ok = False
         self._transport = "idle"  # idle | websocket | http
-        self._out_q: queue.Queue = queue.Queue(maxsize=8)  # WS sends from WS thread only
+        # Latest-frame outbound semantics: control/meta retained in order,
+        # only the newest JPEG kept (stale frames coalesced away).
+        self._out_lock = threading.Lock()
+        self._pending_text: deque = deque(maxlen=OUT_TEXT_MAXLEN)
+        self._pending_frame: Optional[bytes] = None
         self._ws_send_lock = threading.Lock()
         self._black_warn_ts = 0.0
         self._capture_method = "none"
         self._stream_started_at = 0.0
         self._use_user_helper = False  # Session 0 / other session → CreateProcessAsUser helper
+        self._session_helper = None     # persistent authenticated loopback bridge
+        self._helper_frame_id = 0
+        self._helper_frame_misses = 0
         self._input_desktop = None
         self._desktop_attached = False
         self._tscon_attempted = False
@@ -122,11 +179,22 @@ class RemoteDesktopStreamer:
         self._target_username: str = ""
         self._monitor_index: int = 0
 
-        self._input_ts: deque = deque(maxlen=INPUT_RATE_LIMIT * 4)
+        # Separate budgets so pointer floods never starve critical edges.
+        self._move_ts: deque = deque(maxlen=MOVE_RATE_LIMIT * 4)
+        self._crit_ts: deque = deque(maxlen=CRIT_RATE_LIMIT * 2)
+        # Pressed mouse buttons on the injecting side (stuck-button guard).
+        self._pressed_buttons: set = set()
+        self._drag_active = False
+        self._drag_button = "left"
+        self._drag_mode = "direct"
+        self._last_px = 0
+        self._last_py = 0
         self._stats = {
-            "frames_sent": 0,
+            "frames_sent": 0,            # actual transmissions (WS send or HTTP upload)
             "frames_failed": 0,
             "bytes_sent": 0,
+            "frames_coalesced": 0,       # stale JPEGs dropped from outbound queue
+            "moves_coalesced": 0,        # pointer moves folded before apply/forward
             "inputs_applied": 0,
             "inputs_piggyback": 0,
             "inputs_rate_limited": 0,
@@ -135,6 +203,21 @@ class RemoteDesktopStreamer:
             "black_frames": 0,
             "capture_method": "none",
         }
+
+        if media_transport is None:
+            try:
+                from client_rd_media import create_optional_media_transport
+                media_transport = create_optional_media_transport(
+                    signal_sender=self._send_media_signal,
+                    input_handler=self._ingest_data_channel_input,
+                    fallback_handler=self._on_media_fallback,
+                )
+            except Exception:
+                media_transport = None
+        if media_transport is None:
+            from client_rd_media import OptionalMediaTransport
+            media_transport = OptionalMediaTransport()
+        self._media = media_transport
 
         self._ensure_dpi_aware()
 
@@ -152,9 +235,24 @@ class RemoteDesktopStreamer:
         screen/capture 0×0 → CAPTURE_NO_DESKTOP.
         """
         with self._lock:
-            self._fps = max(1.0, min(float(fps or DEFAULT_FPS), 10.0))
-            self._quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
-            self._max_width = max(640, min(int(max_width or DEFAULT_MAX_WIDTH), 1920))
+            self._requested_fps = max(1.0, min(float(fps or DEFAULT_FPS), 10.0))
+            self._requested_quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
+            self._requested_max_width = max(
+                640, min(int(max_width or DEFAULT_MAX_WIDTH), 1920)
+            )
+            if self._running:
+                self._adaptive.update_requested(
+                    self._requested_fps,
+                    self._requested_quality,
+                    self._requested_max_width,
+                )
+            else:
+                self._adaptive.reset(
+                    self._requested_fps,
+                    self._requested_quality,
+                    self._requested_max_width,
+                )
+            self._apply_effective_settings(self._adaptive.effective, notify_helper=False)
             try:
                 self._monitor_index = max(0, int(monitor or 0))
             except (TypeError, ValueError):
@@ -171,6 +269,9 @@ class RemoteDesktopStreamer:
             self._last_good_jpeg = None
             self._last_good_wh = (0, 0)
             self._use_user_helper = False
+            self._helper_frame_id = 0
+            self._helper_frame_misses = 0
+            self._drag_active = False
 
             # ── Resolve target WTS session (dashboard picker) ──
             sessions = self._enumerate_sessions()
@@ -244,6 +345,13 @@ class RemoteDesktopStreamer:
                 st = self.get_status()
                 same_sid = st.get("session_id") == self._target_session_id
                 if same_sid and (st.get("screen") or {}).get("w", 0) > 0:
+                    if self._persistent_helper_connected():
+                        self._session_helper.update_config({
+                            "fps": self._fps,
+                            "quality": self._quality,
+                            "max_width": self._max_width,
+                            "monitor": self._monitor_index,
+                        })
                     log(f"[REMOTE-DESKTOP] Already streaming — params updated "
                         f"(fps={self._fps} q={self._quality} w={self._max_width})")
                     return {
@@ -256,6 +364,7 @@ class RemoteDesktopStreamer:
                 self._stop.set()
 
             sid, csid = pid_sid, csid
+            self._stop_persistent_helper()
             state = self._session_connect_state(self._target_session_id)
             log(f"[REMOTE-DESKTOP] start probe — target={self._target_session_id} "
                 f"state={state} pid_session={sid}")
@@ -264,7 +373,22 @@ class RemoteDesktopStreamer:
             helper_err = ""
             if need_helper:
                 t_helper = time.time()
-                jpeg, w, h = self._grab_via_user_helper()
+                persistent_started = self._start_persistent_helper()
+                if persistent_started:
+                    jpeg, w, h = self._grab_via_persistent_helper(PROBE_TIMEOUT_SEC)
+                if (
+                    not persistent_started
+                    or not jpeg
+                    or w <= 0
+                    or h <= 0
+                    or len(jpeg) < MIN_JPEG_BYTES
+                ):
+                    self._stop_persistent_helper()
+                    log(
+                        "[REMOTE-DESKTOP] persistent helper failed start/probe; "
+                        "falling back to legacy one-shot capture"
+                    )
+                    jpeg, w, h = self._grab_via_user_helper()
                 took = time.time() - t_helper
                 log(f"[REMOTE-DESKTOP] helper probe took {took:.1f}s "
                     f"jpeg={0 if not jpeg else len(jpeg)}B {w}x{h}")
@@ -337,13 +461,16 @@ class RemoteDesktopStreamer:
                 f"capture={w}x{h} jpeg={len(jpeg)}B method={self._capture_method} "
                 f"session={self._target_session_id}")
 
+            self._stream_id = uuid.uuid4().hex
+            self._media_session_id = ""
             self._running = True
             self._transport = "http"
             self._drain_out_q()
             self._stream_started_at = time.time()
             if self._use_user_helper:
-                # CreateProcessAsUser per frame is heavy — keep IR usable
-                self._fps = min(self._fps, 2.0)
+                if not self._persistent_helper_connected():
+                    # Legacy CreateProcessAsUser-per-frame fallback is expensive.
+                    self._fps = min(self._fps, 2.0)
 
             self._thread = threading.Thread(
                 target=self._capture_loop,
@@ -393,6 +520,17 @@ class RemoteDesktopStreamer:
             was = self._running
             self._running = False
             self._stop.set()
+        # Release any locally-held buttons so a drag can't leave one stuck.
+        try:
+            self._release_all_buttons()
+        except Exception:
+            pass
+        try:
+            self._media.stop()
+        except Exception:
+            pass
+        self._media_session_id = ""
+        self._stop_persistent_helper()
         self._close_ws()
         self._transport = "idle"
         if was:
@@ -414,96 +552,290 @@ class RemoteDesktopStreamer:
             "fps": self._fps,
             "quality": self._quality,
             "max_width": self._max_width,
+            "requested": {
+                "fps": self._requested_fps,
+                "quality": self._requested_quality,
+                "max_width": self._requested_max_width,
+            },
+            "effective": {
+                "fps": self._fps,
+                "quality": self._quality,
+                "max_width": self._max_width,
+            },
             "seq": self._seq,
             "session_id": self._target_session_id,
+            "stream_id": self._stream_id,
             "username": self._target_username or "",
             "monitor": self._monitor_index,
             "capture_method": self._capture_method,
-            "screen": {"w": self._screen_w, "h": self._screen_h},
+            "screen": {
+                "x": self._screen_x,
+                "y": self._screen_y,
+                "w": self._screen_w,
+                "h": self._screen_h,
+            },
             "capture": {"w": self._capture_w, "h": self._capture_h},
+            "telemetry": {
+                **self._adaptive.snapshot()["metrics"],
+                "last_capture_mono_ms": int(self._last_capture_mono * 1000),
+                "last_send_mono_ms": int(self._last_send_mono * 1000),
+            },
+            "media": self._media.status(),
+            "capabilities": self._capabilities(),
             "stats": dict(self._stats),
         }
 
     def apply_input(self, params: dict) -> dict:
-        """Apply remote input (WS message or HTTP command / poll)."""
+        """Apply one remote input event (WS message, command, or coalesced batch).
+
+        Move events draw from a dedicated move budget; critical edge events
+        (button/wheel/key/SAS) are never rejected by move rate limiting.
+        """
+        params = self._normalize_input_envelope(params)
+
+        def result(value: dict) -> dict:
+            if params.get("_input_id") is not None:
+                value["id"] = params["_input_id"]
+            if params.get("_protocol") == 2:
+                value["protocol"] = 2
+            return value
+
         if not self._running:
-            return {"success": False, "error": "stream not active"}
+            return result({"success": False, "error": "stream not active"})
 
         event = (params.get("event") or "").strip().lower()
-        # Move events can be frequent — softer rate limit
-        if event == "move":
-            if not self._check_input_rate(soft=True):
+        move_like = _is_move_event(event, params)
+        if move_like:
+            if not self._check_move_rate():
                 self._stats["inputs_rate_limited"] += 1
-                return {"success": False, "error": "input rate limited"}
+                return result({"success": False, "error": "move rate limited"})
         else:
-            if not self._check_input_rate(soft=False):
-                self._stats["inputs_rate_limited"] += 1
-                return {"success": False, "error": "input rate limited"}
+            # Critical edge — tracked for stats but never dropped.
+            self._note_critical()
 
         self._touch_activity()
 
         try:
-            # Self-check log (AGENT_REMOTE_KEYBOARD_PROMPT)
-            log(
-                f"[remote-input] t=input event={event or '?'} "
-                f"key={params.get('key', '')!r} text={(params.get('text') or '')[:40]!r} "
-                f"session={self._target_session_id}"
-            )
-            ok = False
-            if event in ("click", "dblclick"):
-                ok = self._do_click(
-                    float(params.get("x", 0)),
-                    float(params.get("y", 0)),
-                    str(params.get("button", "left") or "left"),
-                    double=(event == "dblclick"),
+            if not move_like:
+                # Self-check log (AGENT_REMOTE_KEYBOARD_PROMPT); moves stay quiet.
+                log(
+                    f"[remote-input] t=input event={event or '?'} "
+                    f"key_present={bool(params.get('key'))} "
+                    f"text_len={len(str(params.get('text') or ''))} "
+                    f"session={self._target_session_id}"
                 )
-            elif event == "mousedown":
-                ok = self._do_mouse_button(
-                    float(params.get("x", 0)),
-                    float(params.get("y", 0)),
-                    str(params.get("button", "left") or "left"),
-                    down=True,
+            if self._persistent_helper_connected():
+                # Forward over the full-duplex helper channel. Moves are async
+                # (fire-and-forget); critical edges use a very short ACK only.
+                ok = bool(
+                    self._session_helper.send_input(dict(params), wait=not move_like)
                 )
-            elif event == "mouseup":
-                ok = self._do_mouse_button(
-                    float(params.get("x", 0)),
-                    float(params.get("y", 0)),
-                    str(params.get("button", "left") or "left"),
-                    down=False,
-                )
-            elif event in ("move", "mousemove"):
-                ok = self._do_move(
-                    float(params.get("x", 0)),
-                    float(params.get("y", 0)),
-                )
-            elif event == "wheel":
-                delta = params.get("key", params.get("delta", params.get("deltaY", -120)))
-                try:
-                    delta = int(float(delta))
-                except Exception:
-                    delta = -120
-                ok = self._do_wheel(
-                    float(params.get("x", 0.5)),
-                    float(params.get("y", 0.5)),
-                    delta,
-                )
-            elif event == "type_text":
-                ok = self._do_type_text(str(params.get("text", "") or ""))
-            elif event == "key":
-                ok = self._do_key(
-                    str(params.get("key", "") or ""),
-                    code=str(params.get("code", "") or ""),
-                )
-            else:
-                return {"success": False, "error": f"unknown event: {event}"}
+                if ok:
+                    self._stats["inputs_applied"] += 1
+                    return result({"success": True, "message": f"input {event} forwarded"})
+                return result({"success": False, "error": f"input {event} not forwarded"})
+            if self._use_user_helper:
+                # Never inject from Session 0 after a cross-session helper failure.
+                return result({"success": False, "error": "target session helper is unavailable"})
 
+            ok = self._inject_local(event, params)
             if ok:
                 self._stats["inputs_applied"] += 1
-                return {"success": True, "message": f"input {event} applied"}
-            return {"success": False, "error": f"input {event} failed"}
+                return result({"success": True, "message": f"input {event} applied"})
+            return result({"success": False, "error": f"input {event} failed"})
         except Exception as e:
             log(f"[REMOTE-DESKTOP] Input error: {e}")
-            return {"success": False, "error": str(e)}
+            return result({"success": False, "error": str(e)})
+
+    @staticmethod
+    def _normalize_input_envelope(params: dict) -> dict:
+        """Accept protocol-2 envelopes while preserving legacy flat events."""
+        if not isinstance(params, dict):
+            return {"event": ""}
+        outer = dict(params)
+        protocol = outer.get("protocol")
+        nested = outer.get("input")
+        if not isinstance(nested, dict):
+            nested = outer.get("payload")
+        if protocol == 2 and isinstance(nested, dict):
+            normalized = dict(nested)
+            for key in ("id", "ts"):
+                if key in outer and key not in normalized:
+                    normalized[key] = outer[key]
+        else:
+            normalized = outer
+        if protocol == 2:
+            normalized["_protocol"] = 2
+        if normalized.get("id") is not None:
+            normalized["_input_id"] = normalized.get("id")
+        if not normalized.get("event"):
+            normalized["event"] = (
+                normalized.get("gesture")
+                or normalized.get("type")
+                or normalized.get("name")
+                or normalized.get("action")
+                or ""
+            )
+        event = str(normalized.get("event") or "").strip().lower().replace("-", "_")
+        aliases = {
+            "doubletap": "double_tap",
+            "longpress": "long_press",
+            "rightclick": "right_click",
+            "dragstart": "drag_start",
+            "dragmove": "drag_move",
+            "dragend": "drag_end",
+            "twofingerscroll": "two_finger_scroll",
+            "trackpadmove": "trackpad_move",
+        }
+        normalized["event"] = aliases.get(event, event)
+        return normalized
+
+    def _inject_local(self, event: str, params: dict) -> bool:
+        """Local SendInput/SetCursorPos injection (same session or helper side)."""
+        mode = str(params.get("mode") or params.get("pointer_mode") or "direct").lower()
+        if event == "tap":
+            return self._do_click(
+                float(params.get("x", 0.5)), float(params.get("y", 0.5)), "left"
+            )
+        if event == "double_tap":
+            return self._do_click(
+                float(params.get("x", 0.5)),
+                float(params.get("y", 0.5)),
+                "left",
+                double=True,
+            )
+        if event in ("long_press", "right_click"):
+            return self._do_click(
+                float(params.get("x", 0.5)), float(params.get("y", 0.5)), "right"
+            )
+        if event == "drag_start":
+            if self._drag_active:
+                # Duplicate start is idempotent; update position without another down.
+                return self._gesture_move(params, mode)
+            self._drag_active = True
+            self._drag_button = str(params.get("button") or "left").lower()
+            self._drag_mode = mode
+            if mode in ("relative", "trackpad"):
+                self._gesture_move(params, mode)
+                return self._do_mouse_button_at_current(self._drag_button, down=True)
+            return self._do_mouse_button(
+                float(params.get("x", 0.5)),
+                float(params.get("y", 0.5)),
+                self._drag_button,
+                down=True,
+            )
+        if event == "drag_move":
+            return self._gesture_move(params, mode or self._drag_mode)
+        if event == "drag_end":
+            if not self._drag_active:
+                return True
+            try:
+                self._gesture_move(params, mode or self._drag_mode)
+                return self._do_mouse_button_at_current(self._drag_button, down=False)
+            finally:
+                self._drag_active = False
+        if event in ("two_finger_scroll", "scroll"):
+            dx, dy = self._normalized_scroll_deltas(params)
+            return self._do_wheel(
+                float(params.get("x", 0.5)),
+                float(params.get("y", 0.5)),
+                dy,
+                horizontal_delta=dx,
+            )
+        if event in ("click", "dblclick"):
+            return self._do_click(
+                float(params.get("x", 0)),
+                float(params.get("y", 0)),
+                str(params.get("button", "left") or "left"),
+                double=(event == "dblclick"),
+            )
+        if event == "mousedown":
+            return self._do_mouse_button(
+                float(params.get("x", 0)),
+                float(params.get("y", 0)),
+                str(params.get("button", "left") or "left"),
+                down=True,
+            )
+        if event == "mouseup":
+            return self._do_mouse_button(
+                float(params.get("x", 0)),
+                float(params.get("y", 0)),
+                str(params.get("button", "left") or "left"),
+                down=False,
+            )
+        if _is_relative_pointer(event, params):
+            return self._do_move_relative(
+                int(float(params.get("dx", 0) or 0)),
+                int(float(params.get("dy", 0) or 0)),
+            )
+        if event in ("move", "mousemove") or event == "pointer":
+            return self._do_move(
+                float(params.get("x", 0)),
+                float(params.get("y", 0)),
+            )
+        if event == "wheel":
+            dx, delta = self._normalized_scroll_deltas(params)
+            return self._do_wheel(
+                float(params.get("x", 0.5)),
+                float(params.get("y", 0.5)),
+                delta,
+                horizontal_delta=dx,
+            )
+        if event == "type_text":
+            return self._do_type_text(str(params.get("text", "") or ""))
+        if event == "key":
+            return self._do_key(
+                str(params.get("key", "") or ""),
+                code=str(params.get("code", "") or ""),
+            )
+        raise ValueError(f"unknown event: {event}")
+
+    def _gesture_move(self, params: dict, mode: str) -> bool:
+        if mode in ("relative", "trackpad"):
+            return self._do_move_relative(
+                int(float(params.get("dx", 0) or 0)),
+                int(float(params.get("dy", 0) or 0)),
+            )
+        if "x" not in params and "y" not in params:
+            return True
+        return self._do_move(
+            float(params.get("x", 0.5)), float(params.get("y", 0.5))
+        )
+
+    @staticmethod
+    def _normalized_scroll_deltas(params: dict) -> Tuple[int, int]:
+        """Return Windows wheel deltas (positive=up/right).
+
+        Browser/mobile deltaX/deltaY are positive down/right, so both axes are
+        inverted. Legacy `delta`/`key` values remain Windows-oriented.
+        """
+        if (
+            "deltaY" in params
+            or "deltaX" in params
+            or (
+                str(params.get("event") or "").lower()
+                in ("two_finger_scroll", "scroll")
+                and ("dx" in params or "dy" in params)
+            )
+        ):
+            try:
+                vertical = -int(float(
+                    params.get("deltaY", params.get("dy", 0)) or 0
+                ))
+            except (TypeError, ValueError):
+                vertical = 0
+            try:
+                horizontal = -int(float(
+                    params.get("deltaX", params.get("dx", 0)) or 0
+                ))
+            except (TypeError, ValueError):
+                horizontal = 0
+            return horizontal, vertical
+        raw = params.get("key", params.get("delta", -120))
+        try:
+            return 0, int(float(raw))
+        except (TypeError, ValueError):
+            return 0, -120
 
     # ── Capture loop ──────────────────────────────────────────────
 
@@ -537,11 +869,20 @@ class RemoteDesktopStreamer:
         token = self.token_getter()
         if not token:
             return
+        capture_started = time.monotonic()
 
         if self._use_user_helper:
-            jpeg, w, h = self._grab_via_user_helper()
-            if not jpeg or w <= 0 or h <= 0:
-                jpeg, w, h = self._grab_jpeg()
+            if not self._persistent_helper_connected():
+                if not self._start_persistent_helper():
+                    jpeg, w, h = self._grab_via_user_helper()
+                else:
+                    jpeg, w, h = self._grab_via_persistent_helper(
+                        max(0.5, 2.0 / max(self._fps, 1.0))
+                    )
+            else:
+                jpeg, w, h = self._grab_via_persistent_helper(
+                    max(0.5, 2.0 / max(self._fps, 1.0))
+                )
         else:
             jpeg, w, h = self._grab_jpeg()
             pid_sid, _ = self._session_ids()
@@ -551,6 +892,13 @@ class RemoteDesktopStreamer:
                 and (pid_sid is None or int(pid_sid) != int(self._target_session_id))
             ):
                 jpeg, w, h = self._grab_via_user_helper()
+        self._last_capture_mono = time.monotonic()
+        capture_elapsed = self._last_capture_mono - capture_started
+        if self._last_helper_capture_ms > 0 and self._use_user_helper:
+            capture_elapsed = self._last_helper_capture_ms / 1000.0
+            self._last_helper_capture_ms = 0.0
+        self._adaptive.observe_capture(capture_elapsed)
+        self._adaptive_tick()
         if not jpeg or w <= 0 or h <= 0:
             self._stats["frames_failed"] += 1
             return
@@ -591,31 +939,81 @@ class RemoteDesktopStreamer:
 
         self._seq += 1
         seq = self._seq
-        ws_queued = self._enqueue_ws_frame(jpeg, w, h, seq)
-        ws_live = bool(self._ws_ok and ws_queued)
-        if ws_live:
+        self._last_good_jpeg = jpeg
+        self._last_good_wh = (w, h)
+        self._dispatch_frame(token, jpeg, w, h, seq)
+
+    def _dispatch_frame(self, token: str, jpeg: bytes, w: int, h: int, seq: int) -> None:
+        """Route one frame. WS healthy → WS only (sent + counted on WS thread).
+
+        HTTP upload is used only while WS is unavailable/unhealthy, so a healthy
+        stream never pays for a duplicate synchronous HTTP POST per frame.
+        """
+        media_metadata = {
+            "seq": int(seq),
+            "width": int(w),
+            "height": int(h),
+            "capture_mono_ms": int(self._last_capture_mono * 1000),
+        }
+        try:
+            if self._media.publish_frame(jpeg, media_metadata):
+                self._transport = "webrtc"
+                self._last_activity = time.time()
+                return
+        except Exception as exc:
+            self._on_media_fallback(str(exc))
+
+        # Always buffer for the WS thread (latest-frame semantics); this also
+        # ensures a frame is ready the moment WS (re)connects.
+        self._enqueue_ws_frame(jpeg, w, h, seq)
+
+        if self._ws_ok:
+            # WS thread performs the actual send and increments frames_sent.
             self._transport = "websocket"
+            self._last_activity = time.time()
+            return
 
-        need_http = True  # every frame: cloud drains input queue on frame ACK
-        http_ok = False
-        if need_http:
+        # WS down/unhealthy → HTTP fallback (frame ACK also drains inputs[]).
+        send_started = time.monotonic()
+        try:
             http_ok = self._http_send_frame(token, jpeg, w, h, seq)
-            if http_ok:
-                self._stats["http_fallbacks"] += 1
-                if not ws_live:
-                    self._transport = "http"
-
-        if ws_live or http_ok:
+        except Exception as e:
+            http_ok = False
+            log(f"[REMOTE-DESKTOP] HTTP frame upload failed: {e}")
+        send_elapsed = time.monotonic() - send_started
+        self._adaptive.observe_send(send_elapsed, transport="http", ok=http_ok)
+        self._adaptive_tick()
+        if http_ok:
+            self._transport = "http"
             self._stats["frames_sent"] += 1
             self._stats["bytes_sent"] += len(jpeg)
-            self._last_good_jpeg = jpeg
-            self._last_good_wh = (w, h)
+            self._stats["http_fallbacks"] += 1
             self._last_activity = time.time()
+            self._last_send_mono = time.monotonic()
             if self._stats["frames_sent"] == 1 or seq == 1:
-                log(f"[REMOTE-DESKTOP] frame ok — {w}x{h} {len(jpeg)}B "
-                    f"method={self._capture_method} ws={ws_live} http={http_ok}")
+                log(f"[REMOTE-DESKTOP] frame ok (http) — {w}x{h} {len(jpeg)}B "
+                    f"method={self._capture_method}")
         else:
             self._stats["frames_failed"] += 1
+
+    def _adaptive_tick(self) -> None:
+        changed = self._adaptive.evaluate()
+        if changed:
+            self._apply_effective_settings(changed, notify_helper=True)
+
+    def _apply_effective_settings(
+        self, settings: dict, *, notify_helper: bool = True
+    ) -> None:
+        self._fps = float(settings["fps"])
+        self._quality = int(settings["quality"])
+        self._max_width = int(settings["max_width"])
+        if notify_helper and self._persistent_helper_connected():
+            self._session_helper.update_config({
+                "fps": self._fps,
+                "quality": self._quality,
+                "max_width": self._max_width,
+                "monitor": self._monitor_index,
+            })
 
     def _http_send_frame(self, token: str, jpeg: bytes, w: int, h: int, seq: int) -> bool:
         if not self.api_client or not hasattr(self.api_client, "upload_remote_frame"):
@@ -637,30 +1035,109 @@ class RemoteDesktopStreamer:
 
     def _apply_input_batch(self, events) -> None:
         """Apply piggybacked / polled remote input events (frame ACK primary path)."""
+        applied = self._ingest_events(events)
+        if applied:
+            self._stats["inputs_piggyback"] = int(self._stats.get("inputs_piggyback") or 0) + applied
+
+    def _ingest_events(self, events, emit_ack: bool = False) -> int:
+        """Normalize → coalesce moves → apply, preserving edge ordering."""
         if not events:
-            return
-        applied = 0
+            return 0
+        normalized = []
         for ev in events:
             if not isinstance(ev, dict):
                 continue
-            params = dict(ev)
-            # Normalize alternate shapes from cloud
-            if not params.get("event"):
-                params["event"] = (
-                    params.get("type")
-                    or params.get("name")
-                    or params.get("action")
-                    or ""
-                )
-            # mousedown+mouseup already form a click — never invent an extra click here
+            normalized.append(self._normalize_input_envelope(ev))
+        coalesced = self._coalesce_events(normalized)
+        dropped = len(normalized) - len(coalesced)
+        if dropped > 0:
+            self._stats["moves_coalesced"] += dropped
+        applied = 0
+        for params in coalesced:
             try:
                 r = self.apply_input(params)
+                if emit_ack:
+                    ack_ids = params.get("_ack_ids") or [params.get("_input_id")]
+                    for ack_id in ack_ids:
+                        if ack_id is not None:
+                            self._queue_input_ack(r, ack_id=ack_id)
                 if isinstance(r, dict) and r.get("success"):
                     applied += 1
             except Exception as e:
-                log(f"[REMOTE-DESKTOP] piggyback input error: {e}")
-        if applied:
-            self._stats["inputs_piggyback"] = int(self._stats.get("inputs_piggyback") or 0) + applied
+                log(f"[REMOTE-DESKTOP] input apply error: {e}")
+        return applied
+
+    def _queue_input_ack(self, result: dict, ack_id=None) -> None:
+        """Best-effort protocol-2 result over the existing WS text channel."""
+        ack_id = result.get("id") if ack_id is None else ack_id
+        if ack_id is None:
+            return
+        ack = {
+            "t": "input_ack",
+            "protocol": 2,
+            "id": ack_id,
+            "success": bool(result.get("success")),
+        }
+        if not ack["success"] and result.get("error"):
+            ack["error"] = str(result["error"])[:200]
+        self._q_put_text(json.dumps(ack, separators=(",", ":")))
+
+    @staticmethod
+    def _coalesce_events(events) -> list:
+        """Fold consecutive high-frequency moves; keep edge ordering intact.
+
+        Absolute move runs collapse to the last position. Relative move runs
+        accumulate dx/dy. Any button/wheel/key/other event flushes the pending
+        move first, so the cursor position is correct at the moment of the edge.
+        """
+        out = []
+        pending = None  # ("abs", params) | ("rel", params)
+
+        def flush():
+            nonlocal pending
+            if pending is not None:
+                out.append(pending[1])
+                pending = None
+
+        for params in events:
+            event = (params.get("event") or "").strip().lower()
+            if _is_relative_pointer(event, params):
+                dx = int(float(params.get("dx", 0) or 0))
+                dy = int(float(params.get("dy", 0) or 0))
+                if pending is not None and pending[0] == "rel":
+                    pending[1]["dx"] = int(pending[1].get("dx", 0)) + dx
+                    pending[1]["dy"] = int(pending[1].get("dy", 0)) + dy
+                    if params.get("_input_id") is not None:
+                        pending[1].setdefault("_ack_ids", []).append(
+                            params["_input_id"]
+                        )
+                else:
+                    flush()
+                    merged = dict(params)
+                    merged["dx"], merged["dy"] = dx, dy
+                    if merged.get("_input_id") is not None:
+                        merged["_ack_ids"] = [merged["_input_id"]]
+                    pending = ("rel", merged)
+            elif event in ABS_MOVE_EVENTS or event in ("pointer", "drag_move"):
+                if pending is not None and pending[0] == "abs":
+                    ack_ids = list(pending[1].get("_ack_ids") or [])
+                    merged = dict(params)  # keep only the latest position
+                    if merged.get("_input_id") is not None:
+                        ack_ids.append(merged["_input_id"])
+                    if ack_ids:
+                        merged["_ack_ids"] = ack_ids
+                    pending = ("abs", merged)
+                else:
+                    flush()
+                    merged = dict(params)
+                    if merged.get("_input_id") is not None:
+                        merged["_ack_ids"] = [merged["_input_id"]]
+                    pending = ("abs", merged)
+            else:
+                flush()
+                out.append(params)
+        flush()
+        return out
 
     def _grab_jpeg(self):
         """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
@@ -672,6 +1149,9 @@ class RemoteDesktopStreamer:
 
         # Ensure this thread is on the interactive input desktop (RDP black-BitBlt fix)
         self._attach_input_desktop()
+        origin_x, origin_y, native_w, native_h = self._get_capture_rect()
+        self._screen_x, self._screen_y = origin_x, origin_y
+        self._screen_w, self._screen_h = native_w, native_h
 
         img = None
         method = "none"
@@ -686,21 +1166,20 @@ class RemoteDesktopStreamer:
         if img is None or self._is_mostly_black(img):
             try:
                 from PIL import ImageGrab
-                w0, h0 = self._get_screen_size()
                 candidates = []
-                if w0 > 0 and h0 > 0:
+                if native_w > 0 and native_h > 0:
                     try:
-                        candidates.append(("imagegrab-bbox", ImageGrab.grab(bbox=(0, 0, w0, h0))))
+                        candidates.append((
+                            "imagegrab-bbox",
+                            ImageGrab.grab(bbox=(
+                                origin_x,
+                                origin_y,
+                                origin_x + native_w,
+                                origin_y + native_h,
+                            )),
+                        ))
                     except Exception as e:
                         log(f"[REMOTE-DESKTOP] imagegrab-bbox failed: {e}")
-                try:
-                    candidates.append(("imagegrab", ImageGrab.grab(all_screens=False)))
-                except Exception as e:
-                    log(f"[REMOTE-DESKTOP] ImageGrab failed: {e}")
-                try:
-                    candidates.append(("imagegrab-all", ImageGrab.grab(all_screens=True)))
-                except Exception as e:
-                    log(f"[REMOTE-DESKTOP] imagegrab-all failed: {e}")
                 for label, alt in candidates:
                     if alt is None:
                         continue
@@ -741,7 +1220,9 @@ class RemoteDesktopStreamer:
 
         self._capture_method = method
         self._stats["capture_method"] = method
-        self._screen_w, self._screen_h = img.size
+        # Keep the selected monitor's native rectangle separate from encoded size.
+        if native_w <= 0 or native_h <= 0:
+            self._screen_w, self._screen_h = img.size
 
         if img.width > self._max_width:
             ratio = self._max_width / float(img.width)
@@ -777,19 +1258,7 @@ class RemoteDesktopStreamer:
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
 
-        SM_XVIRTUALSCREEN = 76
-        SM_YVIRTUALSCREEN = 77
-        SM_CXVIRTUALSCREEN = 78
-        SM_CYVIRTUALSCREEN = 79
-        left = 0
-        top = 0
-        width = int(user32.GetSystemMetrics(0))
-        height = int(user32.GetSystemMetrics(1))
-        if width <= 0 or height <= 0:
-            left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
-            top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
-            width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
-            height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        left, top, width, height = self._get_capture_rect()
         if width <= 0 or height <= 0:
             return None
 
@@ -997,11 +1466,24 @@ class RemoteDesktopStreamer:
             import mss
             from PIL import Image
             with mss.mss() as sct:
-                # monitors[0]=virtual all; [1]=primary; [2+]=extra
-                idx = 1 + max(0, int(self._monitor_index or 0))
-                if idx >= len(sct.monitors):
-                    idx = 1 if len(sct.monitors) > 1 else 0
-                mon = sct.monitors[idx]
+                target = self._get_capture_rect()
+                physical = list(sct.monitors[1:])
+                mon = next(
+                    (
+                        item for item in physical
+                        if (
+                            int(item.get("left", 0)),
+                            int(item.get("top", 0)),
+                            int(item.get("width", 0)),
+                            int(item.get("height", 0)),
+                        ) == target
+                    ),
+                    physical[0] if physical else sct.monitors[0],
+                )
+                self._screen_x = int(mon.get("left", 0))
+                self._screen_y = int(mon.get("top", 0))
+                self._screen_w = int(mon.get("width", 0))
+                self._screen_h = int(mon.get("height", 0))
                 shot = sct.grab(mon)
                 return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         except ImportError:
@@ -1097,6 +1579,110 @@ class RemoteDesktopStreamer:
             return (4, int(s.get("session_id") or 0))
 
         return min(sessions, key=_rank)
+
+    def _persistent_helper_connected(self) -> bool:
+        helper = self._session_helper
+        return bool(helper is not None and helper.connected)
+
+    def _helper_command(self, secret_hex: str, port: int, _config_json: str) -> str:
+        """Build a safely quoted command for source and frozen distributions."""
+        import os
+        import subprocess
+        import sys
+
+        argv = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            argv.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client.py"))
+        argv.extend([
+            "--rd-session-helper",
+            "--rd-helper-host", "127.0.0.1",
+            "--rd-helper-port", str(int(port)),
+            "--rd-helper-secret", secret_hex,
+            "--rd-helper-session", str(int(self._target_session_id or 0)),
+            "--silent",
+        ])
+        return subprocess.list2cmdline(argv)
+
+    def _start_persistent_helper(self) -> bool:
+        target = self._target_session_id
+        if not target:
+            return False
+        if self._persistent_helper_connected():
+            return True
+        self._stop_persistent_helper()
+        try:
+            from client_rd_session_helper import PersistentSessionHelper
+
+            helper = PersistentSessionHelper(
+                int(target),
+                launch=lambda sid, cmd: self._launch_in_session(sid, cmd, wait=False),
+                command_builder=self._helper_command,
+                log=log,
+            )
+            config = {
+                "fps": self._fps,
+                "quality": self._quality,
+                "max_width": self._max_width,
+                "monitor": self._monitor_index,
+            }
+            if not helper.start(config, timeout=PROBE_TIMEOUT_SEC):
+                log(f"[REMOTE-DESKTOP] persistent helper start failed: {helper.error}")
+                helper.stop()
+                return False
+            self._session_helper = helper
+            self._helper_frame_id = 0
+            self._helper_frame_misses = 0
+            self._capture_method = "persistent-user-helper"
+            self._stats["capture_method"] = self._capture_method
+            log(f"[REMOTE-DESKTOP] persistent helper connected session={target}")
+            return True
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] persistent helper error: {e}")
+            self._stop_persistent_helper()
+            return False
+
+    def _grab_via_persistent_helper(
+        self, timeout: float = 2.0
+    ) -> Tuple[Optional[bytes], int, int]:
+        helper = self._session_helper
+        if helper is None or not helper.connected:
+            return None, 0, 0
+        frame = helper.wait_frame(after_id=self._helper_frame_id, timeout=timeout)
+        if not frame:
+            self._helper_frame_misses += 1
+            if self._helper_frame_misses >= 3:
+                log("[REMOTE-DESKTOP] persistent helper frame timeout; scheduling restart")
+                self._stop_persistent_helper()
+            return None, 0, 0
+        self._helper_frame_misses = 0
+        frame_id, jpeg, meta = frame
+        self._helper_frame_id = int(frame_id)
+        width = int(meta.get("width") or 0)
+        height = int(meta.get("height") or 0)
+        native_width = int(meta.get("native_width") or width)
+        native_height = int(meta.get("native_height") or height)
+        self._screen_x = int(meta.get("origin_x") or 0)
+        self._screen_y = int(meta.get("origin_y") or 0)
+        self._last_helper_capture_ms = float(meta.get("capture_ms") or 0.0)
+        if meta.get("capture_mono_ms"):
+            self._last_capture_mono = float(meta["capture_mono_ms"]) / 1000.0
+        self._screen_w, self._screen_h = native_width, native_height
+        self._capture_w, self._capture_h = width, height
+        method = str(meta.get("method") or "capture")
+        self._capture_method = f"persistent-user-helper:{method}"
+        self._stats["capture_method"] = self._capture_method
+        return jpeg, width, height
+
+    def _stop_persistent_helper(self) -> None:
+        helper = self._session_helper
+        self._session_helper = None
+        self._helper_frame_id = 0
+        self._helper_frame_misses = 0
+        if helper is not None:
+            try:
+                helper.stop()
+            except Exception:
+                pass
 
     def _grab_via_user_helper(self) -> Tuple[Optional[bytes], int, int]:
         """Capture via CreateProcessAsUser into the target WTS session.
@@ -1205,7 +1791,7 @@ class RemoteDesktopStreamer:
         except Exception:
             return None
 
-    def _launch_in_session(self, session_id: int, command: str) -> bool:
+    def _launch_in_session(self, session_id: int, command: str, wait: bool = True) -> bool:
         """CreateProcessAsUser in target WTS session (requires SYSTEM / SeTcbPrivilege)."""
         try:
             import ctypes
@@ -1276,8 +1862,9 @@ class RemoteDesktopStreamer:
             if not ok:
                 log(f"[REMOTE-DESKTOP] CreateProcessAsUser failed err={kernel.GetLastError()}")
                 return False
-            # Wait up to probe timeout
-            kernel.WaitForSingleObject(pi.hProcess, int((PROBE_TIMEOUT_SEC + 2) * 1000))
+            if wait:
+                # Legacy one-shot helper must finish before its JPEG is read.
+                kernel.WaitForSingleObject(pi.hProcess, int((PROBE_TIMEOUT_SEC + 2) * 1000))
             kernel.CloseHandle(pi.hThread)
             kernel.CloseHandle(pi.hProcess)
             return True
@@ -1285,12 +1872,105 @@ class RemoteDesktopStreamer:
             log(f"[REMOTE-DESKTOP] launch_in_session error: {e}")
             return False
 
-    def _drain_out_q(self):
+    # ── Optional media transport / signaling ─────────────────────
+
+    def _capabilities(self) -> dict:
+        media = self._media.capabilities()
+        codecs = ["jpeg"]
+        for codec in media.get("codecs") or []:
+            name = str(codec).lower()
+            if name and name not in codecs:
+                codecs.append(name)
+        transports = ["jpeg-ws", "jpeg-http"]
+        if media.get("webrtc"):
+            transports.insert(0, "webrtc")
+        return {
+            "input_protocols": [1, 2],
+            "input_v2": True,
+            "transports": transports,
+            "fallback": "jpeg-ws",
+            "codecs": codecs,
+            "webrtc": {
+                "available": bool(media.get("webrtc")),
+                "signaling": int(media.get("webrtc_signaling") or 1),
+                "ice": str(media.get("ice") or "non-trickle"),
+                "ice_server_config": bool(
+                    media.get("webrtc") and media.get("ice_server_config")
+                ),
+            },
+        }
+
+    def _hello_payload(self) -> dict:
+        return {
+            "t": "hello",
+            "role": "agent",
+            "protocol": 2,
+            "stream_id": self._stream_id,
+            "capabilities": self._capabilities(),
+        }
+
+    def _send_media_signal(self, message: dict) -> None:
+        payload = dict(message)
+        payload.setdefault("stream_id", self._stream_id)
+        payload.setdefault("session_id", self._media_session_id)
+        self._q_put_text(json.dumps(payload, separators=(",", ":")))
+
+    def _on_media_fallback(self, error: str) -> None:
+        self._media_session_id = ""
+        if self._transport == "webrtc":
+            self._transport = "websocket" if self._ws_ok else "http"
+        log(f"[REMOTE-DESKTOP] WebRTC fallback to JPEG: {str(error)[:160]}")
+
+    def _ingest_data_channel_input(self, envelope: dict):
+        """WebRTC data channel and WS share the same input-v2 validator."""
+        return self._ingest_events([envelope], emit_ack=False)
+
+    def _handle_webrtc_signal(self, message: dict) -> dict:
+        """Validate signaling identity before crossing into the media thread."""
+        action = str(message.get("action") or "").lower()
+        if not action:
+            t = str(message.get("t") or message.get("type") or "").lower()
+            action = {
+                "webrtc_offer": "offer",
+                "webrtc_answer": "answer",
+                "webrtc_ice": "ice",
+            }.get(t, "")
+        stream_id = str(message.get("stream_id") or "")
+        session_id = str(message.get("session_id") or "")
+        if int(message.get("protocol") or 0) != 1:
+            return {"accepted": False, "error": "unsupported signaling protocol"}
+        if not self._running or not self._stream_id:
+            return {"accepted": False, "error": "stream not active"}
+        if not stream_id or stream_id != self._stream_id:
+            return {"accepted": False, "error": "stale or mismatched stream_id"}
+        if not session_id:
+            return {"accepted": False, "error": "missing session_id"}
+        if self._media_session_id and session_id != self._media_session_id:
+            return {"accepted": False, "error": "stale or mismatched session_id"}
+        if action not in ("offer", "answer", "ice"):
+            return {"accepted": False, "error": "unsupported signaling action"}
+        if not self._media.capabilities().get("webrtc"):
+            return {"accepted": False, "error": "webrtc runtime unavailable"}
+
+        establishing = not self._media_session_id and action == "offer"
+        if not self._media_session_id and not establishing:
+            return {"accepted": False, "error": "offer required before signal"}
+        if establishing:
+            self._media_session_id = session_id
+        normalized = dict(message)
+        normalized["action"] = action
         try:
-            while True:
-                self._out_q.get_nowait()
-        except queue.Empty:
-            pass
+            result = self._media.handle_signal(normalized)
+        except Exception as exc:
+            result = {"accepted": False, "error": str(exc)}
+        if not result.get("accepted") and establishing:
+            self._media_session_id = ""
+        return result
+
+    def _drain_out_q(self):
+        with self._out_lock:
+            self._pending_text.clear()
+            self._pending_frame = None
 
     # ── WebSocket transport (single-thread send+recv) ─────────────
 
@@ -1336,7 +2016,7 @@ class RemoteDesktopStreamer:
                 self._ws = ws
                 self._ws_ok = True
                 self._transport = "websocket"
-                ws.send(json.dumps({"t": "hello", "role": "agent"}))
+                ws.send(json.dumps(self._hello_payload()))
                 self._enqueue_meta(force=True)
                 # Re-push last good frame so viewer is not blank while waiting
                 if self._last_good_jpeg and self._last_good_wh[0] > 0:
@@ -1360,9 +2040,13 @@ class RemoteDesktopStreamer:
                         pass
                     except Exception as e:
                         log(f"[REMOTE-DESKTOP] WS recv error: {e}")
+                        self._adaptive.note_ws_failure()
+                        self._adaptive_tick()
                         break
             except Exception as e:
                 log(f"[REMOTE-DESKTOP] WS connect/loop error: {e}")
+                self._adaptive.note_ws_failure()
+                self._adaptive_tick()
             finally:
                 self._ws_ok = False
                 self._ws = None
@@ -1384,50 +2068,96 @@ class RemoteDesktopStreamer:
             return
         meta = {
             "t": "meta",
+            "protocol": 2,
+            "stream_id": self._stream_id,
+            "capabilities": self._capabilities(),
             "width": int(self._capture_w or self._max_width),
             "height": int(self._capture_h or 720),
+            "native_width": int(self._screen_w or self._capture_w or self._max_width),
+            "native_height": int(self._screen_h or self._capture_h or 720),
+            "origin_x": int(self._screen_x),
+            "origin_y": int(self._screen_y),
             "seq": int(self._seq),
             "fps": float(self._fps),
+            "quality": int(self._quality),
+            "max_width": int(self._max_width),
+            "requested_fps": float(self._requested_fps),
+            "requested_quality": int(self._requested_quality),
+            "requested_max_width": int(self._requested_max_width),
+            "capture_mono_ms": int(self._last_capture_mono * 1000),
+            "last_send_mono_ms": int(self._last_send_mono * 1000),
             "session_id": self._target_session_id,
             "username": self._target_username or "",
+            "media": self._media.status(),
         }
-        self._q_put(("txt", json.dumps(meta)))
+        self._q_put_text(json.dumps(meta))
 
     def _enqueue_ws_frame(self, jpeg: bytes, w: int, h: int, seq: int) -> bool:
-        """Queue JPEG for agent RD WS. Always enqueue — WS thread flushes when up.
+        """Buffer latest JPEG + meta for the WS thread. Queueing is NOT a send.
 
-        Previously returned False when !_ws_ok, so the probe frame was lost if
-        HTTP also failed and the viewer stayed on "Yayın başlatılıyor…".
+        Only the newest frame is retained; a superseded frame is coalesced away
+        so the viewer never receives a backlog of stale JPEGs.
         """
         self._capture_w, self._capture_h = w, h
-        self._enqueue_meta(force=(seq <= 3 or seq % META_EVERY_N_FRAMES == 0))
-        return self._q_put(("bin", jpeg))
+        # Additive JSON metadata remains legacy-compatible while giving every
+        # binary JPEG a preceding seq + monotonic capture timestamp.
+        self._enqueue_meta(force=True)
+        self._q_put_frame(jpeg)
+        return True
 
-    def _q_put(self, item) -> bool:
+    def _q_put_text(self, payload: str) -> None:
+        """Retain a control/meta message in order (never coalesced)."""
+        with self._out_lock:
+            self._pending_text.append(payload)
+
+    def _q_put_frame(self, jpeg: bytes) -> None:
+        """Keep only the newest JPEG; drop (coalesce) any unsent prior frame."""
+        with self._out_lock:
+            if self._pending_frame is not None:
+                self._stats["frames_coalesced"] += 1
+                self._adaptive.note_coalesced()
+            self._pending_frame = jpeg
+
+    def _ws_binary_opcode(self):
         try:
-            # Drop oldest if full — prefer fresh frames
-            if self._out_q.full():
-                try:
-                    self._out_q.get_nowait()
-                except queue.Empty:
-                    pass
-            self._out_q.put_nowait(item)
-            return True
+            import websocket
+            return websocket.ABNF.OPCODE_BINARY
         except Exception:
-            return False
+            return 0x2
 
     def _ws_flush_out(self, ws) -> None:
-        import websocket
+        """Send retained control/meta first, then the single latest frame.
+
+        Frame accounting happens here (actual socket send), so the queue depth
+        is never mistaken for transmission.
+        """
+        bin_opcode = self._ws_binary_opcode()
         while True:
+            payload = None
+            frame = None
+            with self._out_lock:
+                if self._pending_text:
+                    payload = self._pending_text.popleft()
+                elif self._pending_frame is not None:
+                    frame = self._pending_frame
+                    self._pending_frame = None
+                else:
+                    break
             try:
-                kind, payload = self._out_q.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                if kind == "txt":
+                if payload is not None:
                     ws.send(payload)
                 else:
-                    ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
+                    send_started = time.monotonic()
+                    ws.send(frame, opcode=bin_opcode)
+                    send_elapsed = time.monotonic() - send_started
+                    self._adaptive.observe_send(
+                        send_elapsed, transport="websocket", ok=True
+                    )
+                    self._adaptive_tick()
+                    self._stats["frames_sent"] += 1
+                    self._stats["bytes_sent"] += len(frame)
+                    self._last_activity = time.time()
+                    self._last_send_mono = time.monotonic()
             except Exception as e:
                 log(f"[REMOTE-DESKTOP] WS send failed: {e}")
                 self._ws_ok = False
@@ -1458,17 +2188,48 @@ class RemoteDesktopStreamer:
         if not isinstance(data, dict):
             return
         t = (data.get("t") or data.get("type") or "").lower()
+        if t in (
+            "webrtc_signal",
+            "webrtc_offer",
+            "webrtc_answer",
+            "webrtc_ice",
+        ):
+            result = self._handle_webrtc_signal(data)
+            if not result.get("accepted"):
+                self._q_put_text(json.dumps({
+                    "t": "webrtc_reject",
+                    "protocol": 1,
+                    "stream_id": data.get("stream_id"),
+                    "session_id": data.get("session_id"),
+                    "error": str(result.get("error") or result.get("reason") or "rejected")[:200],
+                }, separators=(",", ":")))
+            return
         if t in ("input", "remote_input", ""):
             params = dict(data)
             params.pop("t", None)
             params.pop("type", None)
-            if "event" in params or "text" in params or "key" in params:
-                self.apply_input(params)
+            # Server may batch several events under inputs[]/events[].
+            batch = params.get("inputs") or params.get("events")
+            if isinstance(batch, list) and batch:
+                self._ingest_events(batch, emit_ack=True)
+            elif (
+                "event" in params
+                or "gesture" in params
+                or "input" in params
+                or "text" in params
+                or "key" in params
+                or params.get("protocol") == 2
+            ):
+                self._ingest_events([params], emit_ack=True)
 
     # ── HTTP input poll (backup alongside frame ACK / WS) ─────────
 
     def _http_input_poll_loop(self):
-        """Backup drain via GET /api/remote/inputs (primary = frame ACK inputs[])."""
+        """Compatibility backup drain via GET /api/remote/inputs.
+
+        Primary input path is WS (or frame-ACK inputs[] while on HTTP). When WS
+        is healthy this poll runs slowly to avoid redundant round-trips.
+        """
         while self._running and not self._stop.is_set():
             try:
                 token = self.token_getter()
@@ -1478,22 +2239,53 @@ class RemoteDesktopStreamer:
                         self._apply_input_batch(events)
             except Exception as e:
                 log(f"[REMOTE-DESKTOP] HTTP input poll error: {e}")
-            self._stop.wait(HTTP_INPUT_POLL_SEC)
+            interval = HTTP_INPUT_POLL_SEC_WS if self._ws_ok else HTTP_INPUT_POLL_SEC
+            self._stop.wait(interval)
 
     # ── Input helpers ─────────────────────────────────────────────
 
-    def _check_input_rate(self, soft: bool = False) -> bool:
+    def _check_move_rate(self) -> bool:
+        """Move budget only — never gates critical edges."""
         now = time.time()
-        while self._input_ts and now - self._input_ts[0] > INPUT_RATE_WINDOW:
-            self._input_ts.popleft()
-        limit = INPUT_RATE_LIMIT if soft else max(20, INPUT_RATE_LIMIT // 2)
-        if len(self._input_ts) >= limit:
+        while self._move_ts and now - self._move_ts[0] > MOVE_RATE_WINDOW:
+            self._move_ts.popleft()
+        if len(self._move_ts) >= MOVE_RATE_LIMIT:
             return False
-        self._input_ts.append(now)
+        self._move_ts.append(now)
         return True
+
+    def _note_critical(self) -> None:
+        """Record a critical edge for stats; critical edges are never rejected."""
+        now = time.time()
+        while self._crit_ts and now - self._crit_ts[0] > MOVE_RATE_WINDOW:
+            self._crit_ts.popleft()
+        self._crit_ts.append(now)
+
+    # Backward-compatible shim (older callers / tests).
+    def _check_input_rate(self, soft: bool = False) -> bool:
+        return self._check_move_rate()
 
     def _touch_activity(self):
         self._last_activity = time.time()
+
+    def _release_all_buttons(self) -> None:
+        """Release any buttons still held on the injecting side (anti-stuck).
+
+        Applies where injection is local (same session or helper process). On
+        the daemon forwarding side no buttons are held locally, so this is a
+        no-op there; the helper releases its own on disconnect.
+        """
+        if not self._pressed_buttons:
+            return
+        up_flags = {"left": 0x0004, "right": 0x0010, "middle": 0x0040}
+        for btn in list(self._pressed_buttons):
+            try:
+                self._emit_mouse_button(self._last_px, self._last_py, up_flags.get(btn, 0x0004))
+            except Exception as e:
+                log(f"[remote-input] release button {btn} failed: {e}")
+            self._pressed_buttons.discard(btn)
+        self._drag_active = False
+        log("[remote-input] released held buttons on stop/disconnect")
 
     def _norm_to_px(self, x: float, y: float):
         sw = self._screen_w or self._get_screen_size()[0]
@@ -1501,36 +2293,84 @@ class RemoteDesktopStreamer:
         self._screen_w, self._screen_h = sw, sh
         x = max(0.0, min(1.0, float(x)))
         y = max(0.0, min(1.0, float(y)))
-        return int(x * (sw - 1)), int(y * (sh - 1))
+        self._last_px = int(self._screen_x + x * (sw - 1))
+        self._last_py = int(self._screen_y + y * (sh - 1))
+        return self._last_px, self._last_py
+
+    # ── Low-level injection primitives (overridable in tests) ──────
+
+    def _emit_set_cursor(self, px: int, py: int) -> None:
+        import ctypes
+        ctypes.windll.user32.SetCursorPos(int(px), int(py))
+        self._last_px, self._last_py = int(px), int(py)
+
+    def _emit_mouse_button(self, px: int, py: int, flag: int) -> None:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SetCursorPos(int(px), int(py))
+        user32.mouse_event(int(flag), 0, 0, 0, 0)
+        self._last_px, self._last_py = int(px), int(py)
+
+    def _emit_mouse_wheel(self, px: int, py: int, delta: int) -> None:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SetCursorPos(int(px), int(py))
+        user32.mouse_event(0x0800, 0, 0, int(delta), 0)  # MOUSEEVENTF_WHEEL
+
+    def _emit_mouse_hwheel(self, px: int, py: int, delta: int) -> None:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SetCursorPos(int(px), int(py))
+        user32.mouse_event(0x01000, 0, 0, int(delta), 0)  # MOUSEEVENTF_HWHEEL
+
+    def _emit_mouse_move_relative(self, dx: int, dy: int) -> None:
+        # MOUSEEVENTF_MOVE (relative) via SendInput mouse struct.
+        self._send_mouse_input(int(dx), int(dy), 0x0001, 0)
 
     def _do_move(self, x: float, y: float) -> bool:
-        import ctypes
         px, py = self._norm_to_px(x, y)
-        ctypes.windll.user32.SetCursorPos(px, py)
+        self._emit_set_cursor(px, py)
+        return True
+
+    def _do_move_relative(self, dx: int, dy: int) -> bool:
+        if dx == 0 and dy == 0:
+            return True
+        self._emit_mouse_move_relative(int(dx), int(dy))
         return True
 
     def _do_mouse_button(self, x: float, y: float, button: str, down: bool) -> bool:
-        import ctypes
         px, py = self._norm_to_px(x, y)
-        user32 = ctypes.windll.user32
-        user32.SetCursorPos(px, py)
+        return self._do_mouse_button_at(px, py, button, down)
+
+    def _do_mouse_button_at_current(self, button: str, down: bool) -> bool:
+        return self._do_mouse_button_at(self._last_px, self._last_py, button, down)
+
+    def _do_mouse_button_at(
+        self, px: int, py: int, button: str, down: bool
+    ) -> bool:
         btn = (button or "left").lower()
         if btn == "right":
             flag = 0x0008 if down else 0x0010
         elif btn == "middle":
             flag = 0x0020 if down else 0x0040
         else:
+            btn = "left"
             flag = 0x0002 if down else 0x0004
-        user32.mouse_event(flag, 0, 0, 0, 0)
+        self._emit_mouse_button(px, py, flag)
+        if down:
+            self._pressed_buttons.add(btn)
+        else:
+            self._pressed_buttons.discard(btn)
         return True
 
-    def _do_wheel(self, x: float, y: float, delta: int) -> bool:
-        import ctypes
+    def _do_wheel(
+        self, x: float, y: float, delta: int, horizontal_delta: int = 0
+    ) -> bool:
         px, py = self._norm_to_px(x, y)
-        user32 = ctypes.windll.user32
-        user32.SetCursorPos(px, py)
-        # MOUSEEVENTF_WHEEL = 0x0800; delta typically ±120
-        user32.mouse_event(0x0800, 0, 0, int(delta), 0)
+        if int(horizontal_delta):
+            self._emit_mouse_hwheel(px, py, int(horizontal_delta))
+        if int(delta):
+            self._emit_mouse_wheel(px, py, int(delta))
         return True
 
     def _do_click(self, x: float, y: float, button: str, double: bool = False) -> bool:
@@ -1603,6 +2443,33 @@ class RemoteDesktopStreamer:
             arr[i].u.ki = KEYBDINPUT(vk, scan, flags, 0, 0)
         sent = int(user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(INPUT)))
         return sent
+
+    @staticmethod
+    def _send_mouse_input(dx: int, dy: int, flags: int, mouse_data: int) -> int:
+        """SendInput one MOUSEINPUT (relative move uses MOUSEEVENTF_MOVE)."""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT)]
+
+        inp = INPUT()
+        inp.type = 0  # INPUT_MOUSE
+        inp.mi = MOUSEINPUT(int(dx), int(dy), int(mouse_data) & 0xFFFFFFFF, int(flags), 0, 0)
+        return int(user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)))
 
     def _send_unicode_char(self, ch: str) -> bool:
         """KEYEVENTF_UNICODE down+up for one character (ğ, @, €, …)."""
@@ -1737,6 +2604,58 @@ class RemoteDesktopStreamer:
             return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
         except Exception:
             return 1920, 1080
+
+    def _get_capture_rect(self) -> Tuple[int, int, int, int]:
+        """Selected monitor rectangle in virtual-desktop coordinates."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", wintypes.LONG),
+                    ("top", wintypes.LONG),
+                    ("right", wintypes.LONG),
+                    ("bottom", wintypes.LONG),
+                ]
+
+            monitors = []
+            callback_type = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+
+            @callback_type(
+                wintypes.BOOL,
+                wintypes.HANDLE,
+                wintypes.HDC,
+                ctypes.POINTER(RECT),
+                wintypes.LPARAM,
+            )
+            def callback(_monitor, _hdc, rect_ptr, _data):
+                rect = rect_ptr.contents
+                monitors.append((
+                    int(rect.left),
+                    int(rect.top),
+                    int(rect.right - rect.left),
+                    int(rect.bottom - rect.top),
+                ))
+                return True
+
+            user32.EnumDisplayMonitors(0, None, callback, 0)
+            if monitors:
+                # Dashboard monitor=0 historically means primary. Keep the
+                # monitor containing (0,0) first, then stable enumeration order.
+                monitors.sort(
+                    key=lambda r: (
+                        0 if r[0] <= 0 < r[0] + r[2] and r[1] <= 0 < r[1] + r[3] else 1
+                    )
+                )
+                idx = min(max(0, int(self._monitor_index)), len(monitors) - 1)
+                return monitors[idx]
+        except Exception:
+            pass
+        width, height = self._get_screen_size()
+        return 0, 0, int(width), int(height)
 
 
 def capture_once_to_file(path: str, max_width: int = DEFAULT_MAX_WIDTH, quality: int = DEFAULT_QUALITY) -> bool:

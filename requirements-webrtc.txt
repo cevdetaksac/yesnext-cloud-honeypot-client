@@ -1,0 +1,5 @@
+# Optional rd6 media transport. Keep these out of requirements.txt and the
+# default PyInstaller build: aiortc/av materially increase size and native
+# dependency risk. Runtime capabilities remain truthful when they are omitted.
+aiortc
+av

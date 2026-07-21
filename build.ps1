@@ -2,7 +2,8 @@
 # Version is read automatically from client_constants.py (single source of truth)
 
 param(
-    [switch]$Clean = $false
+    [switch]$Clean = $false,
+    [switch]$WebRTC = $false
 )
 
 # ===================== VERSION AUTO-DETECTION ===================== #
@@ -67,6 +68,22 @@ if (Test-Path $venvPython) {
 } else {
     $PYTHON = "python"
     Write-Host "   Using system Python" -ForegroundColor Cyan
+}
+
+# WebRTC/H.264 is an explicit release profile because aiortc/av add native
+# binaries. Never produce a build that advertises WebRTC without the runtime.
+if ($WebRTC) {
+    Write-Host "   WebRTC/H.264 release profile enabled" -ForegroundColor Cyan
+    & $PYTHON -c "import aiortc, av"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: WebRTC runtime is missing." -ForegroundColor Red
+        Write-Host "Install it with: $PYTHON -m pip install -r requirements-webrtc.txt" -ForegroundColor Yellow
+        exit 1
+    }
+    $env:HONEYPOT_WEBRTC = "1"
+} else {
+    Remove-Item Env:HONEYPOT_WEBRTC -ErrorAction SilentlyContinue
+    Write-Host "   JPEG/WS release profile (use -WebRTC for H.264)" -ForegroundColor Cyan
 }
 
 # Step 1: Build Python executable with performance optimizations

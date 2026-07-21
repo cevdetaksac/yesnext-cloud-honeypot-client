@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.8.5"  # block-removed ACK now sends ips(+block_ids); fixes dashboard stuck on Kaldırılıyor
+VERSION = "4.9.0"  # Remote Desktop v2: persistent session helper, input v2, adaptive media, optional WebRTC/H.264
 
 
 CLIENT_VERSION = VERSION  # Main version constant

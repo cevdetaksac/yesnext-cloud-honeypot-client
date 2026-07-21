@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Focused rd2 (transport) + rd3 (input v2) tests.
+
+These exercise the transport decision, latest-frame queue, input budgets,
+move coalescing, relative movement and stuck-button release without needing a
+real Windows desktop session (all injection primitives are stubbed).
+"""
+
+import unittest
+
+from client_remote_desktop import (
+    MOVE_RATE_LIMIT,
+    RemoteDesktopStreamer,
+)
+
+
+JPEG = b"\xff\xd8" + (b"z" * 4000) + b"\xff\xd9"
+
+
+class FakeApi:
+    base_url = "https://example.test/api"
+
+    def __init__(self):
+        self.uploads = []
+        self.input_polls = 0
+
+    def upload_remote_frame(self, token, jpeg_bytes, width, height, seq, fps):
+        self.uploads.append({"seq": seq, "len": len(jpeg_bytes)})
+        return {"ok": True, "inputs": []}
+
+    def fetch_remote_inputs(self, token, limit=80):
+        self.input_polls += 1
+        return []
+
+
+class FakeWS:
+    def __init__(self):
+        self.sent = []  # list of (payload, opcode)
+
+    def send(self, data, opcode=None):
+        self.sent.append((data, opcode))
+
+
+class FakeMailbox:
+    """Stand-in for PersistentSessionHelper on the daemon side."""
+
+    connected = True
+
+    def __init__(self):
+        self.events = []  # (event_dict, wait_flag)
+
+    def send_input(self, event, wait=False, timeout=0.2):
+        self.events.append((event, wait))
+        return True
+
+
+def _make(running=True, api=None):
+    rd = RemoteDesktopStreamer(api_client=api, token_getter=lambda: "tok")
+    rd._running = running
+    rd._screen_w, rd._screen_h = 1920, 1080
+    rd._capture_w, rd._capture_h = 1280, 720
+    return rd
+
+
+class TestTransportSelection(unittest.TestCase):
+    def test_ws_healthy_sends_no_http(self):
+        api = FakeApi()
+        rd = _make(api=api)
+        rd._ws_ok = True
+        rd._dispatch_frame("tok", JPEG, 1280, 720, 1)
+        self.assertEqual(api.uploads, [])                 # no duplicate HTTP
+        self.assertEqual(rd._pending_frame, JPEG)         # buffered for WS thread
+        self.assertEqual(rd._transport, "websocket")
+        self.assertEqual(rd._stats["frames_sent"], 0)     # queueing != transmission
+
+    def test_http_fallback_when_ws_down(self):
+        api = FakeApi()
+        rd = _make(api=api)
+        rd._ws_ok = False
+        rd._dispatch_frame("tok", JPEG, 1280, 720, 1)
+        self.assertEqual(len(api.uploads), 1)
+        self.assertEqual(rd._transport, "http")
+        self.assertEqual(rd._stats["frames_sent"], 1)
+        self.assertEqual(rd._stats["http_fallbacks"], 1)
+
+    def test_ws_send_counts_only_on_actual_send(self):
+        rd = _make()
+        rd._ws_ok = True
+        rd._enqueue_meta(force=True)     # control/meta (text)
+        rd._q_put_frame(JPEG)            # latest frame (binary)
+        ws = FakeWS()
+        rd._ws_flush_out(ws)
+        # Text/control flushed before the binary frame.
+        self.assertIsNone(ws.sent[0][1])                       # first is text
+        self.assertEqual(ws.sent[-1][0], JPEG)                 # last is the frame
+        self.assertEqual(ws.sent[-1][1], rd._ws_binary_opcode())
+        self.assertEqual(rd._stats["frames_sent"], 1)
+        self.assertEqual(rd._stats["bytes_sent"], len(JPEG))
+
+
+class TestLatestFrameQueue(unittest.TestCase):
+    def test_stale_frame_is_coalesced(self):
+        rd = _make()
+        rd._q_put_frame(b"A")
+        rd._q_put_frame(b"B")
+        self.assertEqual(rd._pending_frame, b"B")
+        self.assertEqual(rd._stats["frames_coalesced"], 1)
+
+    def test_control_messages_are_retained_in_order(self):
+        rd = _make()
+        rd._ws_ok = True
+        rd._q_put_text("m1")
+        rd._q_put_text("m2")
+        rd._q_put_frame(JPEG)
+        ws = FakeWS()
+        rd._ws_flush_out(ws)
+        payloads = [d for (d, _op) in ws.sent]
+        self.assertEqual(payloads[:2], ["m1", "m2"])
+        self.assertEqual(ws.sent[-1][0], JPEG)
+
+
+class TestCriticalEdgeNonDrop(unittest.TestCase):
+    def test_moves_limited_but_critical_never_dropped(self):
+        rd = _make()
+        rd._use_user_helper = True
+        mb = FakeMailbox()
+        rd._session_helper = mb
+
+        limited = 0
+        for _ in range(MOVE_RATE_LIMIT + 20):
+            r = rd.apply_input({"event": "move", "x": 0.5, "y": 0.5})
+            if not r.get("success"):
+                limited += 1
+        self.assertGreater(limited, 0)  # move budget enforced
+
+        # A critical edge after the move flood must still be accepted.
+        r = rd.apply_input({"event": "mousedown", "x": 0.1, "y": 0.1, "button": "left"})
+        self.assertTrue(r["success"])
+
+        downs = [(e, w) for (e, w) in mb.events if e.get("event") == "mousedown"]
+        self.assertTrue(downs)
+        # Critical edges forwarded with a (short) ACK; moves are fire-and-forget.
+        self.assertTrue(all(w for (_e, w) in downs))
+        move_waits = [w for (e, w) in mb.events if e.get("event") == "move"]
+        self.assertTrue(move_waits and not any(move_waits))
+
+    def test_wheel_and_key_not_move_limited(self):
+        rd = _make()
+        rd._use_user_helper = True
+        rd._session_helper = FakeMailbox()
+        for _ in range(MOVE_RATE_LIMIT + 5):
+            rd.apply_input({"event": "move", "x": 0.5, "y": 0.5})
+        self.assertTrue(rd.apply_input({"event": "wheel", "x": 0.5, "y": 0.5, "delta": -120})["success"])
+        self.assertTrue(rd.apply_input({"event": "key", "key": "enter"})["success"])
+
+
+class TestMoveCoalescing(unittest.TestCase):
+    def test_relative_moves_accumulate(self):
+        out = RemoteDesktopStreamer._coalesce_events([
+            {"event": "move_relative", "dx": 5, "dy": 1},
+            {"event": "move_relative", "dx": 3, "dy": 2},
+        ])
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["dx"], out[0]["dy"]), (8, 3))
+
+    def test_absolute_moves_keep_last_position(self):
+        out = RemoteDesktopStreamer._coalesce_events([
+            {"event": "move", "x": 0.1, "y": 0.1},
+            {"event": "move", "x": 0.2, "y": 0.2},
+        ])
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["x"], out[0]["y"]), (0.2, 0.2))
+
+    def test_ordering_boundaries_preserved_around_edges(self):
+        out = RemoteDesktopStreamer._coalesce_events([
+            {"event": "move", "x": 0.1, "y": 0.1},
+            {"event": "move", "x": 0.2, "y": 0.2},
+            {"event": "mousedown", "button": "left"},
+            {"event": "move_relative", "dx": 4, "dy": 4},
+            {"event": "mouseup", "button": "left"},
+        ])
+        self.assertEqual(
+            [e["event"] for e in out],
+            ["move", "mousedown", "move_relative", "mouseup"],
+        )
+        self.assertEqual((out[0]["x"], out[0]["y"]), (0.2, 0.2))
+
+
+class TestRelativeMoveInjection(unittest.TestCase):
+    def test_relative_move_uses_relative_emit(self):
+        rd = _make()
+        recorded = []
+        rd._emit_mouse_move_relative = lambda dx, dy: recorded.append((dx, dy))
+        r = rd.apply_input({"event": "move_relative", "dx": 6, "dy": -3})
+        self.assertTrue(r["success"])
+        self.assertEqual(recorded, [(6, -3)])
+
+    def test_pointer_relative_mode(self):
+        rd = _make()
+        recorded = []
+        rd._emit_mouse_move_relative = lambda dx, dy: recorded.append((dx, dy))
+        r = rd.apply_input({"event": "pointer", "mode": "relative", "dx": 2, "dy": 9})
+        self.assertTrue(r["success"])
+        self.assertEqual(recorded, [(2, 9)])
+
+
+class TestStuckButtonRelease(unittest.TestCase):
+    def test_pressed_buttons_released_on_stop(self):
+        rd = _make()
+        flags = []
+        rd._emit_mouse_button = lambda px, py, flag: flags.append(flag)
+        rd.apply_input({"event": "mousedown", "x": 0.5, "y": 0.5, "button": "left"})
+        rd.apply_input({"event": "mousedown", "x": 0.5, "y": 0.5, "button": "right"})
+        self.assertEqual(rd._pressed_buttons, {"left", "right"})
+        rd.stop()
+        self.assertEqual(rd._pressed_buttons, set())
+        self.assertIn(0x0004, flags)   # left button up
+        self.assertIn(0x0010, flags)   # right button up
+
+    def test_mouseup_clears_pressed_state(self):
+        rd = _make()
+        rd._emit_mouse_button = lambda px, py, flag: None
+        rd.apply_input({"event": "mousedown", "x": 0.5, "y": 0.5, "button": "left"})
+        self.assertIn("left", rd._pressed_buttons)
+        rd.apply_input({"event": "mouseup", "x": 0.5, "y": 0.5, "button": "left"})
+        self.assertNotIn("left", rd._pressed_buttons)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2870,6 +2870,12 @@ class CloudHoneypotClient:
                     self.threat_intel.start()
                 except Exception as e:
                     log(f"[THREAT-INTEL] start failed: {e}")
+            # REV-104: observe-only runtime self-integrity → resilience snapshot.
+            try:
+                from client_integrity import check_async
+                check_async(delay_sec=2.0)
+            except Exception as e:
+                log(f"[INTEGRITY] check skipped: {e}")
             log(f"🛡️ Faz 3 started ({source}: HealthMonitor + sessions/processes)")
         except Exception as e:
             log(f"⚠️ Faz 3 start failed ({source}): {e}")

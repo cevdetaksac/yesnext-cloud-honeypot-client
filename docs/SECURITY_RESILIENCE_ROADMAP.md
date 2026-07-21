@@ -185,9 +185,12 @@ Kabul:
 - [ ] **REV-103 — Local-state protection:** token dışındaki hassas policy,
   network baseline, command cache ve forensic metadata için DPAPI/ACL/içerik
   bütünlüğü matrisi; local admin sınırı açıkça belgelenir.
-- [ ] **REV-104 — Runtime binary integrity:** Guardian/motor başlatmadan önce
-  Authenticode publisher + version manifest + kritik module hash doğrulaması;
-  mismatch → eski/tampered binary'yi çalıştırma, güvenli recovery + urgent alarm.
+- [~] **REV-104 — Runtime binary integrity:** `client_integrity.py` observe-only
+  Authenticode publisher doğrulaması motor start sonrası çalışır ve
+  `resilience.binary_integrity` (`valid|invalid|unknown`) besler. `invalid`
+  yalnız *present-but-broken* imza (tamper) için ayrılır; imzasız fleet
+  `unknown` raporlar. Startup blocking + kritik module hash manifest + urgent
+  alarm sonraki adım (enforce contract promote ile).
 - [ ] **REV-105 — Release strings/log hygiene:** secret scanner'a ek olarak
   internal path, verbose exception, test credential ve debug switch envanteri;
   operasyonda gerekli endpoint/banner string'leri kasıtlı ve belgeli kalır.
@@ -299,8 +302,15 @@ Kabul:
 
 ### Asimetrik komut yetkilendirme
 
-- [ ] **ZT-601 — Canonical command envelope v2:** tenant/device/command-id,
-  issued-at/expires-at, nonce, params hash, operator identity ve policy version.
+- [~] **ZT-601 — Canonical command envelope v2:** cloud tasarım kapısı
+  `honeypot-contract/cloud/command-envelope-v2-design.md`. Client tarafında
+  `client_command_envelope.py` yalnız design/observe iskeleti sağlar:
+  deterministik `params_hash`, yapısal/expiry/params sınıflandırıcı ve
+  control-WS `hello.caps.command_envelope_v2` için dürüst kapasite (`off`
+  varsayılan, opsiyonel `observe`; **enforce asla ilan edilmez**). Asimetrik
+  operator imza doğrulaması ve production `version:2` wire, kontrat gate 1
+  (serialization/algoritma/test vektörleri promote) ve ZT-603 anahtar dağıtımı
+  öncesi **çıkarılmaz**.
 - [ ] **ZT-602 — Hardware-backed admin signing:** browser'da WebAuthn/passkey
   veya yönetilen signing key; cloud private key'i görmez.
 - [ ] **ZT-603 — Agent verification:** tenant admin public key seti, key-id,
@@ -356,12 +366,12 @@ Kabul:
   - [~] SUP-001 Authenticode signing hook (`build.ps1 -Sign`; needs org cert)
   - [~] **SUP-001b** Update path WinVerifyTrust (policy-gated; soft-skip default)
   - [~] SUP-002 release provenance JSON (full SBOM later)
-  - [ ] QA-001 Fault-injection test harness
+  - [~] QA-001 Fault-injection harness (`tests/test_fault_injection.py`: recovery/storm/stand-down)
   - [~] **REV-101/102** Embedded secret CI scan (`tools/scan_embedded_secrets.py`)
-  - [ ] **REV-104** Runtime Authenticode/module integrity tasarımı
+  - [~] **REV-104** Runtime self-integrity (`client_integrity.py`; observe-only → `binary_integrity`)
   - [~] **ID-401** Event Log 4723/4724 parola değişimi/reset (client sensor)
   - [~] RANS-301 ETW shadow PoC surface (provider attach later)
-  - [ ] ZT-601 Canonical asymmetric command envelope tasarımı
+  - [~] ZT-601 Envelope-v2 scaffolding (`client_command_envelope.py`; design/observe, no verify/emit)
 
 ### P1 — P0 ölçümleri yeşil olduktan sonra
 

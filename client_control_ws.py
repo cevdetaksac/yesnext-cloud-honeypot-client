@@ -242,6 +242,13 @@ class AgentControlWebSocket:
                     "mode": "daemon",
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
+                # ZT-601: truthful envelope-v2 capability (off unless configured
+                # to observe). Never advertises enforce; design gate not promoted.
+                try:
+                    from client_command_envelope import capability as _env_cap
+                    hello["caps"] = {"command_envelope_v2": _env_cap()}
+                except Exception:
+                    pass
                 ws.send(json.dumps(hello))
                 log("[CONTROL-WS] connected")
 

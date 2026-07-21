@@ -245,10 +245,15 @@ def snapshot(
         guardian = _prune_list(list(_state.get("guardian_restarts") or []), now)
         _state["daemon_restarts"] = daemon
         _state["guardian_restarts"] = guardian
-        storm = _storm_active(daemon, now) or _storm_active(guardian, now)
+        stand_down = bool(_state.get("stand_down_reason"))
+        # A legitimate update/PIN/uninstall stand-down is not a restart storm;
+        # historical failure stamps must not raise an observe alarm during it.
+        storm = (not stand_down) and (
+            _storm_active(daemon, now) or _storm_active(guardian, now)
+        )
         _state["restart_storm"] = storm
         recent_daemon = [t for t in daemon if now - t <= STORM_WINDOW_SEC]
-        backoff = _backoff_for_count(len(recent_daemon))
+        backoff = 0 if stand_down else _backoff_for_count(len(recent_daemon))
         exit_code = _state.get("guardian_exit_code")
         out = {
             "guardian_installed": (
@@ -314,7 +319,7 @@ def ensure_guardian_with_backoff(exe_path: str = None) -> bool:
         is_guardian_service_running,
     )
 
-    if _legitimate_stand_down():
+    if is_legitimate_stand_down():
         note_stand_down("update_or_operator_stop")
         return True
     clear_stand_down()

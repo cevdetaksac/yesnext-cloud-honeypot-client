@@ -12,5 +12,6 @@
 | **Changelog (client releases)** | [CHANGELOG.md](CHANGELOG.md) |
 | **Operasyon** | [OPERATIONS.md](OPERATIONS.md) |
 | **Güvenlik** | [SECURITY.md](SECURITY.md) |
+| **Security & Resilience yol haritası** | [SECURITY_RESILIENCE_ROADMAP.md](SECURITY_RESILIENCE_ROADMAP.md) |
 
 Eski `docs/api/*` dosyaları contract’a taşındı / oradan devam eder. Yeni API işi **contract** üzerinde başlar.

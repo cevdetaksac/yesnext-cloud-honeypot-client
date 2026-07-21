@@ -38,11 +38,13 @@ THREAT_SCORES: Dict[str, int] = {
     "failed_logon_burst":               40,   # 10+ failures in 5 min
     "failed_then_success":              95,
 
-    # Privilege escalation
+    # Privilege escalation / identity
     "new_user_created":                 90,
     "user_added_to_admin_group":        90,
     "privilege_assigned":               75,
     "security_group_changed":           70,
+    "password_change_attempt":          70,
+    "password_reset_attempt":           80,
 
     # Persistence
     "new_service_installed":            65,
@@ -982,6 +984,8 @@ class ThreatEngine:
             "xp_cmdshell_executed":      "💉 xp_cmdshell Executed (SQL Injection)",
             "new_user_created":          "👤 New User Account Created",
             "user_added_to_admin_group": "⬆️ User Added to Admin Group",
+            "password_change_attempt":   "🔑 Password Change Attempt",
+            "password_reset_attempt":    "🔑 Password Reset Attempt",
             "successful_logon_rdp":      "🖥️ RDP Successful Login",
             "successful_logon":          "🔐 Successful Login",
             "failed_logon_burst":        "🔨 Brute Force Attack Detected",

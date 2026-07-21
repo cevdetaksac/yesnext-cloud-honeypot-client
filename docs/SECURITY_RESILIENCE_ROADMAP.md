@@ -125,10 +125,10 @@ update-integrity boşluklarını kapatmak.
 - [ ] **SR-003 — Guardian kurulum sağlığı:** `service_installed=true` fakat
   `service_ok=false` durumunu otomatik onar; SCM exit code ve recovery action
   telemetrisi ekle.
-- [ ] **ZT-600 — İmzasız komutları reddet:**
-  `verify_command_signature` transition-period'unu kapat. Cloud her komuta
-  HMAC koyar; agent imzasız/yanlış imzalı komutu audit + reject eder.
-  Feature-flag + fleet rollout; contract `api/03` güncellenir.
+- [~] **ZT-600 — İmzasız komutları reddet:**
+  Observe hazır (`inspect_command_signature` + yerel `signature_*` sayaçları);
+  invalid hâlâ reject, missing hâlâ soft-allow. Enforce ancak cloud %100 imza
+  + ortak test vektörü + contract promotion sonrası açılır.
 - [ ] **SUP-001 — Authenticode release signing:** installer, ana exe ve varsa
   helper/driver için timestamp'li kod imzası; CI doğrulaması.
 - [ ] **SUP-001b — WinVerifyTrust on update:** indirilen installer/exe
@@ -270,10 +270,9 @@ Kabul:
 
 ## Faz 4 — Kimlik saldırıları ve parola değişimi görünürlüğü
 
-- [ ] **ID-401 — Security Event Log sensörü:** mevcut `client_eventlog.py`
-  izleme setine **4723** (password change) ve **4724** (password reset)
-  ekle; ayrıca account disable/enable, group/admin membership ve log clear
-  olaylarını koru/genişlet.
+- [~] **ID-401 — Security Event Log sensörü:** **4723/4724** izleme + skor/
+  kategori eklendi (alert-only; otomatik lockout yok). Burst correlation
+  (ID-402) ve cloud incident görünümü (ID-403) ayrı.
 - [ ] **ID-402 — Burst correlation:** actor/target/host/domain bazında kayan
   pencere; servis hesapları ve planlı IAM operasyonları için allowlist.
 - [ ] **ID-403 — Cloud incident görünümü:** hedef hesap sayısı, actor, DC/host,
@@ -344,19 +343,19 @@ Kabul:
 
 ### P0 — Sonraki güvenlik sprinti
 
-- [ ] **ZT-600** İmzasız remote command kabulünü kapat (HMAC zorunlu)
-- [ ] SR-001 Resilience SLO + dashboard telemetry
-- [ ] SR-002 Restart-storm breaker
-- [ ] SR-003 Guardian `installed but not running` self-heal
-- [ ] SUP-001 Authenticode signing pipeline
-- [ ] **SUP-001b** Update path'te WinVerifyTrust
-- [ ] SUP-002 SBOM/provenance
-- [ ] QA-001 Fault-injection test harness
-- [ ] **REV-101/102** Binary exposure threat model + embedded secret CI scan
-- [ ] **REV-104** Runtime Authenticode/module integrity tasarımı
-- [ ] **ID-401** Event Log'a 4723/4724 parola değişimi/reset ekle
-- [ ] RANS-301 ETW read-only PoC
-- [ ] ZT-601 Canonical asymmetric command envelope tasarımı
+- [~] **ZT-600** Observe telemetry landed; missing-sig enforce blocked on cloud/contract
+  - [ ] SR-001 Resilience SLO + dashboard telemetry
+  - [ ] SR-002 Restart-storm breaker
+  - [ ] SR-003 Guardian `installed but not running` self-heal
+  - [ ] SUP-001 Authenticode signing pipeline
+  - [ ] **SUP-001b** Update path'te WinVerifyTrust
+  - [ ] SUP-002 SBOM/provenance
+  - [ ] QA-001 Fault-injection test harness
+  - [ ] **REV-101/102** Binary exposure threat model + embedded secret CI scan
+  - [ ] **REV-104** Runtime Authenticode/module integrity tasarımı
+  - [~] **ID-401** Event Log 4723/4724 parola değişimi/reset (client sensor)
+  - [ ] RANS-301 ETW read-only PoC
+  - [ ] ZT-601 Canonical asymmetric command envelope tasarımı
 
 ### P1 — P0 ölçümleri yeşil olduktan sonra
 

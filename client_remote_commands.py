@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set
 
 from client_helpers import log
-from client_security_utils import verify_command_signature, sign_command
+from client_security_utils import inspect_command_signature, sign_command
 
 # ── Constants ─────────────────────────────────────────────────────
 
@@ -214,7 +214,7 @@ class RemoteCommandExecutor:
         # Rate limiting
         self._cmd_timestamps: deque = deque(maxlen=MAX_COMMANDS_PER_MINUTE * 2)
 
-        # Stats
+        # Stats (signature_* are local observe counters — not wire fields yet)
         self._stats = {
             "commands_received": 0,
             "commands_executed": 0,
@@ -224,6 +224,11 @@ class RemoteCommandExecutor:
             "commands_deduped": 0,
             "poll_errors": 0,
             "control_ws": False,
+            "signature_ok": 0,
+            "signature_missing": 0,
+            "signature_invalid": 0,
+            "signature_disabled": 0,
+            "signature_no_token": 0,
         }
 
         # Command history (last 50)
@@ -776,9 +781,28 @@ class RemoteCommandExecutor:
         """
         Validate command. Returns rejection reason or None if valid.
         """
-        # 0. HMAC signature (when server provides one)
-        token = self.token_getter()
-        if token and cmd.get("signature") and not verify_command_signature(token, cmd):
+        # 0. HMAC signature — observe always; reject only invalid (ZT-600)
+        token = self.token_getter() or ""
+        verdict = inspect_command_signature(token, cmd)
+        stat_key = {
+            "ok": "signature_ok",
+            "missing": "signature_missing",
+            "invalid": "signature_invalid",
+            "disabled": "signature_disabled",
+            "no_token": "signature_no_token",
+        }.get(verdict)
+        if stat_key:
+            self._stats[stat_key] = int(self._stats.get(stat_key, 0) or 0) + 1
+        if verdict in ("missing", "invalid", "no_token", "disabled"):
+            cmd_id = str(cmd.get("command_id") or cmd.get("id") or "?")
+            cmd_type_obs = str(
+                cmd.get("command_type") or cmd.get("type") or cmd.get("command") or "?"
+            )
+            log(
+                f"[REMOTE-CMD] signature observe "
+                f"verdict={verdict} type={cmd_type_obs} id={cmd_id}"
+            )
+        if verdict == "invalid":
             return "Invalid command signature"
 
         cmd_type = cmd.get("command_type", "")

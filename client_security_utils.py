@@ -228,19 +228,43 @@ def sign_command(token: str, command_id: str, cmd_type: str, issued_at: str) -> 
     return hmac.new(_signing_secret(token), msg, hashlib.sha256).hexdigest()
 
 
+def inspect_command_signature(
+    token: str,
+    command: Mapping[str, Any],
+) -> str:
+    """Classify inbound command HMAC without changing accept/reject policy.
+
+    Returns one of: ``disabled``, ``no_token``, ``missing``, ``invalid``, ``ok``.
+    Observe telemetry uses this; enforcement of ``missing`` stays off until
+    cloud coverage and contract promotion (ZT-600).
+    """
+    if not command_signing_enabled():
+        return "disabled"
+    if not token:
+        return "no_token"
+    sig = command.get("signature")
+    if not sig:
+        return "missing"
+    command_id = str(command.get("id", command.get("command_id", "")))
+    # Prefer ``type`` (canonical) over ``command``; ``command_type`` alone is NOT
+    # used here — cloud must mirror the same alias rule for matching digests.
+    cmd_type = str(command.get("type", command.get("command", "")))
+    issued_at = str(command.get("issued_at", command.get("created_at", "")))
+    expected = sign_command(token, command_id, cmd_type, issued_at)
+    if hmac.compare_digest(str(sig), expected):
+        return "ok"
+    return "invalid"
+
+
 def verify_command_signature(
     token: str,
     command: Mapping[str, Any],
 ) -> bool:
-    """Verify HMAC on inbound dashboard commands when signature is present."""
-    if not command_signing_enabled():
-        return True
-    sig = command.get("signature")
-    if not sig:
-        # Transition period: accept unsigned commands with warning handled by caller
-        return True
-    command_id = str(command.get("id", command.get("command_id", "")))
-    cmd_type = str(command.get("type", command.get("command", "")))
-    issued_at = str(command.get("issued_at", command.get("created_at", "")))
-    expected = sign_command(token, command_id, cmd_type, issued_at)
-    return hmac.compare_digest(str(sig), expected)
+    """Verify HMAC on inbound dashboard commands when signature is present.
+
+    Transition period: missing signatures still soft-allow (True). Invalid
+    signatures return False. Callers should use :func:`inspect_command_signature`
+    for observe counters.
+    """
+    verdict = inspect_command_signature(token, command)
+    return verdict != "invalid"

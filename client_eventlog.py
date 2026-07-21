@@ -7,7 +7,7 @@ Real-time monitoring of Windows Security, System, Application and RDP
 event logs using win32evtlog push-based subscriptions (EvtSubscribe).
 
 Watched events:
-  Security   — 4624/4625/4648/4672/4688/4697/4720/4732/1102
+  Security   — 4624/4625/4648/4672/4688/4697/4720/4723/4724/4732/1102
   System     — 1074/6005/6006/7045/7040
   Application — 18453/18456/15457/17135 (MSSQL)
   RDP        — 1149/21/24/25
@@ -41,7 +41,9 @@ except ImportError:
 
 # Channels → Event IDs to watch
 WATCHED_CHANNELS: Dict[str, List[int]] = {
-    "Security": [4624, 4625, 4648, 4672, 4688, 4697, 4720, 4732, 4735, 1102],
+    "Security": [
+        4624, 4625, 4648, 4672, 4688, 4697, 4720, 4723, 4724, 4732, 4735, 1102,
+    ],
     "System": [1074, 6005, 6006, 7045, 7040],
     "Application": [18453, 18456, 15457, 17135],
     "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational": [1149],
@@ -70,6 +72,8 @@ EVENT_TYPE_MAP: Dict[int, str] = {
     4688: "new_process",
     4697: "new_service_installed",
     4720: "new_user_created",
+    4723: "password_change_attempt",
+    4724: "password_reset_attempt",
     4732: "user_added_to_admin_group",
     4735: "security_group_changed",
     1102: "audit_log_cleared",
@@ -363,11 +367,14 @@ class EventLogWatcher:
                 # Extracted fields (may be empty depending on event type)
                 "source_ip": self._extract_ip(event_data, event_id),
                 "username": self._extract_username(event_data, event_id),
+                "actor_username": self._extract_actor_username(event_data, event_id),
                 "logon_type": self._extract_logon_type(event_data, event_id),
                 "target_service": self._detect_service(event_id, channel, event_data),
                 "target_port": self._detect_port(event_id, event_data),
                 "process_name": event_data.get("NewProcessName", event_data.get("ProcessName", "")),
                 "service_name": event_data.get("ServiceName", ""),
+                # Keep raw EventData for local correlation only. Never treat
+                # password/credential material as alert payload fields.
                 "raw_data": event_data,
             }
 
@@ -408,7 +415,7 @@ class EventLogWatcher:
     @staticmethod
     def _extract_username(data: dict, event_id: int) -> str:
         """Extract target username from event data."""
-        # Standard logon events
+        # Standard logon / account events (4723/4724: TargetUserName)
         username = data.get("TargetUserName", "")
         if not username:
             username = data.get("SubjectUserName", "")
@@ -424,6 +431,16 @@ class EventLogWatcher:
             username = data.get("Param1", username)
 
         return username
+
+    @staticmethod
+    def _extract_actor_username(data: dict, event_id: int) -> str:
+        """Subject/actor that initiated the change (distinct from target)."""
+        if event_id not in (4723, 4724, 4720, 4732, 4735):
+            return ""
+        actor = (data.get("SubjectUserName") or "").strip()
+        if actor in ("-", ""):
+            return ""
+        return actor
 
     @staticmethod
     def _extract_logon_type(data: dict, event_id: int) -> Optional[int]:

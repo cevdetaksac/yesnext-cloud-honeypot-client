@@ -520,8 +520,14 @@ class ThreatEngine:
                 if force_urgent and severity not in ("critical", "high"):
                     severity = "high"
                 # Honeypot credential veya critical skor → anında IP blokla
+                # Identity password events stay alert-only (no disable/lockout).
                 standalone_auto_response = []
-                if event_type == "honeypot_credential" or severity == "critical":
+                if event_type in (
+                    "password_change_attempt",
+                    "password_reset_attempt",
+                ):
+                    standalone_auto_response = []
+                elif event_type == "honeypot_credential" or severity == "critical":
                     standalone_auto_response = ["block_ip", "notify_urgent"]
                 self._emit_alert(
                     event=event,
@@ -938,7 +944,8 @@ class ThreatEngine:
             "target_service": event.get("target_service", "") or event.get("service", ""),
             "target_port": int(event.get("target_port", 0) or event.get("port", 0) or 0),
             "username": event.get("username", ""),
-            "password": event.get("password", ""),
+            # Never forward credential material from Event Log / honeypot parsers.
+            "password": "",
             "threat_score": int(ctx.threat_score),
             "event_ids": [event.get("event_id", 0)],
             "correlation_rule": rule_name,
@@ -952,6 +959,23 @@ class ThreatEngine:
                 "usernames": list(ctx.usernames_tried)[:10],
             },
         }
+        if event.get("event_type") in (
+            "password_change_attempt",
+            "password_reset_attempt",
+        ):
+            alert["recommended_action"] = "review_identity_activity"
+            alert["auto_response"] = []
+            alert["system_context"] = {
+                "identity": {
+                    "actor_username": event.get("actor_username", ""),
+                    "actor_domain": event.get("actor_domain", ""),
+                    "target_username": event.get("username", ""),
+                    "target_domain": event.get("target_domain", ""),
+                    "computer": event.get("computer", ""),
+                    "result": event.get("result", "") or "unknown",
+                    "event_id": int(event.get("event_id", 0) or 0),
+                }
+            }
 
         log(f"[THREAT] 🚨 Alert [{severity.upper()}] "
             f"{alert['title']} — IP: {ctx.ip} — Score: {int(ctx.threat_score)}")

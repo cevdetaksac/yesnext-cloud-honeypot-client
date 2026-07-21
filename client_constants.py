@@ -327,10 +327,11 @@ LOG_TIME_FORMAT = '%Y-%m-%d %H:%M:%S.%f'  # With milliseconds
 SECURITY_METADATA = {
     "product_name": "Cloud Honeypot Security Monitor",
     "product_version": __version__,
-    "vendor_name": "YesNext Technology", 
+    "vendor_name": "YesNext Technology",
     "product_state": "Enabled and Up-to-date",
-    "signature_status": "Digital signature verified",
-    "installation_source": "Legitimate software distribution"
+    # Honest until SUP-001 production signing is active — do not claim verified.
+    "signature_status": "authenticode_unknown",
+    "installation_source": "Legitimate software distribution",
 }
 
 # Registry security markers

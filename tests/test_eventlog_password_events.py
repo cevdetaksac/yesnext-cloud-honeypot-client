@@ -38,8 +38,11 @@ class TestPasswordChangeEvents(unittest.TestCase):
     def test_extractors_prefer_target_and_subject_without_secrets(self):
         data = {
             "TargetUserName": "victim",
+            "TargetDomainName": "CORP",
             "SubjectUserName": "admin",
             "SubjectDomainName": "CORP",
+            "Status": "0x0",
+            "Password": "must-not-survive",
         }
         self.assertEqual(
             EventLogWatcher._extract_username(data, 4724), "victim"
@@ -48,8 +51,13 @@ class TestPasswordChangeEvents(unittest.TestCase):
             EventLogWatcher._extract_actor_username(data, 4724), "admin"
         )
         self.assertEqual(
-            EventLogWatcher._extract_actor_username(data, 4723), "admin"
+            EventLogWatcher._extract_domain(data, "SubjectDomainName", 4724),
+            "CORP",
         )
+        self.assertEqual(EventLogWatcher._extract_result(data, 4724), "success")
+        safe = EventLogWatcher._sanitize_event_data(data, 4724)
+        self.assertNotIn("Password", safe)
+        self.assertIn("TargetUserName", safe)
         # Non-identity events do not invent an actor field
         self.assertEqual(
             EventLogWatcher._extract_actor_username(data, 4624), ""

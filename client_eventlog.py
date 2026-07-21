@@ -356,6 +356,7 @@ class EventLogWatcher:
 
             # Build structured result
             event_type = EVENT_TYPE_MAP.get(event_id, f"unknown_{event_id}")
+            safe_raw = self._sanitize_event_data(event_data, event_id)
 
             result = {
                 "event_id": event_id,
@@ -368,14 +369,20 @@ class EventLogWatcher:
                 "source_ip": self._extract_ip(event_data, event_id),
                 "username": self._extract_username(event_data, event_id),
                 "actor_username": self._extract_actor_username(event_data, event_id),
+                "actor_domain": self._extract_domain(
+                    event_data, "SubjectDomainName", event_id
+                ),
+                "target_domain": self._extract_domain(
+                    event_data, "TargetDomainName", event_id
+                ),
+                "result": self._extract_result(event_data, event_id),
                 "logon_type": self._extract_logon_type(event_data, event_id),
                 "target_service": self._detect_service(event_id, channel, event_data),
                 "target_port": self._detect_port(event_id, event_data),
                 "process_name": event_data.get("NewProcessName", event_data.get("ProcessName", "")),
                 "service_name": event_data.get("ServiceName", ""),
-                # Keep raw EventData for local correlation only. Never treat
-                # password/credential material as alert payload fields.
-                "raw_data": event_data,
+                # Local correlation only — identity events use a whitelist.
+                "raw_data": safe_raw,
             }
 
             return result
@@ -441,6 +448,53 @@ class EventLogWatcher:
         if actor in ("-", ""):
             return ""
         return actor
+
+    @staticmethod
+    def _extract_domain(data: dict, key: str, event_id: int) -> str:
+        if event_id not in (4723, 4724, 4720, 4732, 4735):
+            return ""
+        value = (data.get(key) or "").strip()
+        return "" if value in ("-", "") else value
+
+    @staticmethod
+    def _extract_result(data: dict, event_id: int) -> str:
+        if event_id not in (4723, 4724):
+            return ""
+        status = str(data.get("Status") or data.get("FailureCode") or "").strip()
+        if not status or status in ("-",):
+            # Success audits often omit Status; treat as success when event exists.
+            return "success"
+        try:
+            code = int(status, 16) if status.lower().startswith("0x") else int(status)
+            return "success" if code == 0 else "failure"
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def _sanitize_event_data(data: dict, event_id: int) -> dict:
+        """Drop password-like keys; whitelist identity EventData for 4723/4724."""
+        if not isinstance(data, dict):
+            return {}
+        if event_id in (4723, 4724):
+            allow = {
+                "SubjectUserName", "SubjectDomainName", "SubjectUserSid",
+                "TargetUserName", "TargetDomainName", "TargetUserSid",
+                "Status", "FailureCode",
+            }
+            return {
+                key: str(data.get(key) or "")[:256]
+                for key in allow
+                if key in data
+            }
+        banned = {
+            "password", "Password", "NewPassword", "OldPassword",
+            "credentials", "Credential", "secret", "token",
+        }
+        return {
+            key: value
+            for key, value in data.items()
+            if key not in banned and "password" not in key.lower()
+        }
 
     @staticmethod
     def _extract_logon_type(data: dict, event_id: int) -> Optional[int]:

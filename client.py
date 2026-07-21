@@ -388,6 +388,17 @@ class CloudHoneypotClient:
                     threat_engine=self.threat_engine,
                     ransomware_shield=self.ransomware_shield,
                 )
+                # RANS-301: ETW shadow surface (default off; health-only, no contain)
+                try:
+                    from client_utils import get_from_config
+                    if bool(get_from_config(
+                        "threat_detection.etw_file_io_shadow", False
+                    )):
+                        from client_etw_shadow import EtwShadowSensor
+                        self.health_monitor.etw_shadow = EtwShadowSensor()
+                        self.health_monitor.etw_shadow.start()
+                except Exception as etw_exc:
+                    log(f"⚠️ ETW shadow init skipped: {etw_exc}")
                 if ENABLE_SELF_PROTECTION:
                     self.process_protection = ProcessProtection(
                         threat_engine=self.threat_engine,
@@ -3313,9 +3324,17 @@ if __name__ == "__main__":
             from client_helpers import (
                 has_interactive_user_session,
                 interactive_frontend_running,
-                is_session_zero,
                 launch_interactive_tray_gui,
             )
+            try:
+                from client_resilience import is_legitimate_stand_down, note_stand_down
+                if is_legitimate_stand_down():
+                    note_stand_down("update_or_operator_stop")
+                    log("Watchdog stand-down — update/PIN active, skip resurrect")
+                    sys.exit(0)
+            except Exception:
+                pass
+
             motor_alive = False
             try:
                 motor_alive = bool(helper.is_system_motor_alive(timeout=0.9))
@@ -3323,35 +3342,14 @@ if __name__ == "__main__":
                 log(f"Watchdog motor probe failed: {e}")
                 motor_alive = False
 
-            import subprocess
-            import sys
-            exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
-            CREATE_NO_WINDOW = 0x08000000
-
             if not motor_alive:
-                # GUI-only host used to look "already running" and skipped restart — fixed.
-                log("SYSTEM motor unhealthy/missing — starting CloudHoneypot-Background")
+                # Prefer the shared ensure path (Background task + stand-down).
+                log("SYSTEM motor unhealthy/missing — ensure_daemon_running")
                 try:
-                    from client_task_scheduler import TASK_NAME_BACKGROUND
-                    subprocess.run(
-                        ["schtasks", "/change", "/tn", TASK_NAME_BACKGROUND, "/enable"],
-                        capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
-                    )
-                    subprocess.run(
-                        ["schtasks", "/run", "/tn", TASK_NAME_BACKGROUND],
-                        capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW,
-                    )
+                    from client_daemon_ipc import ensure_daemon_running
+                    ensure_daemon_running(log_func=log, wait_sec=15.0)
                 except Exception as e:
-                    log(f"Watchdog Background task run failed: {e}")
-                    if getattr(sys, 'frozen', False):
-                        subprocess.Popen(
-                            [exe_path, "--mode=daemon", "--silent"],
-                            creationflags=(
-                                subprocess.DETACHED_PROCESS
-                                | subprocess.CREATE_NEW_PROCESS_GROUP
-                                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                            ),
-                        )
+                    log(f"Watchdog ensure_daemon_running failed: {e}")
                 log("Watchdog motor recovery triggered")
             else:
                 log("SYSTEM motor healthy (motor_ok / Session 0)")
@@ -3772,17 +3770,27 @@ if __name__ == "__main__":
         sys.exit(0)
 
     elif operation_mode == "watchdog":
-        # ===== WATCHDOG MODE — every 2 min process check / restart =====
+        # ===== WATCHDOG MODE — same motor_ok + stand-down path as --watchdog =====
         try:
             log("=== WATCHDOG MODE STARTUP ===")
             from client_helpers import ClientHelpers
             from client_lifecycle import report_now, flush_queue_to_api
+            from client_daemon_ipc import ensure_daemon_running, is_motor_healthy
+
+            try:
+                from client_resilience import is_legitimate_stand_down, note_stand_down
+                if is_legitimate_stand_down():
+                    note_stand_down("update_or_operator_stop")
+                    log("Watchdog mode stand-down — update/PIN active")
+                    sys.exit(0)
+            except Exception:
+                pass
 
             helper = ClientHelpers()
-            is_running = helper.is_app_running() or helper.is_daemon_running()
+            is_running = bool(is_motor_healthy(timeout=0.9)) or helper.is_daemon_running()
 
             if not is_running:
-                log("No client instance running, starting new daemon instance...")
+                log("No healthy SYSTEM motor, ensure_daemon_running...")
                 report_now(
                     "watchdog_restart",
                     "client_not_running",
@@ -3791,29 +3799,8 @@ if __name__ == "__main__":
                     log_func=log,
                 )
 
-                exe_path = sys.executable if not getattr(sys, 'frozen', False) else sys.argv[0]
-                if getattr(sys, 'frozen', False):
-                    subprocess.Popen(
-                        [exe_path, "--mode=daemon", "--silent"],
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                    )
-                else:
-                    subprocess.Popen(
-                        [sys.executable, "client.py", "--mode=daemon", "--silent"],
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                    )
-                log("New daemon instance started successfully")
-                time.sleep(2)
-                still = helper.is_app_running() or helper.is_daemon_running()
-                if not still:
+                ok = ensure_daemon_running(log_func=log, wait_sec=15.0)
+                if not ok:
                     report_now(
                         "watchdog_restart_failed",
                         "daemon_not_alive_after_start",
@@ -3830,7 +3817,7 @@ if __name__ == "__main__":
                         log_func=log,
                     )
             else:
-                log("Client already running - watchdog check passed")
+                log("SYSTEM motor healthy - watchdog check passed")
 
             try:
                 flush_queue_to_api(log_func=log)

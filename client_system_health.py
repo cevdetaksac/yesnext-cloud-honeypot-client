@@ -1200,6 +1200,12 @@ class SystemHealthMonitor:
         except Exception:
             pass
         try:
+            etw = getattr(self, "etw_shadow", None)
+            if etw is not None and hasattr(etw, "status"):
+                payload["snapshot"]["etw_file_io_shadow"] = etw.status()
+        except Exception:
+            pass
+        try:
             ng = getattr(self, "network_guard", None)
             if ng is not None:
                 payload["snapshot"]["network_guard"] = ng.status()

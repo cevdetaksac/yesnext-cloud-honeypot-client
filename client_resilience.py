@@ -258,7 +258,8 @@ def refresh_guardian_exit_code(service_name: str = "CloudHoneypotGuardian") -> O
     return code
 
 
-def _legitimate_stand_down() -> bool:
+def is_legitimate_stand_down() -> bool:
+    """Shared update/PIN stand-down gate for every recovery/resurrect path."""
     try:
         from client_utils import is_update_in_progress
         if is_update_in_progress():
@@ -272,6 +273,10 @@ def _legitimate_stand_down() -> bool:
     except Exception:
         pass
     return False
+
+
+# Backward-compatible private alias
+_legitimate_stand_down = is_legitimate_stand_down
 
 
 def ensure_guardian_with_backoff(exe_path: str = None) -> bool:

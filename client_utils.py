@@ -1344,6 +1344,8 @@ class InstallerUpdateManager:
             )
             response.raise_for_status()
             
+            import hashlib
+            sha = hashlib.sha256()
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             
@@ -1352,6 +1354,7 @@ class InstallerUpdateManager:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        sha.update(chunk)
                         downloaded += len(chunk)
 
                         # Keep machine-wide update lock fresh during long downloads
@@ -1366,8 +1369,46 @@ class InstallerUpdateManager:
                         if progress_callback and total_size > 0:
                             progress = int((downloaded / total_size) * 100)
                             progress_callback(progress)
-            
-            self.log(f"[UPDATE] Installer başarıyla indirildi: {installer_path}")
+
+            digest = sha.hexdigest()
+            expected = str(getattr(self, "_expected_sha256", "") or "").strip()
+            if not expected:
+                try:
+                    expected = str(get_from_config("updates.expected_sha256", "") or "").strip()
+                except Exception:
+                    expected = ""
+            try:
+                verify_checksum = bool(get_from_config("updates.verify_checksum", True))
+            except Exception:
+                verify_checksum = True
+            if verify_checksum and expected and digest.lower() != expected.lower():
+                self.log("[UPDATE] Checksum mismatch — aborting")
+                try:
+                    os.remove(installer_path)
+                except OSError:
+                    pass
+                return None
+
+            try:
+                from client_authenticode import (
+                    AuthenticodeError,
+                    assert_update_authenticode,
+                )
+                assert_update_authenticode(installer_path)
+            except AuthenticodeError as exc:
+                self.log(f"[UPDATE] Authenticode rejected: {exc}")
+                try:
+                    os.remove(installer_path)
+                except OSError:
+                    pass
+                return None
+            except Exception:
+                pass
+
+            self.log(
+                f"[UPDATE] Installer başarıyla indirildi: {installer_path} "
+                f"sha256={digest[:16]}…"
+            )
             return installer_path
             
         except Exception as e:
@@ -1988,6 +2029,27 @@ def launch_safe_update_install(
             except Exception:
                 pass
             return False
+    except Exception:
+        pass
+
+    # SUP-001b: trust gate immediately before execute (policy-gated soft-skip).
+    try:
+        from client_authenticode import AuthenticodeError, assert_update_authenticode
+        assert_update_authenticode(installer_path)
+    except AuthenticodeError:
+        try:
+            log_path = os.path.join(
+                os.environ.get("ProgramData", r"C:\ProgramData"),
+                "YesNext", "CloudHoneypotClient", "update-install.log",
+            )
+            with open(log_path, "a", encoding="ascii", errors="replace") as fh:
+                fh.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    "preflight_fail detail=authenticode_rejected\n"
+                )
+        except Exception:
+            pass
+        return False
     except Exception:
         pass
 

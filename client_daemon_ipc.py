@@ -195,6 +195,16 @@ def ensure_daemon_running(log_func=None, wait_sec: float = 20.0) -> bool:
     if is_motor_healthy():
         return True
 
+    # Never fight update handoff or signed operator PIN stop.
+    try:
+        from client_resilience import is_legitimate_stand_down, note_stand_down
+        if is_legitimate_stand_down():
+            note_stand_down("update_or_operator_stop")
+            log_func("[IPC] ensure_daemon_running skipped — legitimate stand-down")
+            return False
+    except Exception:
+        pass
+
     if ping() and not is_motor_healthy():
         log_func(
             "[IPC] Control port answers PING but motor_ok=false "

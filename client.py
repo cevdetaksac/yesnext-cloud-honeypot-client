@@ -944,6 +944,30 @@ class CloudHoneypotClient:
                 if self.auto_response and hasattr(self.auto_response, "apply_threat_config"):
                     self.auto_response.apply_threat_config(config)
 
+                # Webhook (SIEM forward) — GUI Settings tab writes webhook_enabled/
+                # webhook_url to the cloud threats/config, but the local sender
+                # (client_alerts._send_webhook) reads notifications.* from
+                # client_config.json. Bridge the cloud values into local config so
+                # the toggle actually takes effect on the daemon.
+                try:
+                    if "webhook_enabled" in config or "webhook_url" in config:
+                        if "webhook_enabled" in config:
+                            set_config_value(
+                                "notifications.webhook_enabled",
+                                bool(config.get("webhook_enabled")),
+                            )
+                        if "webhook_url" in config:
+                            set_config_value(
+                                "notifications.webhook_url",
+                                str(config.get("webhook_url") or ""),
+                            )
+                        log(
+                            "[CONFIG-SYNC] webhook bridged from cloud "
+                            f"enabled={bool(config.get('webhook_enabled'))}"
+                        )
+                except Exception as we:
+                    log(f"[CONFIG-SYNC] webhook bridge error: {we}")
+
                 # Whitelist IP/subnet'lerini EventLogWatcher, AutoResponse
                 # ve ThreatEngine'e ilet — dashboard'dan gelen güvenli IP'ler
                 wl_ips = set(config.get("whitelist_ips", []))

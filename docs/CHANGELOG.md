@@ -1,3 +1,6 @@
+# v4.8.2
+- **Ayarlar webhook artık daemon'da etkili:** GUI Ayarlar sekmesi `webhook_enabled`/`webhook_url`'ü buluta (`POST /api/threats/config`) yazıyordu, ama daemon `_sync_threat_config` bu alanları okumuyordu; gerçek gönderici (`client_alerts._send_webhook`) yalnızca yerel `client_config.json` → `notifications.webhook_*` okuduğu için toggle daemon tarafında **no-op**'tu. Artık `_sync_threat_config`, buluttan gelen webhook alanlarını yerel `notifications.*`'e köprüler (cloud tek kaynak, forward client'ta). E-posta tercih alanlarını (`alert_email_enabled`, `instant_email_for_critical`, `min_severity_for_email`, `daily_digest_enabled`) cloud tüketir; client apply etmez.
+
 # v4.8.1
 - **Koruma detay popup'ı çelişki fix:** "Koruma Motoru" chip/kartı **AKTİF** derken detay popup'ı **Koruma: OFF** gösteriyordu. Kök neden: popup yerel `process_protection` nesnesini okuyordu; bu nesne yalnız SYSTEM daemon sürecinde yaşar, frontend-only GUI'de her zaman `None`. Popup ve `self_protect` kartı artık chip ile **aynı kaynağı** (daemon STATUS: `motor_ok` + `persistence.self_protection`) kullanır. Popup ayrıca motor, Guardian servisi, 24s tamper ve MemoryGuard durumunu tek ekranda tutarlı gösterir.
 

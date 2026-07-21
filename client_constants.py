@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.8.1"  # GUI: protection detail popup now uses daemon STATUS (no AKTİF-vs-OFF mismatch)
+VERSION = "4.8.2"  # Settings webhook now bridges cloud threats/config -> local notifications sender
 
 
 CLIENT_VERSION = VERSION  # Main version constant

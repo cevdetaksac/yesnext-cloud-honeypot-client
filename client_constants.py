@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.8.2"  # Settings webhook now bridges cloud threats/config -> local notifications sender
+VERSION = "4.8.3"  # Dashboard PIN set/reset (set_gui_pin/clear_gui_pin) + IP table quick block/whitelist buttons
 
 
 CLIENT_VERSION = VERSION  # Main version constant

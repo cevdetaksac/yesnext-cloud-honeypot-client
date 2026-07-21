@@ -3407,6 +3407,24 @@ class ModernGUI:
         )
         self._ip_clear_blocked_btn.pack(side="right", padx=(0, 6))
 
+        # Hızlı aksiyonlar — elle IP girip anında engelle / whitelist'e ekle
+        ctk.CTkButton(
+            hdr, text=self.t("ip_btn_quick_whitelist"),
+            width=118, height=22,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=COLORS["green"], hover_color=COLORS["green_hover"],
+            text_color=COLORS["text_bright"],
+            command=self._ip_quick_whitelist,
+        ).pack(side="right", padx=(0, 6))
+        ctk.CTkButton(
+            hdr, text=self.t("ip_btn_quick_block"),
+            width=100, height=22,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+            text_color=COLORS["text_bright"],
+            command=self._ip_quick_block,
+        ).pack(side="right", padx=(0, 6))
+
         # Sekme çubuğu
         tabs = ctk.CTkFrame(sec, fg_color="transparent")
         tabs.pack(fill="x", padx=16, pady=(6, 4))
@@ -3559,6 +3577,37 @@ class ModernGUI:
     def _clear_all_blocked_ips(self):
         """Engellenen: tüm honeypot firewall kurallarını sil + API bildir."""
         self._run_cleanup("firewall", refresh_ip_table=True)
+
+    def _prompt_ip_address(self, title: str) -> Optional[str]:
+        """Elle IP girişi — geçerli IPv4/IPv6 döner, geçersizse toast + None."""
+        dialog = ctk.CTkInputDialog(title=title, text=self.t("ip_dialog_prompt"))
+        raw = dialog.get_input()
+        if raw is None:
+            return None
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            import ipaddress
+            ipaddress.ip_address(raw)
+            return raw
+        except ValueError:
+            self.show_toast(
+                title, self.t("ip_dialog_invalid").format(ip=raw), "warning",
+            )
+            return None
+
+    def _ip_quick_block(self):
+        """Sağ üst hızlı aksiyon: IP sor → engelle."""
+        ip = self._prompt_ip_address(self.t("ip_dialog_block_title"))
+        if ip:
+            self._ip_table_block(ip)
+
+    def _ip_quick_whitelist(self):
+        """Sağ üst hızlı aksiyon: IP sor → whitelist'e ekle."""
+        ip = self._prompt_ip_address(self.t("ip_dialog_whitelist_title"))
+        if ip:
+            self._ip_table_whitelist(ip)
 
     def _collect_ip_table_data(self, force_firewall: bool = False):
         """Arka planda IP verilerini topla (aktivite + engellenen + whitelist).
@@ -6611,13 +6660,17 @@ class ModernGUI:
 
     def _pin_set_or_change(self):
         """PIN oluştur veya değiştir."""
-        from client_gui_lock import GuiLock, prompt_pin_dialog, require_gui_unlock
+        from client_gui_lock import (
+            GuiLock, prompt_pin_dialog, require_gui_unlock, dashboard_pin_hint,
+        )
         lock = GuiLock.instance()
+        hint = dashboard_pin_hint(self.t)
         if lock.has_pin():
             if not require_gui_unlock(self.app, reason="settings"):
                 return
             old = prompt_pin_dialog(
-                self.root, self.t("pin_title"), self.t("pin_unlock_prompt"), confirm=False,
+                self.root, self.t("pin_title"), self.t("pin_unlock_prompt"),
+                confirm=False, hint=hint,
             )
             if not old:
                 return
@@ -6637,7 +6690,8 @@ class ModernGUI:
                 messagebox.showerror(self.t("pin_title"), f"{self.t('pin_wrong')} ({err})")
         else:
             new = prompt_pin_dialog(
-                self.root, self.t("pin_set_title"), self.t("pin_set_prompt"), confirm=True,
+                self.root, self.t("pin_set_title"), self.t("pin_set_prompt"),
+                confirm=True, hint=hint,
             )
             if not new:
                 return
@@ -6649,13 +6703,14 @@ class ModernGUI:
 
     def _pin_clear(self):
         """PIN kaldır (mevcut PIN gerekli)."""
-        from client_gui_lock import GuiLock, prompt_pin_dialog
+        from client_gui_lock import GuiLock, prompt_pin_dialog, dashboard_pin_hint
         lock = GuiLock.instance()
         if not lock.has_pin():
             messagebox.showinfo(self.t("pin_title"), self.t("pin_not_set"))
             return
         pin = prompt_pin_dialog(
-            self.root, self.t("pin_title"), self.t("pin_unlock_prompt"), confirm=False,
+            self.root, self.t("pin_title"), self.t("pin_unlock_prompt"),
+            confirm=False, hint=dashboard_pin_hint(self.t),
         )
         if not pin:
             return

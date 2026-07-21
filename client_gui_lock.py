@@ -67,6 +67,7 @@ class GuiLock:
         self._fail_count = 0
         self._lockout_until = 0.0
         self._data: dict = {}
+        self._mtime = 0.0
         self._prompt_active = False
         self._prompt_window = None
         self.reload()
@@ -81,8 +82,10 @@ class GuiLock:
     def reload(self) -> None:
         path = _lock_path()
         data = {}
+        mtime = 0.0
         try:
             if os.path.isfile(path):
+                mtime = os.path.getmtime(path)
                 with open(path, "r", encoding="utf-8") as fh:
                     raw = json.load(fh)
                 if isinstance(raw, dict):
@@ -91,6 +94,29 @@ class GuiLock:
             log(f"[GUI-LOCK] load error: {e}")
         with self._lock:
             self._data = data
+            self._mtime = mtime
+
+    def _maybe_reload(self) -> None:
+        """Pick up out-of-process PIN changes (dashboard set/reset via daemon).
+
+        The SYSTEM daemon writes gui_lock.json when the cloud sends
+        set_gui_pin/clear_gui_pin; the GUI process must notice without restart.
+        """
+        path = _lock_path()
+        try:
+            mtime = os.path.getmtime(path) if os.path.isfile(path) else 0.0
+        except OSError:
+            mtime = 0.0
+        with self._lock:
+            if mtime == self._mtime:
+                return
+        self.reload()
+        with self._lock:
+            # PIN changed externally — force re-auth on next protected action
+            self._unlocked = False
+            self._fail_count = 0
+            self._lockout_until = 0.0
+        log("[GUI-LOCK] PIN store changed externally — reloaded")
 
     def _save(self) -> bool:
         path = _lock_path()
@@ -103,12 +129,17 @@ class GuiLock:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
+            try:
+                self._mtime = os.path.getmtime(path)
+            except OSError:
+                pass
             return True
         except Exception as e:
             log(f"[GUI-LOCK] save error: {e}")
             return False
 
     def has_pin(self) -> bool:
+        self._maybe_reload()
         with self._lock:
             return bool(self._data.get("pin_hash") and self._data.get("salt"))
 
@@ -134,7 +165,7 @@ class GuiLock:
         with self._lock:
             return max(0.0, self._lockout_until - time.time())
 
-    def set_pin(self, pin: str) -> Tuple[bool, str]:
+    def set_pin(self, pin: str, source: str = "local") -> Tuple[bool, str]:
         pin = (pin or "").strip()
         if not pin.isdigit():
             return False, "pin_digits_only"
@@ -150,6 +181,7 @@ class GuiLock:
                 "salt": salt.hex(),
                 "pin_hash": digest,
                 "updated_at": time.time(),
+                "source": source,
             }
             ok = self._save()
             if ok:
@@ -162,6 +194,25 @@ class GuiLock:
         if not ok:
             return False, err
         return self.set_pin(new_pin)
+
+    def clear_pin_unverified(self) -> Tuple[bool, str]:
+        """Dashboard-initiated PIN reset — no local PIN required.
+
+        Only callable from the SYSTEM daemon remote-command path; the cloud
+        already authenticated the operator (account + server confirm).
+        """
+        with self._lock:
+            self._data = {}
+            path = _lock_path()
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as e:
+                log(f"[GUI-LOCK] remote clear error: {e}")
+                return False, "save_failed"
+            self._mtime = 0.0
+            self._unlocked = False
+            return True, "ok"
 
     def clear_pin(self, pin: str) -> Tuple[bool, str]:
         ok, err = self.verify_pin(pin, unlock_on_success=False)
@@ -176,11 +227,13 @@ class GuiLock:
             except OSError as e:
                 log(f"[GUI-LOCK] clear error: {e}")
                 return False, "save_failed"
+            self._mtime = 0.0
             self._unlocked = True
             return True, "ok"
 
     def verify_pin(self, pin: str, unlock_on_success: bool = True) -> Tuple[bool, str]:
         pin = (pin or "").strip()
+        self._maybe_reload()
         with self._lock:
             remaining = self._lockout_until - time.time()
             if remaining > 0:
@@ -215,7 +268,34 @@ class GuiLock:
             return True, "ok"
 
 
-def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) -> Optional[str]:
+def dashboard_pin_hint(translator=None) -> str:
+    """Hint shown on PIN dialogs when this client is linked to an account.
+
+    Dashboard can set/reset the PIN remotely (set_gui_pin / clear_gui_pin),
+    so a linked user who forgot the PIN has a recovery path.
+    """
+    try:
+        from client_utils import is_account_linked
+        if not is_account_linked():
+            return ""
+    except Exception:
+        return ""
+    default = (
+        "Hesabınız bağlı — PIN kodunuzu dashboard üzerinden "
+        "tanımlayabilir veya sıfırlayabilirsiniz."
+    )
+    if callable(translator):
+        try:
+            val = translator("pin_dashboard_hint")
+            if val and val != "pin_dashboard_hint":
+                return str(val)
+        except Exception:
+            pass
+    return default
+
+
+def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False,
+                      hint: str = "") -> Optional[str]:
     """Modal PIN entry on Tk thread. Returns PIN string or None if cancelled.
 
     Re-entrant safe: tray clicks while wait_window runs would otherwise open
@@ -246,7 +326,10 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
     result: dict = {"pin": None}
     win = ctk.CTkToplevel(parent)
     win.title(title)
-    win.geometry("360x220" if not confirm else "360x280")
+    base_h = 220 if not confirm else 280
+    if hint:
+        base_h += 44
+    win.geometry(f"360x{base_h}")
     win.configure(fg_color=COLORS.get("bg", "#0b1120"))
     win.transient(parent)
     try:
@@ -265,6 +348,14 @@ def prompt_pin_dialog(parent, title: str, prompt: str, confirm: bool = False) ->
         text_color=COLORS.get("text_bright", "#f8fafc"),
         wraplength=320,
     ).pack(padx=16, pady=(16, 8))
+
+    if hint:
+        ctk.CTkLabel(
+            win, text=f"☁ {hint}",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS.get("blue", "#3b82f6"),
+            wraplength=320, justify="left",
+        ).pack(padx=16, pady=(0, 6))
 
     entry1 = ctk.CTkEntry(win, show="•", width=200, justify="center")
     entry1.pack(pady=6)
@@ -385,6 +476,8 @@ def require_gui_unlock(app, reason: str = "unlock") -> bool:
     if lock.is_session_unlocked():
         return True
 
+    hint = dashboard_pin_hint(getattr(app, "t", None))
+
     if not lock.has_pin():
         if reason in ("exit", "settings", "mutate", "set"):
             pin = prompt_pin_dialog(
@@ -392,6 +485,7 @@ def require_gui_unlock(app, reason: str = "unlock") -> bool:
                 _t("pin_set_title", "Set PIN"),
                 _t("pin_set_prompt", "Create a PIN (4-12 digits)"),
                 confirm=True,
+                hint=hint,
             )
             if not pin:
                 return False
@@ -408,6 +502,7 @@ def require_gui_unlock(app, reason: str = "unlock") -> bool:
         _t("pin_title", "PIN"),
         _t("pin_unlock_prompt", "Enter PIN to continue"),
         confirm=False,
+        hint=hint,
     )
     if pin is None:
         return False

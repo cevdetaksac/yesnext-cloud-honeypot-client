@@ -90,6 +90,8 @@ ALLOWED_COMMANDS: Set[str] = {
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
     # Network Guard (contract ≥4.7.0 — agent/network-guard.md)
     "network_snapshot", "network_restore", "list_network_baseline",
+    # GUI PIN management from dashboard (contract ≥4.8.3)
+    "set_gui_pin", "clear_gui_pin",
 }
 
 # High-frequency IR commands — skip global cmd/min rate limit
@@ -147,6 +149,8 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "create_user", "remote_logon", "set_autologon", "reboot",
     # Network Guard — restore mutates adapters/DNS/firewall/drives
     "network_restore",
+    # GUI PIN — overwrite/reset local anti-tamper PIN needs operator confirm
+    "set_gui_pin", "clear_gui_pin",
 }
 
 # Hard-skip only (AGENT_DISABLE_ALL_USERS_PROMPT) — Administrator is NOT here
@@ -846,6 +850,14 @@ class RemoteCommandExecutor:
                     return "missing_password"
                 if len(str(pwd)) < 1:
                     return "password_too_short"
+
+        # Dashboard PIN set: 4-12 digits (same rule as local GuiLock)
+        if cmd_type == "set_gui_pin":
+            pin = str(params.get("pin") or "").strip()
+            if not pin:
+                return "missing_pin"
+            if not pin.isdigit() or not (4 <= len(pin) <= 12):
+                return "invalid_pin_format"
 
         if cmd_type == "logoff_user":
             sid = params.get("session_id")
@@ -1880,6 +1892,34 @@ class RemoteCommandExecutor:
         res = clear_autologon()
         return {"success": bool(res.get("ok")), "ok": bool(res.get("ok")),
                 "error": res.get("error"), "message": "autologon cleared"}
+
+    def _cmd_set_gui_pin(self, params: dict) -> dict:
+        """Dashboard sets/overwrites the local GUI PIN (contract ≥4.8.3).
+
+        PIN value is never logged or echoed back in the result.
+        """
+        pin = str(params.get("pin") or "").strip()
+        try:
+            from client_gui_lock import GuiLock
+            ok, err = GuiLock.instance().set_pin(pin, source="dashboard")
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        if not ok:
+            return {"success": False, "error": err}
+        log("[REMOTE-CMD] GUI PIN set from dashboard")
+        return {"success": True, "ok": True, "message": "GUI PIN updated from dashboard"}
+
+    def _cmd_clear_gui_pin(self, params: dict) -> dict:
+        """Dashboard resets (removes) the local GUI PIN (contract ≥4.8.3)."""
+        try:
+            from client_gui_lock import GuiLock
+            ok, err = GuiLock.instance().clear_pin_unverified()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        if not ok:
+            return {"success": False, "error": err}
+        log("[REMOTE-CMD] GUI PIN cleared from dashboard")
+        return {"success": True, "ok": True, "message": "GUI PIN cleared from dashboard"}
 
     def _cmd_reboot(self, params: dict) -> dict:
         try:

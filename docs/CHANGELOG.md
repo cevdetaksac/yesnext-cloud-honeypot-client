@@ -1,3 +1,8 @@
+# v4.8.3
+- **Dashboard'dan GUI PIN yönetimi:** yeni uzak komutlar `set_gui_pin` (pin 4-12 hane, confirm gate, PIN result/log'a asla yazılmaz) ve `clear_gui_pin` (PIN sıfırlama). SYSTEM daemon `gui_lock.json`'u yazar; GUI süreci dosya mtime'ından dış değişikliği algılayıp hash'i yeniden yükler ve aktif oturum kilidini düşürür — restart gerekmez. Hesap bağlıysa (`is_account_linked()`) tüm PIN diyaloglarında "Hesabınız bağlı — PIN kodunuzu dashboard üzerinden tanımlayabilir veya sıfırlayabilirsiniz" ipucu gösterilir (PIN unutma kurtarma yolu).
+- **IP Listeleri hızlı aksiyon butonları:** tablo başlığının sağ üstüne **＋ IP Engelle** ve **＋ Whitelist'e Ekle** eklendi. Modal input ile IP alınır, `ipaddress` ile doğrulanır (geçersiz → toast), PIN gate'inden geçer ve satır aksiyonlarıyla aynı yolu kullanır (daemon IPC block/unblock + whitelist'in `POST /api/threats/config` sync'i).
+- 11 yeni unit test: komut whitelist/confirm, pin format doğrulaması, set→verify→clear akışı, PIN sızıntısı kontrolü, dış mtime değişikliğinde relock.
+
 # v4.8.2
 - **Ayarlar webhook artık daemon'da etkili:** GUI Ayarlar sekmesi `webhook_enabled`/`webhook_url`'ü buluta (`POST /api/threats/config`) yazıyordu, ama daemon `_sync_threat_config` bu alanları okumuyordu; gerçek gönderici (`client_alerts._send_webhook`) yalnızca yerel `client_config.json` → `notifications.webhook_*` okuduğu için toggle daemon tarafında **no-op**'tu. Artık `_sync_threat_config`, buluttan gelen webhook alanlarını yerel `notifications.*`'e köprüler (cloud tek kaynak, forward client'ta). E-posta tercih alanlarını (`alert_email_enabled`, `instant_email_for_critical`, `min_severity_for_email`, `daily_digest_enabled`) cloud tüketir; client apply etmez.
 

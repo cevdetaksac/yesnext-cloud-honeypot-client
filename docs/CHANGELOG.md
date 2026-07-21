@@ -1,4 +1,5 @@
 # v4.9.0
+- **Release build:** `build.ps1 -WebRTC` profili ile aiortc/AV native runtime içeren 58.3 MB installer üretildi; SHA-256 `09082F5497262F688E91B69426943BA5AE1BC3C0A8E69A9FADD810A9BE7F4397`.
 - **Remote Desktop v2:** Session 0 artık her kare için yeni proses + geçici JPEG üretmiyor. Seçili WTS oturumunda tek, kalıcı ve HMAC doğrulamalı helper; görüntüyü bellekte taşır ve mouse/klavyeyi aynı oturumda uygular.
 - **Akıcı transport:** Sağlıklı agent WebSocket'i görüntünün tek yolu; HTTP yalnız bağlantı yokken fallback. En güncel kare mailbox'ı eski kare kuyruğunu ve çift upload'ı kaldırır; gerçek gönderim/coalesce metrikleri ayrı izlenir.
 - **Input v2 + mobil kullanım:** Move flood kritik `mousedown`/`mouseup`/wheel/key olaylarını düşüremez. Relative trackpad, direct-touch, tap/double-tap/long-press, güvenli drag ve iki parmak yatay/dikey scroll; çoklu monitör negatif origin koordinatları desteklenir. Input içeriği loglanmaz.

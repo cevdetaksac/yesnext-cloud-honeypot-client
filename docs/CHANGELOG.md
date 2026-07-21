@@ -1,3 +1,8 @@
+# v4.7.3
+- **Operator-approved containment (hard safety):** Network Guard detection is **always alert-only**. Cloud config cannot enable `auto_contain` / `auto_kill` / `auto_restore`. Suspend only via confirmed `suspend_process` (exact `pid` + image/path + `process_start_time`); `resume_process` releases.
+- **GUI Control Center:** new **Güvenlik Katmanları** tab — ransomware / canary / Network Guard toggles write immediately via `POST /api/threats/config`, rollback on failure; daemon applies on `threat_config_updated` WS push.
+- **Count/action UX:** tracked-IP card and popup share one blocked∪watching snapshot; active services card uses real PORT_TABLOSU total (no hardcoded /5); honeypot Start/Stop in detail; custom share Remove; unknown Windows service Stop; whitelist mutations persist to cloud.
+
 # v4.7.2
 - **KRİTİK güvenlik hotfix (Network Guard):** 4.7.0/4.7.1 canlı makinede normal uygulamaları (Chrome/Firefox/Cursor/GameLoop/EdgeWebView) "offline fidye bombası" sanıp **suspend ediyordu → PC kilitleniyordu.** İki kök neden + bir tasarım kararı:
   - **net_cut false-positive:** `diff_connectivity`, internet düşmese bile güncel adapter listesi boşken tüm baseline adapterlarını "down" sayıyordu. Artık `net_cut` yalnız gerçek internet erişim kaybında (`internet_lost`) True olur; adapter down/VPN-Wi-Fi churn yalnız bilgi amaçlı.

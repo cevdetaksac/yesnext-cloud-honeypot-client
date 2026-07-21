@@ -303,6 +303,7 @@ class CloudHoneypotClient:
                     api_client=self.api_client,
                     token_getter=lambda: self.state.get("token", ""),
                     auto_response=self.auto_response,
+                    on_threat_config_updated=lambda _data: self._sync_threat_config(),
                 )
                 self.silent_hours_guard = SilentHoursGuard(
                     auto_response=self.auto_response,
@@ -968,17 +969,41 @@ class CloudHoneypotClient:
                 if self.ransomware_shield:
                     try:
                         if "ransomware_protection_enabled" in config:
-                            # Soft flag — shield already running; log only
-                            log(
-                                f"[CONFIG-SYNC] ransomware_protection_enabled="
-                                f"{config.get('ransomware_protection_enabled')}"
+                            rs_enabled = bool(
+                                config.get("ransomware_protection_enabled")
                             )
+                            if rs_enabled:
+                                self.ransomware_shield.start()
+                            else:
+                                self.ransomware_shield.stop()
+                            log(f"[CONFIG-SYNC] ransomware protection={rs_enabled}")
                         if "canary_files_enabled" in config:
                             self.ransomware_shield.canary_enabled = bool(
                                 config.get("canary_files_enabled")
                             )
                     except Exception:
                         pass
+
+                # Network Guard detect/alert layer. Automatic containment,
+                # killing and network restore remain hard-disabled in
+                # client_network_guard.load_config; GUI/cloud can only toggle
+                # monitoring and tune non-destructive detection thresholds.
+                if self.network_guard:
+                    try:
+                        from client_network_guard import load_config as _ng_load_config
+                        ng_cfg = _ng_load_config(config)
+                        self.network_guard.cfg.update(ng_cfg)
+                        if ng_cfg.get("enabled", True):
+                            self.network_guard.start()
+                        else:
+                            self.network_guard.stop()
+                        log(
+                            "[CONFIG-SYNC] network_guard "
+                            f"enabled={bool(ng_cfg.get('enabled', True))} "
+                            "mode=alert_only"
+                        )
+                    except Exception as nge:
+                        log(f"[CONFIG-SYNC] network_guard apply error: {nge}")
 
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
@@ -2573,6 +2598,7 @@ class CloudHoneypotClient:
                     api_client=self.api_client,
                     token_getter=lambda: self.state.get("token", ""),
                     auto_response=self.auto_response,
+                    on_threat_config_updated=lambda _data: self._sync_threat_config(),
                 )
                 if getattr(self, "cleanup_manager", None) is not None:
                     self.remote_commands.cleanup_manager = self.cleanup_manager

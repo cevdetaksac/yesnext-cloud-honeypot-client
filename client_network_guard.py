@@ -113,6 +113,14 @@ def load_config(client_config: Optional[dict] = None) -> dict:
             cfg.update({k: v for k, v in ng.items() if k in cfg})
     except Exception:
         pass
+    # Hard safety invariant (client >=4.7.3): detection never performs an
+    # automatic process/network mutation. An authenticated operator must issue
+    # suspend_process / network_restore explicitly after reviewing the alert.
+    # Keep the fields for wire/backward compatibility but never honor remote
+    # attempts to enable them.
+    cfg["auto_contain"] = False
+    cfg["auto_kill"] = False
+    cfg["auto_restore"] = False
     return cfg
 
 
@@ -536,6 +544,10 @@ class NetworkGuard:
                         "image": name,
                         "path": exe,
                         "cmdline": " ".join(p.info.get("cmdline") or []),
+                        # Stable process identity for operator-approved suspend.
+                        # PID alone is unsafe because Windows may reuse it before
+                        # the user clicks the dashboard action.
+                        "process_start_time": float(p.create_time()),
                         "write_bytes_sec": int(bps),
                         "write_count_sec": int(cps),
                         "suspicious_origin": bool(_SUSPICIOUS_ORIGIN.search(exe or "")),
@@ -557,9 +569,9 @@ class NetworkGuard:
         self._last_trigger_mono = now
         self._last_trigger_ts = datetime.now(timezone.utc).isoformat()
 
-        auto_contain = bool(self.cfg.get("auto_contain", False)) and (
-            strong or not self.cfg.get("require_strong_signal", True)
-        )
+        # Hard invariant: detection is alert-only. Even high-confidence signals
+        # need an explicit, server-confirmed suspend_process command.
+        auto_contain = False
         log(f"[NET-GUARD] {'CONTAIN' if auto_contain else 'ALERT-ONLY'} "
             f"{trigger} score={score} suspects={len(suspects)} strong={strong}")
 
@@ -699,7 +711,8 @@ class NetworkGuard:
             "suspects": [
                 {k: s.get(k) for k in ("pid", "image", "path", "cmdline",
                                        "state", "write_bytes_sec",
-                                       "write_count_sec", "suspicious_origin")}
+                                       "write_count_sec", "suspicious_origin",
+                                       "process_start_time")}
                 for s in suspects
             ],
             "vss_emergency_snapshot": bool(vss_ok),

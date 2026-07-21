@@ -75,7 +75,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "logoff_user", "disable_account", "enable_account", "reset_password",
     "contain_user",  # IR: logoff + password reset (+ optional disable) in one shot
     "disable_all_users",  # IR panic: disable every local SAM user (excl. machine IDs)
-    "kill_process", "block_process",
+    "kill_process", "suspend_process", "resume_process", "block_process",
     "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",  # aliases
@@ -101,7 +101,7 @@ _STREAM_COMMANDS = frozenset({
 
 # Incident-response: always fast poll + no rate limit (breach containment)
 _IR_URGENT_COMMANDS = frozenset({
-    "kill_process", "block_process",
+    "kill_process", "suspend_process", "resume_process", "block_process",
     "logoff_user", "contain_user",
     "block_ip", "unblock_ip",
     "disable_account", "disable_all_users", "reset_password",
@@ -141,6 +141,8 @@ PROTECTED_SERVICES: Set[str] = {
 REQUIRES_CONFIRMATION: Set[str] = {
     "emergency_lockdown", "reset_password", "disable_account",
     "disable_all_users", "contain_user",
+    # Process containment is only sent after explicit operator approval.
+    "suspend_process",
     # Disaster recovery (destructive / reboot) — server confirm + HMAC
     "create_user", "remote_logon", "set_autologon", "reboot",
     # Network Guard — restore mutates adapters/DNS/firewall/drives
@@ -181,6 +183,7 @@ class RemoteCommandExecutor:
         health_monitor=None,
         cleanup_manager=None,
         ransomware_shield=None,
+        on_threat_config_updated: Optional[Callable[[dict], None]] = None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
@@ -188,6 +191,7 @@ class RemoteCommandExecutor:
         self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
         self.cleanup_manager = cleanup_manager  # DataCleanupManager (wired after init)
         self.ransomware_shield = ransomware_shield
+        self.on_threat_config_updated = on_threat_config_updated
         self.network_guard = None  # NetworkGuard — wired after init (≥4.7.0)
         self.threat_intel = None  # ThreatIntelManager — wired after init (WS push)
 
@@ -241,6 +245,7 @@ class RemoteCommandExecutor:
                 token_getter=self.token_getter,
                 on_command=lambda cmd: self.handle_incoming_command(cmd, source="ws"),
                 on_threat_intel_updated=self._on_threat_intel_updated,
+                on_threat_config_updated=self._on_threat_config_updated,
             )
             self._control_ws.start()
         except Exception as e:
@@ -326,6 +331,18 @@ class RemoteCommandExecutor:
                 log(f"[THREAT-INTEL] WS push sync error: {e}")
 
         threading.Thread(target=_run, name="ThreatIntel-WSPush", daemon=True).start()
+
+    def _on_threat_config_updated(self, data: dict) -> None:
+        """Control WS push → fetch/apply effective security config immediately."""
+        cb = self.on_threat_config_updated
+        if not callable(cb):
+            log("[REMOTE-CMD] threat_config_updated ignored — callback not wired")
+            return
+        threading.Thread(
+            target=lambda: cb(data or {}),
+            name="ThreatConfig-WSPush",
+            daemon=True,
+        ).start()
 
     def stop(self):
         """Stop polling, control WS, and remote desktop stream."""
@@ -835,10 +852,17 @@ class RemoteCommandExecutor:
             if sid is not None and str(sid).strip() == "0":
                 return "Cannot logoff session 0 (services)"
 
-        if cmd_type == "kill_process":
+        if cmd_type in ("kill_process", "suspend_process", "resume_process"):
             pname = params.get("process_name", "").lower()
             if pname in PROTECTED_PROCESSES:
                 return f"Protected process: {pname}"
+        if cmd_type in ("suspend_process", "resume_process"):
+            if params.get("pid") is None:
+                return "missing_pid"
+            if not (params.get("expected_image") or params.get("process_name")):
+                return "missing_expected_image"
+            if params.get("process_start_time") is None:
+                return "missing_process_start_time"
 
         if cmd_type in ("stop_service", "disable_service"):
             sname = params.get("service_name", "").lower()
@@ -1981,6 +2005,89 @@ class RemoteCommandExecutor:
         return {
             "success": ok,
             "message": result.stdout.strip() or result.stderr.strip(),
+        }
+
+    def _resolve_process_target(self, params: dict):
+        """Resolve an exact process and reject stale/PID-reuse commands.
+
+        Network Guard alerts include process_start_time and image/path. The
+        dashboard must echo those fields in an approved suspend/resume command.
+        PID alone is unsafe because it may belong to a different process by the
+        time the operator clicks the action.
+        """
+        import psutil
+
+        pid = params.get("pid")
+        if pid is None:
+            raise ValueError("pid is required")
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            raise ValueError("pid must be an integer")
+        if pid in (0, 4, os.getpid()):
+            raise PermissionError(f"Protected process PID: {pid}")
+
+        process = psutil.Process(pid)
+        name = (process.name() or "").lower()
+        if name in PROTECTED_PROCESSES:
+            raise PermissionError(f"Protected process: {name}")
+
+        expected_name = str(
+            params.get("expected_image") or params.get("process_name") or ""
+        ).strip().lower()
+        if expected_name and expected_name != name:
+            raise RuntimeError(
+                f"STALE_PROCESS_TARGET: expected image {expected_name}, found {name}"
+            )
+
+        expected_path = str(params.get("expected_path") or "").strip()
+        actual_path = process.exe() or ""
+        if expected_path and os.path.normcase(expected_path) != os.path.normcase(actual_path):
+            raise RuntimeError(
+                "STALE_PROCESS_TARGET: executable path no longer matches"
+            )
+
+        expected_start = params.get("process_start_time")
+        if expected_start is not None:
+            try:
+                if abs(float(expected_start) - float(process.create_time())) > 1.0:
+                    raise RuntimeError(
+                        "STALE_PROCESS_TARGET: PID was reused by another process"
+                    )
+            except (TypeError, ValueError):
+                raise ValueError("process_start_time must be a Unix timestamp")
+        return process, name, actual_path
+
+    def _cmd_suspend_process(self, params: dict) -> dict:
+        """Suspend an exact process after dashboard confirmation."""
+        process, name, path = self._resolve_process_target(params)
+        process.suspend()
+        return {
+            "success": True,
+            "message": f"Process suspended: {name} (PID {process.pid})",
+            "data": {
+                "pid": process.pid,
+                "image": name,
+                "path": path,
+                "state": "suspended",
+                "process_start_time": process.create_time(),
+            },
+        }
+
+    def _cmd_resume_process(self, params: dict) -> dict:
+        """Resume an exact previously suspended process."""
+        process, name, path = self._resolve_process_target(params)
+        process.resume()
+        return {
+            "success": True,
+            "message": f"Process resumed: {name} (PID {process.pid})",
+            "data": {
+                "pid": process.pid,
+                "image": name,
+                "path": path,
+                "state": "running",
+                "process_start_time": process.create_time(),
+            },
         }
 
     def _cmd_block_process(self, params: dict) -> dict:

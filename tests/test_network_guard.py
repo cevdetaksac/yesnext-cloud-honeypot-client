@@ -165,7 +165,8 @@ class TestConfig(unittest.TestCase):
     def test_override_from_client_config(self):
         c = ng.load_config({"protection": {"network_guard": {
             "auto_contain": True, "score_threshold": 90, "bogus": 1}}})
-        self.assertTrue(c["auto_contain"])
+        # Hard safety invariant: cloud config cannot enable auto containment.
+        self.assertFalse(c["auto_contain"])
         self.assertEqual(c["score_threshold"], 90)
         self.assertNotIn("bogus", c)
 
@@ -250,25 +251,27 @@ class TestTriggerFlow(unittest.TestCase):
         sp.assert_not_called()
         self.assertEqual(sent[0]["threat_type"], "ransomware_offline_suspect")
 
-    def test_contain_when_enabled_and_strong(self):
+    def test_even_strong_signal_needs_operator_command(self):
         guard, sent = self._mk({"auto_contain": True, "auto_restore": True})
         netdiff = {"internet_lost": True, "adapters_down": ["Ethernet"],
                    "net_cut": True}
         with mock.patch.object(guard, "_suspend_pid", return_value=True) as sp, \
-             mock.patch.object(guard, "_emergency_vss", return_value=True), \
+             mock.patch.object(guard, "_emergency_vss", return_value=True) as vss, \
              mock.patch.object(guard, "restore_network",
-                               return_value={"restore_actions": ["adapter_enable:Ethernet"]}):
+                               return_value={"restore_actions": ["adapter_enable:Ethernet"]}) as restore:
             guard._trigger("network_cut+fs_storm", 90, netdiff, self._suspects(),
                            baseline={"adapters": []}, strong=True)
-        sp.assert_called_once_with(4242)
+        sp.assert_not_called()
+        vss.assert_not_called()
+        restore.assert_not_called()
         alert = sent[0]
-        self.assertEqual(alert["threat_type"], "ransomware_offline_bomb")
-        self.assertEqual(alert["severity"], "critical")
+        self.assertEqual(alert["threat_type"], "ransomware_offline_suspect")
+        self.assertEqual(alert["severity"], "warning")
         ngc = alert["system_context"]["network_guard"]
-        self.assertTrue(ngc["auto_contain"])
-        self.assertTrue(ngc["network"]["restored"])
-        self.assertEqual(ngc["suspects"][0]["state"], "suspended")
-        self.assertTrue(ngc["vss_emergency_snapshot"])
+        self.assertFalse(ngc["auto_contain"])
+        self.assertFalse(ngc["network"]["restored"])
+        self.assertEqual(ngc["suspects"][0]["state"], "observed")
+        self.assertFalse(ngc["vss_emergency_snapshot"])
 
     def test_trigger_debounced(self):
         guard, sent = self._mk()

@@ -63,12 +63,14 @@ class AgentControlWebSocket:
         on_command: Optional[Callable[[dict], None]] = None,
         on_config_hint: Optional[Callable[[dict], None]] = None,
         on_threat_intel_updated: Optional[Callable[[dict], None]] = None,
+        on_threat_config_updated: Optional[Callable[[dict], None]] = None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.on_command = on_command
         self.on_config_hint = on_config_hint
         self.on_threat_intel_updated = on_threat_intel_updated
+        self.on_threat_config_updated = on_threat_config_updated
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -338,6 +340,17 @@ class AgentControlWebSocket:
                     cb(data)
                 except Exception as e:
                     log(f"[CONTROL-WS] threat_intel_updated handler error: {e}")
+            return
+        if t == "threat_config_updated":
+            # A settings change must reach the daemon immediately; HTTP polling
+            # remains the fallback if this push is missed.
+            log("[CONTROL-WS] ← threat_config_updated")
+            cb = self.on_threat_config_updated
+            if cb:
+                try:
+                    cb(data)
+                except Exception as e:
+                    log(f"[CONTROL-WS] threat_config_updated handler error: {e}")
             return
         if t == "command":
             cmd = data.get("command")

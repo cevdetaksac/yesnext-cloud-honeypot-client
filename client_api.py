@@ -563,6 +563,25 @@ class HoneypotAPIClient:
             self.log(f"[API] fetch threat config error: {e}")
             return None
 
+    def update_threat_config(self, token: str, patch: Dict) -> Optional[Dict]:
+        """POST /api/threats/config — update security layers immediately.
+
+        The cloud remains the source of truth. Callers should apply the returned
+        effective config locally only after this request succeeds.
+        """
+        try:
+            if not token or not isinstance(patch, dict) or not patch:
+                return None
+            resp = self.api_request(
+                "POST", "threats/config",
+                token=token, data=patch,
+                timeout=10, verbose_logging=False,
+            )
+            return resp if isinstance(resp, dict) else None
+        except Exception as e:
+            self.log(f"[API] update threat config error: {e}")
+            return None
+
     def fetch_block_rules(self, token: str) -> Optional[list]:
         """GET /api/premium/rules — Dashboard'dan tanımlanan blok kurallarını çek.
 

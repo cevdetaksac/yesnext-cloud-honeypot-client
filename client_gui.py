@@ -135,7 +135,9 @@ class ModernGUI:
 
         self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
         self._nav_buttons: Dict[str, dict] = {}
-        self._pages_built = {"status": False, "threat": False, "services": False}
+        self._pages_built = {
+            "status": False, "threat": False, "services": False, "layers": False,
+        }
         self._page_placeholders = {}
         self._page_data_loaded = {}
 
@@ -143,6 +145,7 @@ class ModernGUI:
             ("status", "📊", self.t("tab_status")),
             ("threat", "🛡", self.t("tab_threat_center")),
             ("services", "🐝", self.t("tab_services")),
+            ("layers", "⚙", self.t("tab_security_layers")),
         ]
 
         for page_id, icon, label in nav_items:
@@ -288,6 +291,8 @@ class ModernGUI:
                 self._build_threat_center(page)
             elif page_id == "services":
                 self._build_services_section(page)
+            elif page_id == "layers":
+                self._build_security_layers(page)
             else:
                 return False
             self._pages_built[page_id] = True
@@ -1206,6 +1211,198 @@ class ModernGUI:
         log("[PERF] pulse blink started (cache-only)")
 
     # ═══════════════════════════════════════════════════════════════
+    #  SECURITY LAYERS — cloud source of truth, immediate daemon push
+    # ═══════════════════════════════════════════════════════════════
+    def _build_security_layers(self, parent):
+        shell = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        shell.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            shell, text=f"⚙  {self.t('layers_title')}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            shell, text=self.t("layers_subtitle"), justify="left", wraplength=760,
+            font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+        ).pack(anchor="w", padx=18, pady=(0, 12))
+
+        safety = ctk.CTkFrame(
+            shell, fg_color=COLORS["bg"], corner_radius=8,
+            border_width=1, border_color=COLORS["orange"],
+        )
+        safety.pack(fill="x", padx=18, pady=(0, 12))
+        ctk.CTkLabel(
+            safety, text=f"🛟  {self.t('layers_alert_only')}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["orange"],
+        ).pack(anchor="w", padx=12, pady=9)
+
+        self._layer_switches = {}
+        self._layer_values = {}
+        definitions = [
+            (
+                "ransomware_protection_enabled",
+                self.t("layers_ransomware"),
+                self.t("layers_ransomware_desc"),
+            ),
+            (
+                "canary_files_enabled",
+                self.t("layers_canary"),
+                self.t("layers_canary_desc"),
+            ),
+            (
+                "network_guard.enabled",
+                self.t("layers_network_guard"),
+                self.t("layers_network_guard_desc"),
+            ),
+        ]
+        for key, title, description in definitions:
+            row = ctk.CTkFrame(
+                shell, fg_color=COLORS["bg"], corner_radius=8,
+                border_width=1, border_color=COLORS["border"],
+            )
+            row.pack(fill="x", padx=18, pady=5)
+            text = ctk.CTkFrame(row, fg_color="transparent")
+            text.pack(side="left", fill="x", expand=True, padx=12, pady=10)
+            ctk.CTkLabel(
+                text, text=title, font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                text, text=description, justify="left", wraplength=650,
+                font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            ).pack(anchor="w", pady=(2, 0))
+            switch = ctk.CTkSwitch(
+                row, text="", width=48,
+                command=lambda k=key: self._on_security_layer_toggle(k),
+                state="disabled",
+            )
+            switch.pack(side="right", padx=14)
+            self._layer_switches[key] = switch
+
+        self._layers_sync_label = ctk.CTkLabel(
+            shell, text=self.t("layers_syncing"),
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+        )
+        self._layers_sync_label.pack(anchor="w", padx=18, pady=(8, 16))
+        self._load_security_layers()
+
+    @staticmethod
+    def _effective_threat_config(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        nested = payload.get("config")
+        return nested if isinstance(nested, dict) else payload
+
+    def _set_layer_controls(self, config: dict):
+        protection = config.get("protection") or {}
+        network_guard = protection.get("network_guard") or {}
+        values = {
+            "ransomware_protection_enabled": bool(
+                config.get("ransomware_protection_enabled", True)
+            ),
+            "canary_files_enabled": bool(config.get("canary_files_enabled", True)),
+            "network_guard.enabled": bool(network_guard.get("enabled", True)),
+        }
+        self._layer_values = values
+        for key, switch in getattr(self, "_layer_switches", {}).items():
+            try:
+                if values.get(key, True):
+                    switch.select()
+                else:
+                    switch.deselect()
+                switch.configure(state="normal")
+            except Exception:
+                pass
+        try:
+            self._layers_sync_label.configure(
+                text=f"✓ {self.t('layers_synced')}", text_color=COLORS["green"]
+            )
+        except Exception:
+            pass
+
+    def _load_security_layers(self):
+        token = self.app.state.get("token", "")
+        if not token:
+            self._layers_sync_label.configure(
+                text=self.t("layers_no_token"), text_color=COLORS["orange"]
+            )
+            return
+
+        def _worker():
+            config = self.app.api_client.fetch_threat_config(token) or {}
+            self._gui_safe(
+                lambda: self._set_layer_controls(
+                    self._effective_threat_config(config)
+                )
+            )
+
+        threading.Thread(
+            target=_worker, name="GUI-SecurityLayers-Load", daemon=True
+        ).start()
+
+    def _on_security_layer_toggle(self, key: str):
+        switch = self._layer_switches.get(key)
+        if switch is None:
+            return
+        new_value = bool(switch.get())
+        old_value = bool(self._layer_values.get(key, not new_value))
+        token = self.app.state.get("token", "")
+        if not token:
+            if old_value:
+                switch.select()
+            else:
+                switch.deselect()
+            self._layers_sync_label.configure(
+                text=self.t("layers_no_token"), text_color=COLORS["orange"]
+            )
+            return
+
+        for ctl in self._layer_switches.values():
+            ctl.configure(state="disabled")
+        self._layers_sync_label.configure(
+            text=self.t("layers_syncing"), text_color=COLORS["blue"]
+        )
+        patch = (
+            {"protection": {"network_guard": {"enabled": new_value}}}
+            if key == "network_guard.enabled"
+            else {key: new_value}
+        )
+
+        def _worker():
+            response = self.app.api_client.update_threat_config(token, patch)
+            if response is None:
+                def _rollback():
+                    if old_value:
+                        switch.select()
+                    else:
+                        switch.deselect()
+                    for ctl in self._layer_switches.values():
+                        ctl.configure(state="normal")
+                    self._layers_sync_label.configure(
+                        text=self.t("layers_sync_failed"),
+                        text_color=COLORS["red"],
+                    )
+                self._gui_safe(_rollback)
+                return
+
+            effective = self._effective_threat_config(response)
+            # Some API versions return only {status:"ok"}; re-read the source
+            # of truth instead of assuming the requested value is effective.
+            if not any(k in effective for k in (
+                "ransomware_protection_enabled", "canary_files_enabled", "protection"
+            )):
+                effective = self._effective_threat_config(
+                    self.app.api_client.fetch_threat_config(token) or {}
+                )
+            self._gui_safe(lambda: self._set_layer_controls(effective))
+
+        threading.Thread(
+            target=_worker, name="GUI-SecurityLayers-Save", daemon=True
+        ).start()
+
+    # ═══════════════════════════════════════════════════════════════
     #  DASHBOARD İSTATİSTİK KARTLARI
     # ═══════════════════════════════════════════════════════════════
     def _build_dashboard(self, parent):
@@ -1257,6 +1454,7 @@ class ModernGUI:
         if total_attacks is None:
             total_attacks = 0
         active_count = len(self.app.service_manager.running_services)
+        total_services = len(self.app.PORT_TABLOSU) or 1
         session_attacks = 0
         try:
             session_attacks = self.app.service_manager.session_stats.get("total_credentials", 0)
@@ -1274,7 +1472,7 @@ class ModernGUI:
             # (key, emoji, label_key, value, color, row, col, click_handler)
             ("total_attacks",   "🎯", "dash_total_attacks",   str(total_attacks),   COLORS["red"],    0, 0, "_detail_total_attacks"),
             ("session_attacks", "⚡", "dash_session_attacks",  str(session_attacks), COLORS["orange"], 0, 1, "_detail_session_attacks"),
-            ("active_services", "🟢", "dash_active_services",  f"{active_count}/5",  COLORS["green"],  0, 2, "_detail_active_services"),
+            ("active_services", "🟢", "dash_active_services",  f"{active_count}/{total_services}",  COLORS["green"],  0, 2, "_detail_active_services"),
             ("uptime",          "⏱️", "dash_uptime",           "0dk",                COLORS["blue"],   1, 0, None),
             ("last_attack",     "🕵️", "dash_last_attack",      self.t("dash_no_attack"), COLORS["text_dim"], 1, 1, "_detail_last_attack"),
             ("connection",      "🌐", "dash_connection",       self.t("dash_connected"), COLORS["green"], 1, 2, "_detail_api_health"),
@@ -2219,10 +2417,60 @@ class ModernGUI:
                     row, text=detail,
                     font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_dim"], anchor="w",
-                ).pack(side="left", padx=(4, 0))
+                ).pack(side="left", padx=(4, 0), fill="x", expand=True)
+
+                if not is_default and name:
+                    ctk.CTkButton(
+                        row, text=self.t("shares_btn_remove"),
+                        width=70, height=20, font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+                        command=lambda n=name: self._remove_network_share(n),
+                    ).pack(side="right", padx=2)
 
         except Exception:
             pass
+
+    def _remove_network_share(self, share_name: str):
+        """Remove a custom SMB share after confirmation."""
+        import tkinter.messagebox as mbox
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
+        if not mbox.askyesno(
+            self.t("shares_remove_title"),
+            self.t("shares_remove_confirm").format(name=share_name),
+        ):
+            return
+
+        def _work():
+            from client_winproc import run_ps
+            rc, out, err = run_ps(
+                f'Remove-SmbShare -Name "{share_name}" -Force',
+                timeout=15,
+            )
+            ok = rc == 0
+
+            def _ui():
+                if ok:
+                    self.show_toast(
+                        self.t("shares_remove_ok"),
+                        share_name, "info",
+                    )
+                    threading.Thread(
+                        target=self._collect_network_shares, daemon=True
+                    ).start()
+                else:
+                    self.show_toast(
+                        self.t("shares_remove_fail"),
+                        (err or out or "")[:160], "warning",
+                    )
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="ShareRemove").start()
 
     # ─── Collector: Suspicious Services ─── #
     def _collect_suspicious_services(self):
@@ -2339,7 +2587,7 @@ class ModernGUI:
                 ctk.CTkLabel(
                     row, text=f"{icon} {svc['display']}",
                     font=ctk.CTkFont(size=11, weight="bold" if not svc["known"] else "normal"),
-                    text_color=color, anchor="w",
+                    text_color=color, anchor="w", width=220,
                 ).pack(side="left")
 
                 # Kısa path göster
@@ -2348,7 +2596,16 @@ class ModernGUI:
                     row, text=f"  {short_path}",
                     font=ctk.CTkFont(size=10),
                     text_color=COLORS["text_dim"], anchor="w",
-                ).pack(side="left", padx=(4, 0))
+                ).pack(side="left", padx=(4, 0), fill="x", expand=True)
+
+                svc_name = svc.get("name") or ""
+                if svc_name and not svc["known"]:
+                    ctk.CTkButton(
+                        row, text=self.t("services_btn_stop"),
+                        width=60, height=20, font=ctk.CTkFont(size=9),
+                        fg_color=COLORS["red"], hover_color=COLORS["red_hover"],
+                        command=lambda n=svc_name, d=svc["display"]: self._stop_windows_service(n, d),
+                    ).pack(side="right", padx=2)
 
             if len(third_party) > 15:
                 ctk.CTkLabel(
@@ -2360,6 +2617,50 @@ class ModernGUI:
 
         except Exception:
             pass
+
+    def _stop_windows_service(self, service_name: str, display_name: str = ""):
+        """Stop a third-party Windows service after confirmation."""
+        import tkinter.messagebox as mbox
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
+        label = display_name or service_name
+        if not mbox.askyesno(
+            self.t("services_stop_title"),
+            self.t("services_stop_confirm").format(name=label),
+        ):
+            return
+
+        def _work():
+            import subprocess
+            result = subprocess.run(
+                ["sc", "stop", service_name],
+                capture_output=True, text=True, timeout=20,
+                creationflags=0x08000000,
+            )
+            ok = result.returncode == 0
+
+            def _ui():
+                if ok:
+                    self.show_toast(
+                        self.t("services_stop_ok"), label, "info"
+                    )
+                    threading.Thread(
+                        target=self._collect_suspicious_services, daemon=True
+                    ).start()
+                else:
+                    self.show_toast(
+                        self.t("services_stop_fail"),
+                        (result.stderr or result.stdout or "")[:160],
+                        "warning",
+                    )
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="SvcStop").start()
 
     # ─── Live Threat Feed (v4.0 Faz 2) ─── #
     def _build_threat_feed(self, parent):
@@ -3137,8 +3438,28 @@ class ModernGUI:
             ok = True
         return ok
 
+    def _persist_whitelist_to_cloud(self) -> bool:
+        """Push the effective local whitelist set to threats/config immediately."""
+        token = self.app.state.get("token", "")
+        if not token or not getattr(self.app, "api_client", None):
+            return False
+        ips = set()
+        te = getattr(self.app, "threat_engine", None)
+        ar = getattr(self.app, "auto_response", None)
+        ew = getattr(self.app, "event_watcher", None)
+        if te and hasattr(te, "_whitelist_ips"):
+            ips |= set(te._whitelist_ips or [])
+        if ar and hasattr(ar, "whitelist_ips"):
+            ips |= set(ar.whitelist_ips or [])
+        if ew and hasattr(ew, "whitelist_ips"):
+            ips |= set(ew.whitelist_ips or [])
+        resp = self.app.api_client.update_threat_config(
+            token, {"whitelist_ips": sorted(ips)}
+        )
+        return isinstance(resp, dict)
+
     def _ip_table_whitelist(self, ip: str):
-        """IP tablosundan guvenli listeye ekle — off-thread."""
+        """IP tablosundan guvenli listeye ekle — off-thread + cloud persist."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
@@ -3161,12 +3482,14 @@ class ModernGUI:
             ew = getattr(self.app, "event_watcher", None)
             if ew and hasattr(ew, "whitelist_ips"):
                 ew.whitelist_ips.add(ip)
+            synced = self._persist_whitelist_to_cloud()
 
             def _ui():
                 self.show_toast(
                     self.t("ip_status_whitelisted"),
-                    self.t("toast_ip_whitelisted_msg").format(ip=ip),
-                    "info",
+                    self.t("toast_ip_whitelisted_msg").format(ip=ip)
+                    + (" ✓" if synced else f" — {self.t('layers_sync_failed')}"),
+                    "info" if synced else "warning",
                 )
                 self._refresh_ip_table(force_firewall=True)
 
@@ -3175,7 +3498,7 @@ class ModernGUI:
         threading.Thread(target=_work, daemon=True, name="IpWhitelist").start()
 
     def _ip_table_remove_whitelist(self, ip: str):
-        """IP'yi güvenli listeden çıkar."""
+        """IP'yi güvenli listeden çıkar + cloud'a yaz."""
         try:
             from client_gui_lock import require_gui_unlock
             if not require_gui_unlock(self.app, reason="mutate"):
@@ -3193,9 +3516,21 @@ class ModernGUI:
         if auto_response:
             auto_response.whitelist_ips.discard(ip)
 
-        self.show_toast("Whitelist",
-                        self.t("toast_ip_removed_whitelist").format(ip=ip), "info")
-        self._refresh_ip_table()
+        def _work():
+            synced = self._persist_whitelist_to_cloud()
+
+            def _ui():
+                self.show_toast(
+                    "Whitelist",
+                    self.t("toast_ip_removed_whitelist").format(ip=ip)
+                    + (" ✓" if synced else f" — {self.t('layers_sync_failed')}"),
+                    "info" if synced else "warning",
+                )
+                self._refresh_ip_table()
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="IpWhitelistRemove").start()
 
     def _create_stat_card(self, parent, emoji: str, label: str, value: str,
                          color: str, on_click=None) -> ctk.CTkFrame:
@@ -3578,12 +3913,68 @@ class ModernGUI:
 
         headers = [self.t("ip_col_service"), "Port", self.t("detail_status")]
         rows = []
+        actions = []
         for port, svc in self.app.PORT_TABLOSU:
             is_active = svc.upper() in [s.upper() for s in running]
             status_text = self.t("status_running") if is_active else self.t("status_stopped")
             status_color = COLORS["green"] if is_active else COLORS["red"]
             rows.append([svc.upper(), str(port), (status_text, status_color)])
-        self._add_detail_table(content, headers, rows, col_widths=[150, 80, 120])
+            if is_active:
+                actions.append([
+                    (self.t("honeypot_btn_stop"), COLORS["red"],
+                     lambda p=port, s=svc: (
+                         self._honeypot_service_action(p, s, start=False),
+                         popup.destroy(),
+                     )),
+                ])
+            else:
+                actions.append([
+                    (self.t("honeypot_btn_start"), COLORS["green"],
+                     lambda p=port, s=svc: (
+                         self._honeypot_service_action(p, s, start=True),
+                         popup.destroy(),
+                     )),
+                ])
+        self._add_detail_table(
+            content, headers, rows, col_widths=[150, 80, 120], row_actions=actions
+        )
+
+    def _honeypot_service_action(self, port, service, *, start: bool):
+        """Start/stop a honeypot bait service from a detail popup."""
+        try:
+            from client_gui_lock import require_gui_unlock
+            if not require_gui_unlock(self.app, reason="mutate"):
+                return
+        except Exception:
+            return
+
+        def _work():
+            try:
+                if start:
+                    ok = bool(self.app.start_single_row(port, service, manual_action=True))
+                else:
+                    ok = bool(self.app.stop_single_row(port, service, manual_action=True))
+            except Exception as e:
+                ok = False
+                err = str(e)
+            else:
+                err = ""
+
+            def _ui():
+                if ok:
+                    self.show_toast(
+                        self.t("honeypot_btn_start") if start else self.t("honeypot_btn_stop"),
+                        f"{service}:{port}", "info",
+                    )
+                    self._refresh_dashboard()
+                else:
+                    self.show_toast(
+                        self.t("error"), err or f"{service}:{port}", "warning"
+                    )
+
+            self._gui_safe(_ui)
+
+        threading.Thread(target=_work, daemon=True, name="HpServiceAction").start()
 
     # ── Detail: Son Saldırı ── #
     def _detail_last_attack(self):
@@ -4121,44 +4512,66 @@ class ModernGUI:
                          text_color=color).pack(anchor="w", padx=8, pady=2)
 
     # ── Detail: Engellenen IP'ler ── #
-    def _detail_blocked_ips(self):
-        """Engellenen/takip edilen IP detayları — tam liste (store + TE)."""
-        popup = self._show_detail_window(f"🚫 {self.t('card_tracked_ips')}", height=520)
-        content = popup._content
-
-        threat_engine = getattr(self.app, 'threat_engine', None)
+    def _tracked_ip_snapshot(self) -> dict:
+        """One canonical dataset for the tracked-IP card and its detail view."""
+        threat_engine = getattr(self.app, "threat_engine", None)
         store_blocks = []
         try:
             from client_block_store import list_blocked_ips
             store_blocks = list_blocked_ips()
         except Exception:
-            store_blocks = []
+            pass
 
-        blocked = set()
-        if threat_engine:
-            blocked |= set(getattr(threat_engine, '_rule_blocked_ips', set()) or set())
-        blocked |= {str(b.get("ip") or "") for b in store_blocks if b.get("ip")}
-
+        blocked = {
+            str(b.get("ip") or "") for b in store_blocks if b.get("ip")
+        }
         contexts = {}
         if threat_engine:
+            blocked |= set(
+                getattr(threat_engine, "_rule_blocked_ips", set()) or set()
+            )
             try:
                 contexts = threat_engine.get_all_contexts() or {}
             except Exception:
-                contexts = {}
-
-        active_ips = [(ip, ctx) for ip, ctx in contexts.items()
-                      if ip not in ("local", "", "127.0.0.1", "::1")
-                      and (ctx.threat_score > 0 or ctx.failed_attempts > 0)]
-
-        blocked_count = len(blocked)
-        watching_count = sum(
-            1 for ip, ctx in active_ips
+                pass
+        active_ips = [
+            (ip, ctx) for ip, ctx in contexts.items()
+            if ip not in ("local", "", "127.0.0.1", "::1")
+            and (ctx.threat_score > 0 or ctx.failed_attempts > 0)
+        ]
+        watching = [
+            (ip, ctx) for ip, ctx in active_ips
             if ip not in blocked and not getattr(ctx, "is_blocked", False)
-        )
+        ]
+        # Union semantics: a blocked address is counted once even if it also has
+        # an active threat context.
+        return {
+            "threat_engine": threat_engine,
+            "store_blocks": store_blocks,
+            "blocked": blocked,
+            "contexts": contexts,
+            "active_ips": active_ips,
+            "watching": watching,
+            "total": len(blocked) + len(watching),
+        }
+
+    def _detail_blocked_ips(self):
+        """Engellenen/takip edilen IP detayları — tam liste (store + TE)."""
+        popup = self._show_detail_window(f"🚫 {self.t('card_tracked_ips')}", height=520)
+        content = popup._content
+
+        snapshot = self._tracked_ip_snapshot()
+        threat_engine = snapshot["threat_engine"]
+        store_blocks = snapshot["store_blocks"]
+        blocked = snapshot["blocked"]
+        active_ips = snapshot["active_ips"]
+        blocked_count = len(blocked)
+        watching_count = len(snapshot["watching"])
 
         ctk.CTkLabel(
             content,
-            text=f"{self.t('detail_blocked_count')}: {blocked_count}  |  "
+            text=f"{self.t('card_tracked_ips')}: {snapshot['total']}  |  "
+                 f"{self.t('detail_blocked_count')}: {blocked_count}  |  "
                  f"{self.t('detail_watching_count')}: {watching_count}",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["orange"],
@@ -4167,55 +4580,69 @@ class ModernGUI:
         from datetime import datetime
         rows = []
         actions = []
-        # Prefer firewall inventory (store); fall back to threat contexts
-        if store_blocks:
-            for b in store_blocks[:100]:
-                ip = str(b.get("ip") or "")
-                if not ip:
-                    continue
-                ts_raw = float(b.get("blocked_at") or 0)
-                try:
-                    ts = datetime.fromtimestamp(ts_raw).strftime("%d.%m %H:%M") if ts_raw else "—"
-                except Exception:
-                    ts = "—"
-                rows.append([
-                    ip,
-                    (self.t("ip_status_blocked"), COLORS["red"]),
-                    ("—", COLORS["text_dim"]),
-                    "—",
-                    ts,
-                ])
-                _ip = ip
+        displayed = set()
+        # Render the same union used by the card count: firewall store + threat
+        # contexts + rule-blocked addresses. Never hide watching rows merely
+        # because at least one firewall block exists.
+        for b in store_blocks:
+            ip = str(b.get("ip") or "")
+            if not ip or ip in displayed:
+                continue
+            displayed.add(ip)
+            ts_raw = float(b.get("blocked_at") or 0)
+            try:
+                ts = datetime.fromtimestamp(ts_raw).strftime("%d.%m %H:%M") if ts_raw else "—"
+            except Exception:
+                ts = "—"
+            rows.append([
+                ip, (self.t("ip_status_blocked"), COLORS["red"]),
+                ("—", COLORS["text_dim"]), "—", ts,
+            ])
+            actions.append([
+                (self.t("ip_btn_unblock"), COLORS["orange"],
+                 lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
+            ])
+
+        sorted_ips = sorted(
+            active_ips, key=lambda x: x[1].last_seen, reverse=True
+        )
+        for ip, ctx in sorted_ips:
+            if ip in displayed:
+                continue
+            displayed.add(ip)
+            is_blocked = ip in blocked or ctx.is_blocked
+            status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
+                     (self.t("ip_status_watching"), COLORS["orange"])
+            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
+                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
+            try:
+                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
+            except Exception:
+                ts = "—"
+            rows.append([ip, status, (str(ctx.threat_score), score_color),
+                         str(ctx.failed_attempts), ts])
+            if is_blocked:
                 actions.append([
                     (self.t("ip_btn_unblock"), COLORS["orange"],
-                     lambda i=_ip: (self._ip_table_unblock(i), popup.destroy())),
+                     lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
                 ])
-        elif active_ips:
-            sorted_ips = sorted(active_ips, key=lambda x: x[1].last_seen, reverse=True)[:30]
-            for ip, ctx in sorted_ips:
-                is_blocked = ip in blocked or ctx.is_blocked
-                status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
-                         (self.t("ip_status_watching"), COLORS["orange"])
-                score_color = COLORS["red"] if ctx.threat_score >= 80 else (
-                    COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
-                try:
-                    ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
-                except Exception:
-                    ts = "—"
-                rows.append([ip, status, (str(ctx.threat_score), score_color),
-                             str(ctx.failed_attempts), ts])
-                _ip = ip
-                if is_blocked:
-                    actions.append([
-                        (self.t("ip_btn_unblock"), COLORS["orange"],
-                         lambda i=_ip: (self._ip_table_unblock(i), popup.destroy())),
-                    ])
-                else:
-                    actions.append([
-                        (self.t("ip_btn_block"), COLORS["red"],
-                         lambda i=_ip: (self._ip_table_block(i), popup.destroy())),
-                    ])
-        else:
+            else:
+                actions.append([
+                    (self.t("ip_btn_block"), COLORS["red"],
+                     lambda i=ip: (self._ip_table_block(i), popup.destroy())),
+                ])
+
+        for ip in sorted(blocked - displayed):
+            rows.append([
+                ip, (self.t("ip_status_blocked"), COLORS["red"]),
+                ("—", COLORS["text_dim"]), "—", "—",
+            ])
+            actions.append([
+                (self.t("ip_btn_unblock"), COLORS["orange"],
+                 lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
+            ])
+
+        if not rows:
             try:
                 msg = self.t("ip_no_blocked")
             except Exception:
@@ -4785,14 +5212,9 @@ class ModernGUI:
             else:
                 self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
 
-            # 7) Threat Detection cards (v4.0) + firewall inventory count
+            # 7) Threat Detection cards — card/detail share one canonical IP set
             threat_engine = getattr(self.app, 'threat_engine', None)
-            store_count = 0
-            try:
-                from client_block_store import load_blocked_map
-                store_count = len(load_blocked_map())
-            except Exception:
-                store_count = 0
+            tracked_count = self._tracked_ip_snapshot()["total"]
             if threat_engine:
                 try:
                     level, level_color = threat_engine.get_threat_level()
@@ -4806,21 +5228,20 @@ class ModernGUI:
                         COLORS["orange"] if events_per_hour > 20 else COLORS["text_dim"])
                     self._update_card("events_per_hour", str(events_per_hour), eph_color)
 
-                    te_blocked = len(getattr(threat_engine, "_rule_blocked_ips", set()) or set())
-                    active_ips = max(int(engine_stats.get("active_ips", 0) or 0), te_blocked, store_count)
-                    blocked_color = COLORS["red"] if active_ips > 5 else (
-                        COLORS["orange"] if active_ips > 0 else COLORS["text_dim"])
-                    self._update_card("blocked_ips", str(active_ips), blocked_color)
+                    blocked_color = COLORS["red"] if tracked_count > 5 else (
+                        COLORS["orange"] if tracked_count > 0 else COLORS["text_dim"])
+                    self._update_card("blocked_ips", str(tracked_count), blocked_color)
                 except Exception:
-                    if store_count:
+                    if tracked_count:
                         self._update_card(
                             "blocked_ips",
-                            str(store_count),
-                            COLORS["red"] if store_count > 5 else COLORS["orange"],
+                            str(tracked_count),
+                            COLORS["red"] if tracked_count > 5 else COLORS["orange"],
                         )
-            elif store_count:
-                blocked_color = COLORS["red"] if store_count > 5 else COLORS["orange"]
-                self._update_card("blocked_ips", str(store_count), blocked_color)
+            else:
+                blocked_color = COLORS["red"] if tracked_count > 5 else (
+                    COLORS["orange"] if tracked_count > 0 else COLORS["text_dim"])
+                self._update_card("blocked_ips", str(tracked_count), blocked_color)
 
             # 8) Silent Hours status (v4.0 Faz 2)
             sh_guard = getattr(self.app, 'silent_hours_guard', None)

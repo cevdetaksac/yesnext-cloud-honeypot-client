@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.2"  # Network Guard SAFETY: alert-only by default, net_cut FP fix (froze normal apps)
+VERSION = "4.7.3"  # Operator-approved suspend + GUI Security Layers + hard alert-only
 
 
 CLIENT_VERSION = VERSION  # Main version constant

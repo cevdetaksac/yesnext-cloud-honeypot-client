@@ -3,7 +3,11 @@
 
 param(
     [switch]$Clean = $false,
-    [switch]$WebRTC = $false
+    [switch]$WebRTC = $false,
+    [switch]$Sign = $false,
+    [string]$CertPath = $env:HONEYPOT_SIGN_CERT,
+    [string]$CertPassword = $env:HONEYPOT_SIGN_CERT_PASSWORD,
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 # ===================== VERSION AUTO-DETECTION ===================== #
@@ -148,15 +152,72 @@ try {
     exit 1
 }
 
-# Step 5: Show results
-Write-Host "`n[5/5] Build completed successfully!" -ForegroundColor Green
+# Step 5: Optional Authenticode + provenance (SUP-001 / SUP-002)
+Write-Host "`n[5/6] Signing / provenance..." -ForegroundColor Yellow
+$installerPath = Join-Path (Get-Location) "cloud-client-installer.exe"
+$mainExe = Join-Path (Get-Location) "dist\honeypot-client\honeypot-client.exe"
+$signed = $false
+if ($Sign) {
+    if (-not $CertPath -or -not (Test-Path $CertPath)) {
+        Write-Host "   ERROR: -Sign requires CertPath / HONEYPOT_SIGN_CERT" -ForegroundColor Red
+        exit 1
+    }
+    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if (-not $signtool) {
+        Write-Host "   ERROR: signtool.exe not found in PATH" -ForegroundColor Red
+        exit 1
+    }
+    $targets = @($mainExe, $installerPath) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($target in $targets) {
+        $signArgs = @(
+            "sign", "/fd", "SHA256", "/td", "SHA256", "/tr", $TimestampUrl,
+            "/f", $CertPath
+        )
+        if ($CertPassword) { $signArgs += @("/p", $CertPassword) }
+        $signArgs += $target
+        & signtool.exe @signArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "   ERROR: failed to sign $target" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "   SIGNED: $target" -ForegroundColor Green
+    }
+    $signed = $true
+} else {
+    Write-Host "   SKIP: Authenticode (-Sign not set; unsigned build OK for dev)" -ForegroundColor DarkGray
+}
+
+# Step 6: Show results + emit provenance manifest
+Write-Host "`n[6/6] Build completed successfully!" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Green
 
 $installerFile = Get-Item "cloud-client-installer.exe" -ErrorAction SilentlyContinue
 if ($installerFile) {
     $sizeMB = [math]::Round($installerFile.Length / 1MB, 1)
+    $sha = (Get-FileHash -Algorithm SHA256 -Path $installerFile.FullName).Hash.ToLowerInvariant()
+    $provenance = [ordered]@{
+        product = "yesnext-cloud-honeypot-client"
+        version = $VERSION
+        artifact = "cloud-client-installer.exe"
+        sha256 = $sha
+        size_bytes = $installerFile.Length
+        built_at = (Get-Date).ToUniversalTime().ToString("o")
+        webrtc = [bool]$WebRTC
+        authenticode_signed = [bool]$signed
+        toolchain = @{
+            python = (python --version 2>&1 | Out-String).Trim()
+            pyinstaller = "honeypot-client.spec"
+            nsis = "installer.nsi"
+        }
+    }
+    $provPath = "dist\release-provenance-v$VERSION.json"
+    New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+    $provenance | ConvertTo-Json -Depth 5 | Set-Content -Path $provPath -Encoding UTF8
     Write-Host ("Version:   v{0}" -f $VERSION) -ForegroundColor Cyan
     Write-Host ("Installer: cloud-client-installer.exe ({0} MB)" -f $sizeMB) -ForegroundColor Cyan
+    Write-Host ("SHA256:    {0}" -f $sha) -ForegroundColor Cyan
+    Write-Host ("Signed:    {0}" -f $signed) -ForegroundColor Cyan
+    Write-Host ("Provenance:{0}" -f $provPath) -ForegroundColor Cyan
     Write-Host ("Built:     {0}" -f $installerFile.LastWriteTime) -ForegroundColor Cyan
     Write-Host "Ready for distribution!" -ForegroundColor Green
 } else {

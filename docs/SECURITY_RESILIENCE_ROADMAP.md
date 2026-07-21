@@ -128,13 +128,12 @@ update-integrity boşluklarını kapatmak.
   Observe hazır (`inspect_command_signature` + yerel `signature_*` sayaçları);
   invalid hâlâ reject, missing hâlâ soft-allow. Enforce ancak cloud %100 imza
   + ortak test vektörü + contract promotion sonrası açılır.
-- [ ] **SUP-001 — Authenticode release signing:** installer, ana exe ve varsa
-  helper/driver için timestamp'li kod imzası; CI doğrulaması.
-- [ ] **SUP-001b — WinVerifyTrust on update:** indirilen installer/exe
-  Authenticode + publisher doğrulanmadan çalıştırılmaz; SHA-256 yalnız ek
-  bütünlük katmanı olarak kalır.
-- [ ] **SUP-002 — SBOM + provenance:** bağımlılık/SHA-256, build profili,
-  PyInstaller/Nuitka toolchain ve release provenance üret.
+- [~] **SUP-001 — Authenticode release signing:** `build.ps1 -Sign` + CertPath
+  kancası; cert yoksa unsigned dev build devam eder (cert dış bağımlılık).
+- [~] **SUP-001b — WinVerifyTrust on update:** `client_authenticode` + update
+  path enforce yalnız `require_authenticode` / `allowed_publishers` ile.
+- [~] **SUP-002 — SBOM + provenance:** `dist/release-provenance-v*.json`
+  (sha256/size/toolchain); tam SBOM sonraki adım.
 - [ ] **SUP-003 — Reproducible-build yaklaşımı:** aynı kaynak/tag için
   doğrulanabilir artifact manifesti; release checksum contract/metadata'ya bağlanır.
 - [ ] **QA-001 — Fault-injection harness:** daemon/Guardian kill, task disable,
@@ -346,11 +345,11 @@ Kabul:
   - [~] SR-001 Resilience SLO + local/status telemetry (cloud promote pending)
   - [~] SR-002 Restart-storm breaker
   - [~] SR-003 Guardian `installed but not running` self-heal
-  - [ ] SUP-001 Authenticode signing pipeline
-  - [ ] **SUP-001b** Update path'te WinVerifyTrust
-  - [ ] SUP-002 SBOM/provenance
+  - [~] SUP-001 Authenticode signing hook (`build.ps1 -Sign`; needs org cert)
+  - [~] **SUP-001b** Update path WinVerifyTrust (policy-gated; soft-skip default)
+  - [~] SUP-002 release provenance JSON (full SBOM later)
   - [ ] QA-001 Fault-injection test harness
-  - [ ] **REV-101/102** Binary exposure threat model + embedded secret CI scan
+  - [~] **REV-101/102** Embedded secret CI scan (`tools/scan_embedded_secrets.py`)
   - [ ] **REV-104** Runtime Authenticode/module integrity tasarımı
   - [~] **ID-401** Event Log 4723/4724 parola değişimi/reset (client sensor)
   - [~] RANS-301 ETW shadow PoC surface (provider attach later)

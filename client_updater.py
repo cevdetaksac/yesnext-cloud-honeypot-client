@@ -691,6 +691,36 @@ def download_installer_file(url: str, local_path: str, expected_sha256: str = ""
                     pass
                 return False
 
+        # SUP-001b: WinVerifyTrust / publisher allowlist before execute.
+        # Soft-skip unless updates.require_authenticode or allowed_publishers.
+        try:
+            from client_authenticode import (
+                AuthenticodeError,
+                assert_update_authenticode,
+            )
+            auth = assert_update_authenticode(local_path)
+            if auth.get("trusted"):
+                log(
+                    "[SILENT UPDATE] Authenticode OK "
+                    f"publisher={(auth.get('publisher') or '')[:80]}"
+                )
+            elif auth.get("skipped"):
+                log("[SILENT UPDATE] Authenticode soft-skip (not required)")
+            else:
+                log(
+                    "[SILENT UPDATE] Authenticode not trusted "
+                    f"err={(auth.get('error') or '')[:80]}"
+                )
+        except AuthenticodeError as exc:
+            log(f"[SILENT UPDATE] Authenticode rejected — aborting: {exc}")
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+            return False
+        except Exception as exc:
+            log(f"[SILENT UPDATE] Authenticode check error: {exc}")
+
         return True
 
     except Exception as e:

@@ -289,6 +289,9 @@ class OptionalMediaTransport:
 class AiortcMediaTransport(OptionalMediaTransport):
     """aiortc video transport hosted on a dedicated asyncio thread."""
 
+    ICE_CHECKING_TIMEOUT_SEC = 15.0
+    _CONNECTED_ICE_STATES = frozenset(("connected", "completed"))
+
     def __init__(
         self,
         probe: dict,
@@ -312,8 +315,10 @@ class AiortcMediaTransport(OptionalMediaTransport):
         self._session_id = ""
         self._stream_id = ""
         self._state_lock = threading.Lock()
+        self._pc_connection_state = "new"
         self._connection_state = "new"
         self._ice_state = "new"
+        self._ice_checking_task = None
         self._codec = ""
         self._preferred_codec = ""
         self._error = ""
@@ -347,8 +352,16 @@ class AiortcMediaTransport(OptionalMediaTransport):
     def publish_frame(self, jpeg: bytes, metadata: Optional[dict] = None) -> bool:
         if not self.available:
             return False
+        with self._state_lock:
+            media_ready = bool(
+                self.active
+                and self._pc_connection_state == "connected"
+                and self._ice_state in self._CONNECTED_ICE_STATES
+            )
+        if not media_ready:
+            return False
         self.mailbox.publish(jpeg, metadata)
-        return bool(self.active)
+        return True
 
     def handle_signal(self, message: dict) -> dict:
         action = str(message.get("action") or "").lower()
@@ -459,6 +472,14 @@ class AiortcMediaTransport(OptionalMediaTransport):
         self, session_id: str, stream_id: str, configuration=None
     ):
         await self._close_pc()
+        with self._state_lock:
+            self._pc_connection_state = "new"
+            self._connection_state = "new"
+            self._ice_state = "new"
+            self._codec = ""
+            self._preferred_codec = ""
+            self._error = ""
+            self.active = False
         if configuration is None:
             pc = self._runtime["RTCPeerConnection"]()
         else:
@@ -473,33 +494,115 @@ class AiortcMediaTransport(OptionalMediaTransport):
 
         @pc.on("connectionstatechange")
         async def connection_state_change():
-            state = str(pc.connectionState)
-            with self._state_lock:
-                self._connection_state = state
-                self.active = state == "connected"
-            if state == "connected":
-                await self._refresh_chosen_codec()
-                asyncio.create_task(self._refresh_chosen_codec_after_delay())
-            if state in ("failed", "disconnected") or (
-                state == "closed" and not self._closing
-            ):
-                self._fail(f"peer connection {state}")
+            await self._handle_connection_state(pc, str(pc.connectionState))
 
         @pc.on("iceconnectionstatechange")
         async def ice_state_change():
-            state = str(pc.iceConnectionState)
-            with self._state_lock:
-                self._ice_state = state
-            if state in ("failed", "disconnected") or (
-                state == "closed" and not self._closing
-            ):
-                self._fail(f"ICE {state}")
+            await self._handle_ice_state(pc, str(pc.iceConnectionState))
 
         @pc.on("datachannel")
         def data_channel(channel):
             @channel.on("message")
             def message(payload):
                 self.route_data_channel_input(payload)
+
+    async def _handle_connection_state(self, pc, state: str):
+        if pc is not self._pc:
+            return
+        became_active = False
+        with self._state_lock:
+            was_active = bool(self.active)
+            self._pc_connection_state = str(state)
+            self._recompute_media_state_locked()
+            became_active = self.active and not was_active
+        if became_active:
+            await self._refresh_chosen_codec()
+            asyncio.create_task(self._refresh_chosen_codec_after_delay())
+        if state in ("failed", "disconnected") or (
+            state == "closed" and not self._closing
+        ):
+            self._cancel_ice_checking_timeout()
+            self._fail(f"peer connection {state}")
+
+    async def _handle_ice_state(self, pc, state: str):
+        if pc is not self._pc:
+            return
+        became_active = False
+        with self._state_lock:
+            was_active = bool(self.active)
+            self._ice_state = str(state)
+            self._recompute_media_state_locked()
+            became_active = self.active and not was_active
+        if state == "checking":
+            self._start_ice_checking_timeout(pc)
+        else:
+            self._cancel_ice_checking_timeout()
+        if became_active:
+            await self._refresh_chosen_codec()
+            asyncio.create_task(self._refresh_chosen_codec_after_delay())
+        if state in ("failed", "disconnected") or (
+            state == "closed" and not self._closing
+        ):
+            self._fail(f"ICE {state}")
+
+    def _recompute_media_state_locked(self):
+        ice_ready = self._ice_state in self._CONNECTED_ICE_STATES
+        self.active = bool(
+            self._pc_connection_state == "connected" and ice_ready
+        )
+        if self._pc_connection_state == "connected" and not ice_ready:
+            # aiortc may expose aggregate connectionState=connected before the
+            # separately observed ICE callback settles. Never advertise media
+            # readiness early; surface the actual ICE progress instead.
+            self._connection_state = (
+                self._ice_state
+                if self._ice_state in (
+                    "new", "checking", "failed", "disconnected", "closed"
+                )
+                else "connecting"
+            )
+        else:
+            self._connection_state = self._pc_connection_state
+
+    def _start_ice_checking_timeout(self, pc):
+        task = self._ice_checking_task
+        if task is not None and not task.done():
+            return
+        self._ice_checking_task = asyncio.create_task(
+            self._ice_checking_timeout(pc)
+        )
+
+    def _cancel_ice_checking_timeout(self):
+        task = getattr(self, "_ice_checking_task", None)
+        self._ice_checking_task = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
+
+    async def _ice_checking_timeout(self, pc):
+        try:
+            await asyncio.sleep(float(self.ICE_CHECKING_TIMEOUT_SEC))
+        except asyncio.CancelledError:
+            return
+        if pc is not self._pc:
+            return
+        with self._state_lock:
+            timed_out = bool(
+                not self.active and self._ice_state == "checking"
+            )
+            if timed_out:
+                self._pc_connection_state = "failed"
+                self._ice_state = "failed"
+                self._recompute_media_state_locked()
+        if not timed_out:
+            return
+        self._fail("ICE checking timeout")
+        await self._close_pc()
 
     def route_data_channel_input(self, payload) -> bool:
         try:
@@ -586,8 +689,10 @@ class AiortcMediaTransport(OptionalMediaTransport):
         return LatestJpegTrack
 
     async def _close_pc(self):
+        self._cancel_ice_checking_timeout()
         pc, self._pc = self._pc, None
-        self.active = False
+        with self._state_lock:
+            self.active = False
         if pc is not None:
             self._closing = True
             try:

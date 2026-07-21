@@ -227,6 +227,79 @@ class TestFallbackAndMailbox(unittest.TestCase):
         self.assertGreater(latest[0], first)
 
 
+class TestMediaReadiness(unittest.TestCase):
+    @staticmethod
+    def make_transport():
+        transport = AiortcMediaTransport.__new__(AiortcMediaTransport)
+        transport.available = True
+        transport.active = False
+        transport.mailbox = NewestFrameMailbox()
+        transport._state_lock = threading.Lock()
+        transport._pc_connection_state = "new"
+        transport._connection_state = "new"
+        transport._ice_state = "new"
+        transport._ice_checking_task = None
+        transport._codec = ""
+        transport._preferred_codec = ""
+        transport._error = ""
+        transport._session_id = ""
+        transport._stream_id = ""
+        transport._closing = False
+        transport._pc = None
+        transport._fallback_handler = lambda _error: None
+        return transport
+
+    def test_frame_enters_media_mailbox_only_after_ice_and_dtls_ready(self):
+        transport = self.make_transport()
+        transport._pc_connection_state = "connected"
+        transport._ice_state = "checking"
+        with transport._state_lock:
+            transport._recompute_media_state_locked()
+
+        self.assertFalse(transport.publish_frame(JPEG, {"seq": 1}))
+        self.assertIsNone(transport.mailbox.latest())
+        self.assertFalse(transport.status()["active"])
+        self.assertEqual(transport.status()["connection_state"], "checking")
+
+        transport._ice_state = "connected"
+        with transport._state_lock:
+            transport._recompute_media_state_locked()
+        self.assertTrue(transport.publish_frame(JPEG, {"seq": 2}))
+        self.assertEqual(transport.mailbox.latest()[2]["seq"], 2)
+        self.assertTrue(transport.status()["active"])
+        self.assertEqual(transport.status()["connection_state"], "connected")
+
+    def test_ice_checking_timeout_falls_back_and_closes_peer(self):
+        fallback_errors = []
+
+        class Peer:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        async def scenario():
+            transport = self.make_transport()
+            transport.ICE_CHECKING_TIMEOUT_SEC = 0.01
+            transport._fallback_handler = fallback_errors.append
+            peer = Peer()
+            transport._pc = peer
+            await transport._handle_connection_state(peer, "connected")
+            await transport._handle_ice_state(peer, "checking")
+            self.assertFalse(transport.active)
+            self.assertEqual(transport.status()["connection_state"], "checking")
+            await asyncio.sleep(0.04)
+            self.assertTrue(peer.closed)
+            self.assertIsNone(transport._pc)
+            self.assertFalse(transport.active)
+            self.assertEqual(transport.status()["connection_state"], "failed")
+            self.assertEqual(transport.status()["ice_state"], "failed")
+
+        asyncio.run(scenario())
+        self.assertEqual(fallback_errors, ["ICE checking timeout"])
+
+
 class TestDataChannelAndCodec(unittest.TestCase):
     def test_data_channel_routes_full_input_v2_envelope(self):
         received = []

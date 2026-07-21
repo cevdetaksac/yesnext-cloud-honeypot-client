@@ -1,3 +1,6 @@
+# v4.7.1
+- Hotfix (Network Guard): `_run` subprocess çıktısı locale/OEM güvenli decode edilir (byte al → utf-8/cp1254/cp850/latin-1). TR locale'de cp1254 decode hatası `collect_adapters`/`collect_firewall` çıktısını yutuyor, baseline `adapters:[]` kalıyordu. PowerShell çıktısı UTF-8'e zorlandı. Artık adapter/DNS/route baseline dolu → ağ-kesme tespiti + DNS restore çalışır.
+
 # v4.7.0
 - Contract 1.3.0 — Network Guard (offline fidye bombası + ağ sürücü yedek/kurtarma):
   - **A) Baseline:** `network_baseline.json` (imzalı, HMAC) — mapped drive / shares / adapter / DNS / route / firewall / connectivity; 30 dk periyot + boot; son 10 sürüm rotasyonu.

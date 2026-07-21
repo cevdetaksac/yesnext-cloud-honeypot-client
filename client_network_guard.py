@@ -145,12 +145,24 @@ def verify_baseline(payload: dict) -> bool:
 # ── Collectors (Windows, best-effort) ───────────────────────────────
 
 def _run(cmd: List[str], timeout: float = 8.0) -> str:
+    """Run a command and decode output defensively.
+
+    Windows console tools (netsh / net / powershell) emit OEM/locale-encoded
+    bytes that break the default locale text decoder (e.g. cp1254 on TR hosts).
+    Capture raw bytes and decode utf-8 first, then cp1254, always errors=replace.
+    """
     try:
         r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd, capture_output=True, timeout=timeout,
             creationflags=_NO_WINDOW,
         )
-        return (r.stdout or "") + (r.stderr or "")
+        raw = (r.stdout or b"") + (r.stderr or b"")
+        for enc in ("utf-8", "cp1254", "cp850", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except Exception:
+                continue
+        return raw.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
@@ -184,6 +196,7 @@ def collect_shares() -> List[dict]:
 def collect_adapters() -> List[dict]:
     """Adapter up/down + IPv4/DNS/gateway via PowerShell Get-NetIPConfiguration."""
     ps = (
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
         "Get-NetIPConfiguration | ForEach-Object { "
         "[pscustomobject]@{ name=$_.InterfaceAlias; "
         "state=$_.NetAdapter.Status; "

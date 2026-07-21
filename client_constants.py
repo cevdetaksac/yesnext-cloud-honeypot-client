@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.0"  # Network Guard: offline ransomware bomb detection + net-drive backup/recovery
+VERSION = "4.7.1"  # Network Guard hotfix: OEM/locale-safe subprocess decode (adapters were empty)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.67"  # Contract 1.1.3: enriched ransomware canary wire payload
+VERSION = "4.5.68"  # Hotfix: single enriched canary urgent path (no thin race)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

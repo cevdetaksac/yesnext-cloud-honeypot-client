@@ -1,3 +1,7 @@
+# v4.5.68
+- Hotfix: canary urgent tek zengin yol — ince `handle_alert` yarışı kalktı.
+- `system_context.ransomware` / `raw_events` / `target_service=SYSTEM` her canary urgent'ta zorunlu.
+
 # v4.5.67
 - Contract 1.1.3: Canary urgent alert artık quarantine/suspect taramasından sonra zengin payload gönderir.
 - `target_service=SYSTEM`, `recommended_action=isolate_host`, structured `raw_events`.

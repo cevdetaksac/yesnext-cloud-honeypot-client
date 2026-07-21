@@ -60,10 +60,12 @@ class TestCanaryUrgentWire(unittest.TestCase):
         shield._on_canary_triggered(canary, "MODIFIED")
 
         self.assertEqual(order, ["contain", "urgent"])
+        self.assertEqual(len(pipeline.alerts), 1)
         alert = pipeline.alerts[0]
         self.assertEqual(alert["threat_score"], 100)
         self.assertEqual(alert["target_service"], "SYSTEM")
         self.assertEqual(alert["recommended_action"], "isolate_host")
+        self.assertTrue(alert.get("suppress_local_notify"))
         context = alert["system_context"]["ransomware"]
         self.assertEqual(context["file"], canary.path)
         self.assertEqual(context["change_type"], "MODIFIED")
@@ -71,7 +73,6 @@ class TestCanaryUrgentWire(unittest.TestCase):
         process_event = alert["raw_events"][1]
         self.assertEqual(process_event["process_name"], "evil.exe")
         self.assertEqual(process_event["cmdline"], "evil.exe --encrypt")
-
 
 class TestHealthRansomwareWire(unittest.TestCase):
     def test_health_snapshot_includes_quarantine_details(self):

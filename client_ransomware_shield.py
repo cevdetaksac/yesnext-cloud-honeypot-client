@@ -728,59 +728,47 @@ class RansomwareShield:
             if isinstance(suspect, dict)
         )
 
-        # Feed to threat engine
-        if self.on_alert:
-            self.on_alert({
-                "event_type": "canary_file_tampered",
-                "threat_type": "ransomware_canary_triggered",
-                "severity": "critical",
-                "threat_score": 100,
-                # Dashboard/API yes — local tray/toast no (do not scare end users)
-                "suppress_local_notify": True,
-                "details": {
-                    "file": filename,
-                    "change_type": change_type,
-                    "full_path": canary.path,
-                },
-                "description": (
-                    f"RANSOMWARE ALERT: Canary file '{filename}' was {change_type}. "
-                    f"Strong indicator of ransomware activity."
-                ),
-                "title": "Ransomware koruması — canary tetiklendi",
-            })
-
-        # Send urgent alert
-        if self.alert_pipeline:
-            try:
-                self.alert_pipeline.send_urgent({
-                    "severity": "critical",
-                    "threat_type": "ransomware_canary_triggered",
-                    "title": f"🚨 Ransomware Tespiti — Canary dosya {change_type}!",
-                    "description": (
-                        f"Tuzak dosya '{filename}' değiştirildi/silindi. "
-                        f"Bu, aktif bir ransomware saldırısının güçlü göstergesidir.\n\n"
-                        f"Dosya: {canary.path}\n"
-                        f"Değişiklik: {change_type}\n\n"
-                        f"Acil müdahale önerilir!"
-                    ),
-                    "threat_score": 100,
-                    "target_service": "SYSTEM",
-                    "recommended_action": "isolate_host",
-                    "auto_response_taken": (
-                        ["emergency_alert"]
-                        + list(containment.get("actions") or [])
-                    ),
-                    "raw_events": raw_events,
-                    "system_context": {
-                        "ransomware": ransomware_context,
-                    },
-                })
-            except Exception:
-                pass
+        # Single urgent path (on_alert is wired to AlertPipeline.handle_alert).
+        # Do NOT also call a thin on_alert first — that races and can deliver an
+        # empty popup payload without system_context.ransomware.
+        urgent = {
+            "event_type": "canary_file_tampered",
+            "severity": "critical",
+            "threat_type": "ransomware_canary_triggered",
+            "title": f"Ransomware Tespiti — Canary dosya {change_type}!",
+            "description": (
+                f"Tuzak dosya '{filename}' degistirildi/silindi. "
+                f"Bu, aktif bir ransomware saldirisinin guclu gostergesidir.\n\n"
+                f"Dosya: {canary.path}\n"
+                f"Degisiklik: {change_type}\n\n"
+                f"Acil mudahale onerilir!"
+            ),
+            "threat_score": 100,
+            "target_service": "SYSTEM",
+            "recommended_action": "isolate_host",
+            "auto_response_taken": (
+                ["emergency_alert"] + list(containment.get("actions") or [])
+            ),
+            "raw_events": raw_events,
+            "system_context": {"ransomware": ransomware_context},
+            "details": {
+                "file": filename,
+                "change_type": change_type,
+                "full_path": canary.path,
+            },
+            # Dashboard/API yes — local tray/toast no (do not scare end users)
+            "suppress_local_notify": True,
+        }
+        try:
+            if self.alert_pipeline:
+                self.alert_pipeline.send_urgent(urgent)
+            elif self.on_alert:
+                self.on_alert(urgent)
+        except Exception as e:
+            log(f"[RANSOMWARE-SHIELD] urgent alert delivery error: {e}")
 
         # Ransomware tespit — aktif şüpheli IP'leri engelle
         self._block_suspicious_ips(f"canary {change_type}: {filename}")
-
     # ── Katman 3: Suspicious Process Detection ────────────────────
 
     def _process_monitor_loop(self):

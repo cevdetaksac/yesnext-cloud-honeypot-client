@@ -1,3 +1,10 @@
+# v4.7.2
+- **KRİTİK güvenlik hotfix (Network Guard):** 4.7.0/4.7.1 canlı makinede normal uygulamaları (Chrome/Firefox/Cursor/GameLoop/EdgeWebView) "offline fidye bombası" sanıp **suspend ediyordu → PC kilitleniyordu.** İki kök neden + bir tasarım kararı:
+  - **net_cut false-positive:** `diff_connectivity`, internet düşmese bile güncel adapter listesi boşken tüm baseline adapterlarını "down" sayıyordu. Artık `net_cut` yalnız gerçek internet erişim kaybında (`internet_lost`) True olur; adapter down/VPN-Wi-Fi churn yalnız bilgi amaçlı.
+  - **Otomatik containment KAPATILDI (varsayılan):** `auto_contain=false`, `auto_kill=false`, `auto_restore=false`. Network Guard artık tespit edip **yalnız alarm** gönderir (`ransomware_offline_suspect`, severity=warning); süreç dondurma/ağ değiştirme yapılmaz. Operatör dashboard'dan inceleyip `network_restore`/kill onaylar (kontrat "suspend-first + operatör onayı").
+  - **Güçlü imza şartı:** otomatik containment yalnız operatör `auto_contain=true` yaptıysa VE yüksek güvenli fidye imzası (canary/VSS quarantine aktif) varsa çalışır. Ham yazma hızı tek başına asla süreç dondurmaz.
+  - Eşikler yükseltildi (150 MB/s, 400 write/s), 60 sn trigger debounce, alarm severity ayrımı (`_offline_suspect` warning vs `_offline_bomb` critical).
+
 # v4.7.1
 - Hotfix (Network Guard): `_run` subprocess çıktısı locale/OEM güvenli decode edilir (byte al → utf-8/cp1254/cp850/latin-1). TR locale'de cp1254 decode hatası `collect_adapters`/`collect_firewall` çıktısını yutuyor, baseline `adapters:[]` kalıyordu. PowerShell çıktısı UTF-8'e zorlandı. Artık adapter/DNS/route baseline dolu → ağ-kesme tespiti + DNS restore çalışır.
 

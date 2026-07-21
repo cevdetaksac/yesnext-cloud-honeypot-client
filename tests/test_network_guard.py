@@ -49,18 +49,48 @@ class TestConnectivityDiff(unittest.TestCase):
         d = ng.diff_connectivity(base, cur)
         self.assertFalse(d["net_cut"])
 
-    def test_adapter_down_flagged(self):
+    def test_adapter_down_reported_but_not_cut_when_online(self):
         base = {"connectivity": {"internet_ok": True},
                 "adapters": [{"name": "Ethernet", "state": "up"}]}
         cur = {"internet_ok": True,
                "_adapters": [{"name": "Ethernet", "state": "disabled"}]}
         d = ng.diff_connectivity(base, cur)
         self.assertIn("Ethernet", d["adapters_down"])
+        # adapter-down is informational only; net_cut requires internet loss
+        self.assertFalse(d["net_cut"])
+
+    def test_adapter_down_with_internet_loss_is_cut(self):
+        base = {"connectivity": {"internet_ok": True},
+                "adapters": [{"name": "Ethernet", "state": "up"}]}
+        cur = {"internet_ok": False,
+               "_adapters": [{"name": "Ethernet", "state": "disabled"}]}
+        d = ng.diff_connectivity(base, cur)
         self.assertTrue(d["net_cut"])
 
     def test_no_baseline_is_safe(self):
         d = ng.diff_connectivity(None, {"internet_ok": True, "_adapters": []})
         self.assertFalse(d["net_cut"])
+
+    def test_online_with_no_adapter_snapshot_is_not_cut(self):
+        # Regression: internet up + _adapters None must NOT flag every baseline
+        # adapter as down (this froze Chrome/Cursor/GameLoop in 4.7.0/4.7.1).
+        base = {"connectivity": {"internet_ok": True},
+                "adapters": [{"name": "Wi-Fi", "state": "up"},
+                             {"name": "Radmin VPN", "state": "up"}]}
+        cur = {"internet_ok": True, "_adapters": None}
+        d = ng.diff_connectivity(base, cur)
+        self.assertFalse(d["net_cut"])
+        self.assertEqual(d["adapters_down"], [])
+
+    def test_adapter_churn_without_internet_loss_is_not_cut(self):
+        # Adapter down but internet still reachable => not a ransomware signal.
+        base = {"connectivity": {"internet_ok": True},
+                "adapters": [{"name": "Wi-Fi", "state": "up"}]}
+        cur = {"internet_ok": True,
+               "_adapters": [{"name": "Wi-Fi", "state": "disconnected"}]}
+        d = ng.diff_connectivity(base, cur)
+        self.assertFalse(d["net_cut"])
+        self.assertIn("Wi-Fi", d["adapters_down"])
 
 
 class TestBaselineDiff(unittest.TestCase):
@@ -123,16 +153,19 @@ class TestSaveBaselineRotation(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    def test_defaults(self):
+    def test_defaults_are_safe(self):
+        # SAFETY: auto-actions must be OFF by default (no auto freeze/kill/restore)
         c = ng.load_config(None)
         self.assertTrue(c["enabled"])
+        self.assertFalse(c["auto_contain"])
         self.assertFalse(c["auto_kill"])
-        self.assertTrue(c["auto_restore"])
+        self.assertFalse(c["auto_restore"])
+        self.assertTrue(c["require_strong_signal"])
 
     def test_override_from_client_config(self):
         c = ng.load_config({"protection": {"network_guard": {
-            "auto_kill": True, "score_threshold": 90, "bogus": 1}}})
-        self.assertTrue(c["auto_kill"])
+            "auto_contain": True, "score_threshold": 90, "bogus": 1}}})
+        self.assertTrue(c["auto_contain"])
         self.assertEqual(c["score_threshold"], 90)
         self.assertNotIn("bogus", c)
 
@@ -148,6 +181,7 @@ class TestStatus(unittest.TestCase):
         self.assertEqual(st["mapped_drives"], 1)
         self.assertTrue(st["internet_ok"])
         self.assertFalse(st["auto_kill"])
+        self.assertFalse(st["auto_contain"])
         self.assertEqual(st["suspended_processes"], 0)
 
 
@@ -171,34 +205,79 @@ class TestCommandWhitelist(unittest.TestCase):
 
 
 class TestTriggerFlow(unittest.TestCase):
-    def test_suspend_first_and_alert(self):
+    def _mk(self, cfg_over=None):
         sent = []
 
         class _Pipe:
             def send_urgent(self, a):
                 sent.append(a)
 
-        guard = ng.NetworkGuard(alert_pipeline=_Pipe(),
-                                config=ng.load_config(None))
-        suspects = [{"pid": 4242, "image": "invoice.exe",
-                     "path": "C:\\Users\\Public\\invoice.exe",
-                     "cmdline": "invoice.exe", "suspicious_origin": True}]
+        cfg = ng.load_config(None)
+        if cfg_over:
+            cfg.update(cfg_over)
+        return ng.NetworkGuard(alert_pipeline=_Pipe(), config=cfg), sent
+
+    def _suspects(self):
+        return [{"pid": 4242, "image": "invoice.exe",
+                 "path": "C:\\Users\\Public\\invoice.exe",
+                 "cmdline": "invoice.exe", "suspicious_origin": True}]
+
+    def test_default_is_alert_only_no_suspend(self):
+        # SAFETY regression: default config must NEVER freeze a process.
+        guard, sent = self._mk()
+        netdiff = {"internet_lost": True, "adapters_down": [], "net_cut": True}
+        with mock.patch.object(guard, "_suspend_pid", return_value=True) as sp, \
+             mock.patch.object(guard, "_emergency_vss", return_value=True) as vss:
+            guard._trigger("network_cut+fs_storm", 90, netdiff, self._suspects(),
+                           baseline={"adapters": []}, strong=False)
+        sp.assert_not_called()
+        vss.assert_not_called()
+        self.assertEqual(len(sent), 1)
+        alert = sent[0]
+        self.assertEqual(alert["threat_type"], "ransomware_offline_suspect")
+        self.assertEqual(alert["severity"], "warning")
+        self.assertEqual(alert["system_context"]["network_guard"]["suspects"][0]["state"],
+                         "observed")
+        self.assertEqual(alert["auto_response_taken"], ["alert_only"])
+
+    def test_auto_contain_requires_strong_signal(self):
+        # auto_contain enabled but no strong signal => still alert-only.
+        guard, sent = self._mk({"auto_contain": True})
+        netdiff = {"internet_lost": True, "adapters_down": [], "net_cut": True}
+        with mock.patch.object(guard, "_suspend_pid", return_value=True) as sp:
+            guard._trigger("network_cut+fs_storm", 90, netdiff, self._suspects(),
+                           baseline={"adapters": []}, strong=False)
+        sp.assert_not_called()
+        self.assertEqual(sent[0]["threat_type"], "ransomware_offline_suspect")
+
+    def test_contain_when_enabled_and_strong(self):
+        guard, sent = self._mk({"auto_contain": True, "auto_restore": True})
         netdiff = {"internet_lost": True, "adapters_down": ["Ethernet"],
                    "net_cut": True}
         with mock.patch.object(guard, "_suspend_pid", return_value=True) as sp, \
              mock.patch.object(guard, "_emergency_vss", return_value=True), \
              mock.patch.object(guard, "restore_network",
                                return_value={"restore_actions": ["adapter_enable:Ethernet"]}):
-            guard._trigger("network_cut+fs_storm", 90, netdiff, suspects,
-                           baseline={"adapters": []})
+            guard._trigger("network_cut+fs_storm", 90, netdiff, self._suspects(),
+                           baseline={"adapters": []}, strong=True)
         sp.assert_called_once_with(4242)
-        self.assertEqual(len(sent), 1)
         alert = sent[0]
         self.assertEqual(alert["threat_type"], "ransomware_offline_bomb")
+        self.assertEqual(alert["severity"], "critical")
         ngc = alert["system_context"]["network_guard"]
+        self.assertTrue(ngc["auto_contain"])
         self.assertTrue(ngc["network"]["restored"])
         self.assertEqual(ngc["suspects"][0]["state"], "suspended")
         self.assertTrue(ngc["vss_emergency_snapshot"])
+
+    def test_trigger_debounced(self):
+        guard, sent = self._mk()
+        netdiff = {"internet_lost": True, "adapters_down": [], "net_cut": True}
+        guard._trigger("fs_storm", 90, netdiff, self._suspects(),
+                       baseline={"adapters": []}, strong=False)
+        guard._trigger("fs_storm", 90, netdiff, self._suspects(),
+                       baseline={"adapters": []}, strong=False)
+        self.assertEqual(len(sent), 1)  # second call debounced within 60s
 
 
 if __name__ == "__main__":

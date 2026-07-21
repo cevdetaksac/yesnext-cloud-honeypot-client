@@ -86,11 +86,22 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "baseline_interval_sec": 1800,          # 30 min
     "detect_interval_sec": 4.0,
-    "fs_write_bytes_per_sec": 40 * 1024 * 1024,   # 40 MB/s sustained
-    "fs_write_count_per_sec": 150,          # 150 file writes/s
+    # Raw write-rate is only a WEAK supporting signal (browsers/editors/games
+    # legitimately write fast). Thresholds are high to avoid alarm noise; they
+    # never, on their own, contain a process.
+    "fs_write_bytes_per_sec": 150 * 1024 * 1024,  # 150 MB/s sustained
+    "fs_write_count_per_sec": 400,          # 400 file writes/s
     "score_threshold": 70,
-    "auto_restore": True,
-    "auto_kill": False,                     # default suspend-first
+    # SAFETY: automatic containment is OFF by default. NetworkGuard only raises
+    # an alert; the operator confirms suspend/kill/restore from the dashboard
+    # (contract: suspend-first + operator confirmation). Auto-actions caused
+    # catastrophic false positives (froze Chrome/Cursor/GameLoop) and are gated.
+    "auto_contain": False,                  # do NOT auto-suspend on detection
+    "auto_kill": False,                     # never auto-kill
+    "auto_restore": False,                  # do NOT auto-touch adapters/DNS
+    # Only these high-confidence signals may drive auto-containment when
+    # auto_contain is explicitly enabled by an operator.
+    "require_strong_signal": True,
 }
 
 
@@ -359,22 +370,33 @@ def score_signals(net_cut: bool, fs_storm: bool, suspicious_origin: bool,
 
 
 def diff_connectivity(baseline: Optional[dict], current: dict) -> dict:
-    """Return network-cut signal vs baseline."""
+    """Return network-cut signal vs baseline.
+
+    IMPORTANT: adapter-down is only evaluated when we actually have a fresh
+    current adapter list (`_adapters` is a non-None list). If the caller did not
+    collect adapters (None), we must NOT infer that every baseline adapter is
+    down — that produced catastrophic false positives that froze normal apps.
+    """
     base_conn = (baseline or {}).get("connectivity") or {}
     base_adapters = (baseline or {}).get("adapters") or []
     base_up = [a for a in base_adapters if str(a.get("state")).lower() == "up"]
     internet_lost = bool(base_conn.get("internet_ok")) and not current.get("internet_ok")
-    cur_adapters = current.get("_adapters") or []
-    adapters_down = []
-    if base_up and cur_adapters is not None:
+
+    adapters_down: List[str] = []
+    cur_adapters = current.get("_adapters")
+    # Only compute adapter-down when we have a real, non-empty current snapshot.
+    if base_up and isinstance(cur_adapters, list) and cur_adapters:
         cur_up_names = {a.get("name") for a in cur_adapters
                         if str(a.get("state")).lower() == "up"}
         adapters_down = [a.get("name") for a in base_up
                          if a.get("name") not in cur_up_names]
+
+    # Net-cut requires losing actual internet reachability. Adapter churn alone
+    # (VPN toggling, Wi-Fi roaming) is NOT a ransomware signal on its own.
     return {
         "internet_lost": internet_lost,
         "adapters_down": adapters_down,
-        "net_cut": bool(internet_lost or adapters_down),
+        "net_cut": bool(internet_lost),
     }
 
 
@@ -442,6 +464,8 @@ class NetworkGuard:
     def _evaluate(self, interval: float):
         baseline = self._last_baseline or load_baseline()
         conn = check_connectivity()
+        # Only bother enumerating adapters when internet reachability actually
+        # dropped — and even then adapter churn is informational, not a trigger.
         conn["_adapters"] = collect_adapters() if self._maybe_net_change(baseline, conn) else None
         netdiff = diff_connectivity(baseline, conn)
 
@@ -459,7 +483,24 @@ class NetworkGuard:
                 t for t, on in (("network_cut", netdiff["net_cut"]),
                                 ("fs_storm", fs_storm)) if on
             ) or "fs_storm"
-            self._trigger(trigger, score, netdiff, storm_suspects, baseline)
+            # net_cut + fs_storm are corroborating-but-weak signals: a real
+            # encryptor also renames en masse / changes extensions / drops
+            # ransom notes. Without such a strong signal we treat this as
+            # suspicious and ALERT only — we never freeze processes on it.
+            strong = self._has_strong_signal()
+            self._trigger(trigger, score, netdiff, storm_suspects, baseline,
+                          strong=strong)
+
+    def _has_strong_signal(self) -> bool:
+        """High-confidence ransomware proof from the shield (canary / VSS)."""
+        rs = self.ransomware_shield
+        if rs is None:
+            return False
+        try:
+            q = rs.get_quarantine() if hasattr(rs, "get_quarantine") else {}
+            return bool(q.get("active"))
+        except Exception:
+            return False
 
     def _maybe_net_change(self, baseline, conn) -> bool:
         base_conn = (baseline or {}).get("connectivity") or {}
@@ -507,37 +548,47 @@ class NetworkGuard:
     # -- C: containment (suspend-first) --
 
     def _trigger(self, trigger: str, score: int, netdiff: dict,
-                 suspects: List[dict], baseline: Optional[dict]):
+                 suspects: List[dict], baseline: Optional[dict],
+                 strong: bool = False):
+        # Debounce identical triggers (avoid alarm floods on sustained I/O).
+        now = time.time()
+        if now - getattr(self, "_last_trigger_mono", 0) < 60:
+            return
+        self._last_trigger_mono = now
         self._last_trigger_ts = datetime.now(timezone.utc).isoformat()
-        log(f"[NET-GUARD] TRIGGER {trigger} score={score} suspects={len(suspects)}")
+
+        auto_contain = bool(self.cfg.get("auto_contain", False)) and (
+            strong or not self.cfg.get("require_strong_signal", True)
+        )
+        log(f"[NET-GUARD] {'CONTAIN' if auto_contain else 'ALERT-ONLY'} "
+            f"{trigger} score={score} suspects={len(suspects)} strong={strong}")
 
         suspended = []
-        for s in suspects:
-            if self._suspend_pid(s["pid"]):
-                s["state"] = "suspended"
-                with self._lock:
-                    self._suspended[s["pid"]] = s
-                suspended.append(s)
-            elif self.cfg.get("auto_kill"):
-                self._kill_pid(s["pid"])
-                s["state"] = "killed"
-                suspended.append(s)
+        if auto_contain:
+            for s in suspects:
+                if self._suspend_pid(s["pid"]):
+                    s["state"] = "suspended"
+                    with self._lock:
+                        self._suspended[s["pid"]] = s
+                    suspended.append(s)
+                elif self.cfg.get("auto_kill"):
+                    self._kill_pid(s["pid"])
+                    s["state"] = "killed"
+                    suspended.append(s)
+        else:
+            # Alert-only: mark suspects as observed, take no destructive action.
+            for s in suspects:
+                s["state"] = "observed"
 
-        # Register suspects into ransomware quarantine (best-effort)
-        try:
-            if self.ransomware_shield and hasattr(self.ransomware_shield, "_contain_after_hit"):
-                self.ransomware_shield._contain_after_hit(
-                    trigger=f"network_guard:{trigger}", focus_path="")
-        except Exception:
-            pass
-
-        vss_ok = self._emergency_vss()
-
+        vss_ok = False
         restored = {}
-        if self.cfg.get("auto_restore", True) and netdiff.get("net_cut"):
-            restored = self.restore_network(baseline)
+        if auto_contain:
+            vss_ok = self._emergency_vss()
+            if self.cfg.get("auto_restore", False) and netdiff.get("net_cut"):
+                restored = self.restore_network(baseline)
 
-        self._send_alert(trigger, score, netdiff, suspended, vss_ok, restored)
+        self._send_alert(trigger, score, netdiff, suspects if not auto_contain
+                         else suspended, vss_ok, restored, auto_contain)
 
     def _suspend_pid(self, pid: int) -> bool:
         if psutil is None:
@@ -631,12 +682,14 @@ class NetworkGuard:
 
     # -- E: alert --
 
-    def _send_alert(self, trigger, score, netdiff, suspects, vss_ok, restored):
+    def _send_alert(self, trigger, score, netdiff, suspects, vss_ok, restored,
+                    auto_contain=False):
         if not self.alert_pipeline or not hasattr(self.alert_pipeline, "send_urgent"):
             return
         ng = {
             "trigger": trigger,
             "score": score,
+            "auto_contain": bool(auto_contain),
             "network": {
                 "internet_lost": netdiff.get("internet_lost"),
                 "adapters_down": netdiff.get("adapters_down") or [],
@@ -652,29 +705,47 @@ class NetworkGuard:
             "vss_emergency_snapshot": bool(vss_ok),
             "ts": self._last_trigger_ts,
         }
+        # Alert-only detections are "suspicious", not confirmed critical —
+        # avoid crying wolf (and avoid isolate_host recommendations) unless we
+        # actually contained something on strong evidence.
+        if auto_contain:
+            threat_type = "ransomware_offline_bomb"
+            severity = "critical"
+            title = "🔴 OFFLINE FİDYE BOMBASI — kütle şifreleme (containment)"
+            desc = (f"Yüksek güvenli fidye imzası (trigger={trigger}, skor={score}). "
+                    f"{len(suspects)} süreç donduruldu; "
+                    f"ağ {'geri yüklendi' if ng['network']['restored'] else 'incelendi'}.")
+            action = "isolate_host"
+            resp = (["suspend", "emergency_vss"]
+                    + (["network_restore"] if ng["network"]["restored"] else []))
+        else:
+            threat_type = "ransomware_offline_suspect"
+            severity = "warning"
+            title = "🟠 Şüpheli yoğun disk aktivitesi (inceleme)"
+            desc = (f"Yoğun yazma/ağ sinyali gözlendi (trigger={trigger}, skor={score}). "
+                    f"{len(suspects)} süreç işaretlendi — otomatik müdahale YAPILMADI. "
+                    f"Dashboard'dan inceleyip gerekirse suspend/kill onaylayın.")
+            action = "review_suspects"
+            resp = ["alert_only"]
         try:
             self.alert_pipeline.send_urgent({
-                "severity": "critical",
-                "threat_type": "ransomware_offline_bomb",
-                "title": "🔴 OFFLINE FİDYE BOMBASI — ağ kesildi + kütle şifreleme",
-                "description": (
-                    f"Şüpheli offline şifreleme tespit edildi (trigger={trigger}, "
-                    f"skor={score}). {len(suspects)} süreç donduruldu; "
-                    f"ağ {'geri yüklendi' if ng['network']['restored'] else 'incelendi'}."
-                ),
+                "severity": severity,
+                "threat_type": threat_type,
+                "title": title,
+                "description": desc,
                 "threat_score": score,
                 "target_service": "SYSTEM",
-                "recommended_action": "isolate_host",
+                "recommended_action": action,
                 "system_context": {"network_guard": ng},
                 "raw_events": [{
                     "kind": "network_guard",
                     "trigger": trigger,
+                    "auto_contain": bool(auto_contain),
                     "suspect_pid": (suspects[0]["pid"] if suspects else None),
                     "image": (suspects[0]["image"] if suspects else None),
                     "state": (suspects[0].get("state") if suspects else None),
                 }],
-                "auto_response_taken": ["suspend", "emergency_vss"]
-                + (["network_restore"] if ng["network"]["restored"] else []),
+                "auto_response_taken": resp,
             })
         except Exception as e:
             log(f"[NET-GUARD] send_urgent failed: {e}")
@@ -701,7 +772,8 @@ class NetworkGuard:
             "mapped_drives": len(base.get("mapped_drives") or []),
             "suspended_processes": suspended,
             "last_trigger_ts": self._last_trigger_ts,
-            "auto_restore": bool(self.cfg.get("auto_restore", True)),
+            "auto_contain": bool(self.cfg.get("auto_contain", False)),
+            "auto_restore": bool(self.cfg.get("auto_restore", False)),
             "auto_kill": bool(self.cfg.get("auto_kill", False)),
         }
 

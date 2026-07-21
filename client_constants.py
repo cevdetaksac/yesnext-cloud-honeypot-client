@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.1"  # Network Guard hotfix: OEM/locale-safe subprocess decode (adapters were empty)
+VERSION = "4.7.2"  # Network Guard SAFETY: alert-only by default, net_cut FP fix (froze normal apps)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

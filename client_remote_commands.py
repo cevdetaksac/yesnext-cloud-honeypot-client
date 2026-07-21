@@ -86,6 +86,8 @@ ALLOWED_COMMANDS: Set[str] = {
     "remote_send_sas",
     "remote_session_prepare", "remote_session_logoff",
     "self_update", "check_update",
+    # Disaster recovery (contract ≥4.6.0 — agent/disaster-recovery.md)
+    "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
 }
 
 # High-frequency IR commands — skip global cmd/min rate limit
@@ -108,6 +110,8 @@ _IR_URGENT_COMMANDS = frozenset({
     "clear_firewall",
     "self_update", "check_update",  # dashboard update — same urgency as IR
     "remote_session_prepare", "list_local_users",
+    # Disaster recovery — must reach a compromised host instantly
+    "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
@@ -133,6 +137,8 @@ PROTECTED_SERVICES: Set[str] = {
 REQUIRES_CONFIRMATION: Set[str] = {
     "emergency_lockdown", "reset_password", "disable_account",
     "disable_all_users", "contain_user",
+    # Disaster recovery (destructive / reboot) — server confirm + HMAC
+    "create_user", "remote_logon", "set_autologon", "reboot",
 }
 
 # Hard-skip only (AGENT_DISABLE_ALL_USERS_PROMPT) — Administrator is NOT here
@@ -235,6 +241,67 @@ class RemoteCommandExecutor:
             self._control_ws = None
         log(f"[REMOTE-CMD] Remote command executor started "
             f"(poll={POLL_INTERVAL}s, IR={IR_POLL_INTERVAL}s, control_ws=on)")
+        # Break-glass: resume a pending autologon after reboot (contract ≥4.6.0)
+        threading.Thread(
+            target=self._resume_pending_autologon,
+            name="RemoteCommands-AutologonResume",
+            daemon=True,
+        ).start()
+
+    def _resume_pending_autologon(self) -> None:
+        """After reboot: if an autologon was armed, wait for the console session,
+        clear autologon artifacts (defense beyond AutoLogonCount=1), and report
+        completion for the originating remote_logon command."""
+        try:
+            from client_autologon import (
+                read_pending_marker, clear_autologon, clear_pending_marker,
+            )
+            marker = read_pending_marker()
+            if not marker:
+                return
+            username = str(marker.get("username") or "")
+            command_id = str(marker.get("command_id") or "")
+            log(f"[AUTOLOGON] pending marker found user={username} cmd={command_id}")
+
+            from client_remote_session import enumerate_sessions_rich
+            deadline = time.time() + 180
+            session_id = None
+            while time.time() < deadline and self._running:
+                try:
+                    for s in enumerate_sessions_rich():
+                        if (str(s.get("username") or "").lower() == username.lower()
+                                and int(s.get("session_id") or 0) > 0
+                                and str(s.get("status") or "").lower() == "active"):
+                            session_id = int(s.get("session_id"))
+                            break
+                except Exception:
+                    pass
+                if session_id is not None:
+                    break
+                time.sleep(3.0)
+
+            # Always clear autologon artifacts once we're done waiting
+            clear_autologon()
+            clear_pending_marker()
+
+            ready = session_id is not None
+            log(f"[AUTOLOGON] resume done ready={ready} session_id={session_id}")
+            if command_id:
+                fake_cmd = {"command_id": command_id, "command_type": "remote_logon"}
+                self._report_result_sync(fake_cmd, {
+                    "success": ready,
+                    "ok": ready,
+                    "status": "completed" if ready else "failed",
+                    "username": username,
+                    "error": None if ready else "LOGON_TIMEOUT",
+                    "data": {
+                        "method": "autologon_reboot",
+                        "ready_for_stream": ready,
+                        "session_id": session_id,
+                    },
+                })
+        except Exception as e:
+            log(f"[AUTOLOGON] resume error: {e}")
 
     def _on_threat_intel_updated(self, data: dict) -> None:
         """Control WS push → sync threat-intel bundle immediately (contract 09)."""
@@ -738,6 +805,23 @@ class RemoteCommandExecutor:
                 return "missing_password"
             if len(str(new_pass)) < 8:
                 return "password_too_short"
+
+        # Disaster recovery: create_user / remote_logon / set_autologon need creds
+        if cmd_type in ("create_user", "remote_logon", "set_autologon"):
+            username = self._sam_account_name(params.get("username", ""))
+            if not username:
+                return "missing_username"
+            if self._account_key(username) in {
+                self._account_key(x) for x in PROTECTED_ACCOUNTS
+            }:
+                return f"Protected account: {username}"
+            pwd = params.get("password")
+            # set_autologon may reuse an existing session's stored creds → password optional
+            if cmd_type in ("create_user", "remote_logon"):
+                if pwd is None or str(pwd).strip() == "":
+                    return "missing_password"
+                if len(str(pwd)) < 1:
+                    return "password_too_short"
 
         if cmd_type == "logoff_user":
             sid = params.get("session_id")
@@ -1558,6 +1642,280 @@ class RemoteCommandExecutor:
             "error": err or "net user password reset failed",
             "username": username,
         }
+
+    # ── Disaster recovery (contract ≥4.6.0 — agent/disaster-recovery.md) ──
+
+    def _cmd_create_user(self, params: dict) -> dict:
+        """Create (or reset+enable) a local user for break-glass recovery.
+
+        params: username, password (one-shot), groups[], enable,
+                comment, password_never_expires, if_exists("fail"|"reset_enable")
+        Password never logged/persisted; history redacts it.
+        """
+        username = self._sam_account_name(params.get("username", ""))
+        if not username:
+            return {"success": False, "ok": False, "error": "missing_username"}
+        password = params.get("password")
+        if password is None or str(password).strip() == "":
+            return {"success": False, "ok": False, "error": "missing_password", "username": username}
+        password = str(password)
+
+        groups = params.get("groups") or ["Users"]
+        if isinstance(groups, str):
+            groups = [groups]
+        enable = params.get("enable", True)
+        comment = str(params.get("comment") or "")
+        pw_never = bool(params.get("password_never_expires", False))
+        if_exists = str(params.get("if_exists") or "fail").lower()
+
+        try:
+            existed = self._local_user_exists(username)
+            if existed and if_exists != "reset_enable":
+                return {
+                    "success": False, "ok": False, "username": username,
+                    "error": "user_exists", "message": f"{username} already exists",
+                }
+
+            if existed:
+                # reset password + re-enable existing account
+                r = subprocess.run(
+                    ["net", "user", username, password],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if r.returncode != 0:
+                    return {"success": False, "ok": False, "username": username,
+                            "error": (r.stderr or r.stdout or "net user reset failed").strip()}
+            else:
+                add_cmd = ["net", "user", username, password, "/add"]
+                if comment:
+                    add_cmd += [f"/comment:{comment}"]
+                r = subprocess.run(
+                    add_cmd, capture_output=True, text=True, timeout=15,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if r.returncode != 0:
+                    return {"success": False, "ok": False, "username": username,
+                            "error": (r.stderr or r.stdout or "net user /add failed").strip()}
+
+            # enable (/active:yes) or disable per param
+            subprocess.run(
+                ["net", "user", username, "/active:yes" if enable else "/active:no"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+            )
+            if pw_never:
+                self._set_password_never_expires(username)
+
+            added_groups = []
+            for g in groups:
+                g = str(g).strip()
+                if not g:
+                    continue
+                gr = subprocess.run(
+                    ["net", "localgroup", g, username, "/add"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                # rc==2 usually "already a member" — treat as ok
+                if gr.returncode == 0 or "1378" in (gr.stderr or "") or "already a member" in (gr.stderr or "").lower():
+                    added_groups.append(g)
+
+            sid = self._resolve_sid(username)
+            log(f"[REMOTE-CMD] create_user {username} groups={added_groups} created={not existed}")
+            # informational audit to cloud (non-blocking)
+            self._recovery_audit("account_created_by_agent", {
+                "username": username, "groups": added_groups,
+                "created": not existed, "enabled": bool(enable),
+            })
+            return {
+                "success": True, "ok": True,
+                "data": {
+                    "username": username, "sid": sid, "groups": added_groups,
+                    "created": not existed, "enabled": bool(enable),
+                },
+                "message": f"{'reset' if existed else 'created'} {username}",
+            }
+        except Exception as e:
+            return {"success": False, "ok": False, "username": username, "error": str(e)}
+
+    def _cmd_remote_logon(self, params: dict) -> dict:
+        """Logon a user for remote desktop: reconnect existing session, else
+        autologon (AutoLogonCount=1) + reboot break-glass.
+
+        params: username, password (one-shot), domain, mode
+                ("auto"|"reconnect_only"|"autologon_reboot"), reboot, timeout_sec
+        """
+        from client_remote_session import (
+            prepare_remote_session, validate_windows_credentials,
+            enumerate_sessions_rich,
+        )
+        username = self._sam_account_name(params.get("username", ""))
+        password = str(params.get("password") or "")
+        domain = str(params.get("domain") or ".")
+        mode = str(params.get("mode") or "auto").lower()
+        want_reboot = params.get("reboot", True)
+        try:
+            timeout_sec = float(params.get("timeout_sec") or 120)
+        except (TypeError, ValueError):
+            timeout_sec = 120.0
+
+        if not username or not password:
+            return {"success": False, "ok": False, "error": "missing_credentials"}
+
+        try:
+            # 1) credential gate
+            ok, err_code, winerr = validate_windows_credentials(username, password, unlock=False)
+            if not ok:
+                ok2, err2, winerr2 = validate_windows_credentials(username, password, unlock=True)
+                if not ok2:
+                    return {"success": False, "ok": False, "username": username,
+                            "error": err_code or err2 or "AUTH_FAILED",
+                            "message": f"LogonUser failed (winerr={winerr or winerr2})"}
+
+            # 2) existing interactive session → reconnect (no reboot)
+            sessions = enumerate_sessions_rich()
+            has_session = any(
+                str(s.get("username") or "").lower() == username.lower()
+                and int(s.get("session_id") or 0) > 0
+                for s in sessions
+            )
+            if has_session or mode == "reconnect_only":
+                prep = prepare_remote_session(
+                    username=username, password=password,
+                    prefer="existing", timeout_sec=min(timeout_sec, 90),
+                )
+                if prep.get("success") or mode == "reconnect_only":
+                    prep.setdefault("data", {})["method"] = prep.get("data", {}).get("method", "reconnect")
+                    return prep
+                # else fall through to autologon if mode=auto
+
+            if mode not in ("auto", "autologon_reboot"):
+                return {"success": False, "ok": False, "username": username,
+                        "error": "UNSUPPORTED",
+                        "message": "No interactive session; reconnect_only cannot create one"}
+
+            # 3) autologon + reboot break-glass
+            from client_autologon import arm_autologon, write_pending_marker
+            cmd = getattr(self, "_current_cmd", None) or {}
+            command_id = str(cmd.get("command_id") or cmd.get("id") or "")
+            armed = arm_autologon(username=username, password=password, domain=domain, count=1)
+            if not armed.get("ok"):
+                return {"success": False, "ok": False, "username": username,
+                        "error": armed.get("error") or "autologon_arm_failed"}
+            write_pending_marker(username=username, command_id=command_id)
+
+            if not want_reboot:
+                return {"success": True, "ok": True, "username": username,
+                        "status": "running",
+                        "data": {"method": "autologon_armed", "phase": "await_reboot",
+                                 "ready_for_stream": False}}
+
+            # report intermediate 'running' before reboot (best-effort)
+            if command_id:
+                try:
+                    self._report_result_sync(cmd, {
+                        "success": True, "ok": True, "status": "running",
+                        "message": "rebooting for autologon",
+                        "data": {"username": username, "phase": "rebooting", "method": "autologon_reboot"},
+                    })
+                except Exception:
+                    pass
+            self._schedule_reboot(grace_sec=20, reason="remote_logon autologon break-glass")
+            return {"success": True, "ok": True, "username": username,
+                    "status": "running",
+                    "data": {"method": "autologon_reboot", "phase": "rebooting",
+                             "ready_for_stream": False}}
+        except Exception as e:
+            return {"success": False, "ok": False, "username": username, "error": str(e)}
+
+    def _cmd_set_autologon(self, params: dict) -> dict:
+        from client_autologon import arm_autologon
+        username = self._sam_account_name(params.get("username", ""))
+        password = str(params.get("password") or "")
+        domain = str(params.get("domain") or ".")
+        try:
+            count = int(params.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        if not username:
+            return {"success": False, "ok": False, "error": "missing_username"}
+        res = arm_autologon(username=username, password=password, domain=domain, count=count)
+        return {"success": bool(res.get("ok")), "ok": bool(res.get("ok")),
+                "username": username, "error": res.get("error"),
+                "data": {"count": count}}
+
+    def _cmd_clear_autologon(self, params: dict) -> dict:
+        from client_autologon import clear_autologon
+        res = clear_autologon()
+        return {"success": bool(res.get("ok")), "ok": bool(res.get("ok")),
+                "error": res.get("error"), "message": "autologon cleared"}
+
+    def _cmd_reboot(self, params: dict) -> dict:
+        try:
+            grace = int(params.get("grace_sec") or 30)
+        except (TypeError, ValueError):
+            grace = 30
+        reason = str(params.get("reason") or "dashboard reboot")
+        self._schedule_reboot(grace_sec=grace, reason=reason)
+        return {"success": True, "ok": True, "message": f"reboot scheduled in {grace}s",
+                "data": {"grace_sec": grace, "reason": reason}}
+
+    @staticmethod
+    def _schedule_reboot(grace_sec: int = 30, reason: str = "") -> None:
+        subprocess.run(
+            ["shutdown", "/r", "/t", str(max(0, int(grace_sec))), "/c", (reason or "")[:120]],
+            capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+        )
+
+    @staticmethod
+    def _local_user_exists(username: str) -> bool:
+        r = subprocess.run(
+            ["net", "user", username],
+            capture_output=True, text=True, timeout=8, creationflags=CREATE_NO_WINDOW,
+        )
+        return r.returncode == 0
+
+    @staticmethod
+    def _set_password_never_expires(username: str) -> None:
+        try:
+            subprocess.run(
+                ["wmic", "useraccount", "where", f"name='{username}'", "set", "PasswordExpires=false"],
+                capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resolve_sid(username: str) -> str:
+        try:
+            import win32security
+            sid, _, _ = win32security.LookupAccountName(None, username)
+            return win32security.ConvertSidToStringSid(sid)
+        except Exception:
+            return ""
+
+    def _recovery_audit(self, event: str, data: dict) -> None:
+        """Best-effort informational alert for recovery actions (non-blocking)."""
+        try:
+            ap = (
+                getattr(self, "alert_pipeline", None)
+                or getattr(self, "_alert_pipeline", None)
+                or getattr(getattr(self, "ransomware_shield", None), "alert_pipeline", None)
+            )
+            if ap and hasattr(ap, "send_urgent"):
+                threading.Thread(
+                    target=lambda: ap.send_urgent({
+                        "severity": "warning",
+                        "threat_type": event,
+                        "title": f"Recovery action: {event}",
+                        "description": str(data)[:200],
+                        "threat_score": 0,
+                        "suppress_local_notify": True,
+                    }),
+                    daemon=True,
+                ).start()
+        except Exception:
+            pass
 
     @staticmethod
     def _sam_account_name(username: str) -> str:

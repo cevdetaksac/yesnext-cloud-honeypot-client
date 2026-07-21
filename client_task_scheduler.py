@@ -461,6 +461,14 @@ def install_all_tasks(include_silent_updater: bool = False) -> bool:
                 continue
             xml = create_task_xml(name)
             success &= install_task(name, xml)
+        try:
+            from client_guardian_service import install_guardian_service
+            if install_guardian_service(CLIENT_EXE):
+                print("[OK] CloudHoneypotGuardian service installed")
+            else:
+                print("[WARN] Guardian service install failed (non-fatal)")
+        except Exception as ge:
+            print(f"[WARN] Guardian service: {ge}")
         return success
     except Exception as e:
         print(f"[X] install_all_tasks error: {e}")

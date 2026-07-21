@@ -8,7 +8,7 @@ c:\honeypot-cloud\honeypot-contract
 
 (relative from `cloud-client/`: `../honeypot-contract`)
 
-Remote: https://github.com/cevdetaksac/honeypot-contract · tag ≥ **v1.1.6**
+Remote: https://github.com/cevdetaksac/honeypot-contract · tag ≥ **v1.2.0** · fleet hedef **4.6.0**
 
 `docs/api/*` ve `docs/CLIENT.md` stub’dır — SoT yalnızca contract.
 

@@ -1,3 +1,11 @@
+# v4.6.0
+- Contract 1.2.0 — survival + disaster recovery:
+  - **Guardian:** `CloudHoneypotGuardian` Windows servisi (SCM restart-on-failure) + motor çapraz watchdog
+  - **Tamper:** beklenmedik motor çıkışı → `agent_tamper` urgent; dead-man `motor_heartbeat.json`; STATUS/health `persistence{}`
+  - **PIN stop:** imzalı `operator_stop.json` — motor yalnız update-lock veya PIN ile durur; tray Exit → motor QUIT
+  - **Recovery:** `create_user`, `remote_logon` (reconnect / autologon+reboot), `set_autologon`/`clear_autologon`/`reboot`
+  - Autologon: LSA secret + `AutoLogonCount=1`; boot sonrası temizlik + `remote_logon` completion
+
 # v4.5.68
 - Hotfix: canary urgent tek zengin yol — ince `handle_alert` yarışı kalktı.
 - `system_context.ransomware` / `raw_events` / `target_service=SYSTEM` her canary urgent'ta zorunlu.

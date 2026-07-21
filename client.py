@@ -105,6 +105,8 @@ def get_operation_mode(args) -> str:
     """Determine operation mode from arguments."""
     if getattr(args, 'mode', None) == "daemon" or getattr(args, 'daemon', False):
         return DAEMON_MODE
+    elif getattr(args, 'mode', None) == "guardian":
+        return "guardian"
     elif getattr(args, 'mode', None) == "watchdog" or getattr(args, 'watchdog', False):
         return "watchdog"
     else:
@@ -1333,7 +1335,15 @@ class CloudHoneypotClient:
             "remote_commands_running": rc_running,
             "motor_ok": bool(is_motor and rc_running),
             "rs_quarantine": self._ipc_rs_quarantine_summary(),
+            "persistence": self._ipc_persistence_summary(),
         }
+
+    def _ipc_persistence_summary(self) -> dict:
+        try:
+            from client_tamper import get_persistence_status
+            return get_persistence_status()
+        except Exception:
+            return {}
 
     def _ipc_rs_quarantine_summary(self) -> dict:
         rs = getattr(self, "ransomware_shield", None)
@@ -1548,12 +1558,27 @@ class CloudHoneypotClient:
                         _send("BUSY")
                         continue
 
-                    # Frontend must never kill the SYSTEM motor via accidental QUIT
-                    # from a second user's launcher — only honor when updating or explicit.
+                    # Motor (≥4.6.0): honour QUIT only with update-lock or signed PIN stop
                     if getattr(self, "_is_daemon_motor", False) and not updating:
-                        # Still allow installer/updater (they set update lock) and
-                        # explicit INSTALLER_QUIT handled below.
-                        pass
+                        try:
+                            from client_operator_stop import is_operator_stop_active
+                            allowed = is_operator_stop_active()
+                        except Exception:
+                            allowed = False
+                        if not allowed:
+                            log("[CTRL] QUIT rejected — no operator_stop token (tamper)")
+                            try:
+                                from client_tamper import report_tamper
+                                report_tamper(
+                                    reason="terminate_attempt",
+                                    leg="daemon",
+                                    resurrected=False,
+                                    resurrect_ms=0,
+                                )
+                            except Exception:
+                                pass
+                            _send("DENIED")
+                            continue
 
                     self._quit_protect_until = 0.0
                     try:
@@ -2420,6 +2445,13 @@ class CloudHoneypotClient:
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
             self._quit_protect_until = 0.0
+            if getattr(self, "_is_daemon_motor", False):
+                try:
+                    from client_tamper import mark_graceful_motor_shutdown, stop_deadman_beacon
+                    mark_graceful_motor_shutdown()
+                    stop_deadman_beacon()
+                except Exception:
+                    pass
             try:
                 from client_self_protection import disarm_for_update
                 disarm_for_update(reason="graceful_exit")
@@ -2666,6 +2698,33 @@ class CloudHoneypotClient:
         self.frontend_only = False
         self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
+
+        try:
+            from client_tamper import (
+                start_motor_session,
+                check_previous_session_on_boot,
+                start_deadman_beacon,
+            )
+            start_motor_session(os.getpid(), str(getattr(self, "version", "") or ""))
+            check_previous_session_on_boot()
+            start_deadman_beacon(60.0)
+        except Exception as e:
+            log(f"[MOTOR] tamper/session init: {e}")
+
+        def _guardian_cross_watch():
+            while True:
+                try:
+                    from client_operator_stop import is_operator_stop_active
+                    if is_operator_stop_active():
+                        time.sleep(30)
+                        continue
+                    from client_guardian_service import ensure_guardian_service_running
+                    ensure_guardian_service_running()
+                except Exception:
+                    pass
+                time.sleep(30)
+
+        threading.Thread(target=_guardian_cross_watch, name="GuardianEnsure", daemon=True).start()
 
         # Always construct command poller before IPC (STATUS must report motor_ok)
         try:
@@ -3039,7 +3098,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=True, description="Cloud Honeypot Client - Advanced Honeypot Management System")
     
     # Simplified mode system
-    parser.add_argument("--mode", choices=["daemon", "tray", "watchdog", "gui", "frontend"], help="Operation mode: daemon (SYSTEM motor), tray/gui/frontend (UI), watchdog. Default is GUI mode.")
+    parser.add_argument("--mode", choices=["daemon", "tray", "watchdog", "gui", "frontend", "guardian"], help="Operation mode: daemon (SYSTEM motor), guardian (watchdog service), tray/gui/frontend (UI), watchdog. Default is GUI mode.")
     parser.add_argument("--minimized", action="store_true", help="Start GUI minimized to tray")
     parser.add_argument("--daemon", action="store_true", help="Run as a daemon service")
     parser.add_argument("--silent", action="store_true", help="Silent mode - no user dialogs")
@@ -3511,6 +3570,17 @@ if __name__ == "__main__":
             sys.exit(1)  # Exit code 1 = Unhandled exception
         sys.exit(0)
     
+    elif operation_mode == "guardian":
+        try:
+            log("=== GUARDIAN MODE STARTUP ===")
+            setup_logging()
+            from client_guardian_service import run_guardian_mode
+            run_guardian_mode()
+        except Exception as e:
+            log(f"GUARDIAN CRITICAL ERROR: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
     elif operation_mode == "watchdog":
         # ===== WATCHDOG MODE — every 2 min process check / restart =====
         try:

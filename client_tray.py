@@ -360,7 +360,20 @@ class TrayManager:
         except Exception as e:
             log(f"[EXIT] Heartbeat cleanup error: {e}")
             
-        # Watchdog'u durdur
+        # Watchdog'u durdur + imzalı operator stop (motor da QUIT ile kapanır)
+        try:
+            from client_operator_stop import arm_operator_stop
+            from client_daemon_ipc import request as ipc_request
+            if arm_operator_stop():
+                log("[EXIT] operator_stop armed (signed PIN token)")
+                try:
+                    ipc_request("QUIT", timeout=8.0)
+                except Exception as e:
+                    log(f"[EXIT] motor QUIT IPC: {e}")
+            else:
+                log("[EXIT] operator_stop arm failed — motor may stay up")
+        except Exception as e:
+            log(f"[EXIT] operator_stop error: {e}")
         try:
             from client_utils import write_watchdog_token
             from client_constants import WATCHDOG_TOKEN_FILE

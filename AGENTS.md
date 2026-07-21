@@ -9,4 +9,4 @@ Before changing API/agent behavior, follow **honeypot-contract** (SoT):
 
 Cursor rule: `.cursor/rules/honeypot-contract.mdc`  
 Pointer: `contract/README.md`
-Remote: https://github.com/cevdetaksac/honeypot-contract (≥ **v1.1.6**)
+Remote: https://github.com/cevdetaksac/honeypot-contract (≥ **v1.2.0**)

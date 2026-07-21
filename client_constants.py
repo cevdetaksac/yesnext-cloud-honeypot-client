@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.68"  # Hotfix: single enriched canary urgent path (no thin race)
+VERSION = "4.6.0"  # Survival: Guardian service, tamper wire, create_user, remote_logon break-glass
 
 
 CLIENT_VERSION = VERSION  # Main version constant

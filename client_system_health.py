@@ -1190,6 +1190,11 @@ class SystemHealthMonitor:
                 "client_memory_mb": self_memory_mb,
             },
         }
+        try:
+            from client_tamper import get_persistence_status
+            payload["snapshot"]["persistence"] = get_persistence_status()
+        except Exception:
+            pass
 
         runtime = self._build_agent_runtime()
         if runtime:

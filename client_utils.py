@@ -1787,6 +1787,12 @@ def prepare_client_for_installer(*, kill_processes: bool = True) -> None:
     if not kill_processes:
         return
 
+    try:
+        from client_guardian_service import uninstall_guardian_service
+        uninstall_guardian_service()
+    except Exception:
+        pass
+
     # Graceful QUIT via control socket (process exits itself → DACL bypass)
     try:
         with socket.create_connection(("127.0.0.1", 58632), timeout=0.8) as sock:

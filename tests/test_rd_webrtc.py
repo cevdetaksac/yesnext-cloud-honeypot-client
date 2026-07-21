@@ -191,6 +191,40 @@ class TestSignalingValidation(unittest.TestCase):
             self.assertFalse(result["accepted"])
 
 
+class TestReofferFailure(unittest.TestCase):
+    def test_failed_reoffer_sends_immediate_reject(self):
+        sent = []
+        fallback = []
+        transport = AiortcMediaTransport.__new__(AiortcMediaTransport)
+        transport._offer_lock = None
+        transport._state_lock = threading.Lock()
+        transport._error = ""
+        transport.active = False
+        transport._signal_sender = sent.append
+        transport._fallback_handler = fallback.append
+
+        async def fail_create(*_args, **_kwargs):
+            raise RuntimeError("sensitive setup detail")
+
+        async def close():
+            return None
+
+        transport._create_peer = fail_create
+        transport._close_pc = close
+        result = asyncio.run(transport._handle_signal_async({
+            "action": "offer",
+            "session_id": "peer-new",
+            "stream_id": "stream-new",
+            "sdp": "offer",
+        }))
+        self.assertFalse(result["accepted"])
+        self.assertEqual(sent[-1]["action"], "webrtc_reject")
+        self.assertEqual(sent[-1]["session_id"], "peer-new")
+        self.assertEqual(sent[-1]["stream_id"], "stream-new")
+        self.assertEqual(sent[-1]["reason"], "peer_setup_failed")
+        self.assertNotIn("sensitive", str(sent))
+
+
 class TestFallbackAndMailbox(unittest.TestCase):
     def test_webrtc_active_then_automatic_jpeg_fallback(self):
         media = FakeMedia(available=True, active=True, codecs=["h264"])

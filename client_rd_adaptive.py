@@ -56,7 +56,7 @@ class AdaptiveStreamController:
     @staticmethod
     def _clamp_requested(fps, quality, max_width) -> dict:
         return {
-            "fps": max(1.0, min(float(fps), 10.0)),
+            "fps": max(1.0, min(float(fps), 30.0)),
             "quality": max(20, min(int(quality), 85)),
             "max_width": max(640, min(int(max_width), 1920)),
         }

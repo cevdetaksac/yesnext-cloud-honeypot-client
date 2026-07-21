@@ -91,6 +91,16 @@ def _make(running=True, api=None):
 
 
 class TestTransportSelection(unittest.TestCase):
+    def test_requested_jpeg_fps_is_not_clamped_to_ten(self):
+        rd = _make()
+        rd._requested_fps = 30.0
+        rd._adaptive.reset(30.0, 60, 1280)
+        rd._apply_effective_settings(
+            rd._adaptive.effective, notify_helper=False
+        )
+        self.assertEqual(rd._adaptive.requested["fps"], 30.0)
+        self.assertEqual(rd._fps, 30.0)
+
     def test_connected_media_drops_pending_jpeg_and_skips_ws_http(self):
         api = FakeApi()
         media = FakeConnectedMedia()

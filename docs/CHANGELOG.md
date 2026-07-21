@@ -1,7 +1,9 @@
 # v4.9.1
 - **WebRTC JPEG suppression:** ICE+DTLS gerçekten `connected` olduğunda bekleyen JPEG temizlenir ve WS sender binary JPEG göndermez; fallback durumunda JPEG-WS/HTTP anında yeniden devreye girer.
+- **10 fps clamp kaldırıldı:** dashboard `fps=30` istediğinde client artık değeri 10'a düşürmez; JPEG adaptive ceiling 30 fps, WebRTC helper ceiling 60 fps.
 - **WebRTC capture pacing:** media capture JPEG-era `fps/quality` değerlerinden ayrıldı (30 fps / Q78 başlangıç); persistent session helper 60 fps'e kadar media isteğini kabul eder. Stale kareler tek-slot mailbox/WS coalescing ile düşürülür.
 - **DXGI Desktop Duplication:** WebRTC build profiline opsiyonel `dxcam` eklendi; media modunda önce change-driven DXGI capture denenir, yoksa mevcut GDI/ImageGrab/MSS zincirine güvenli fallback olur.
+- **Re-offer recovery:** yeni stream offer'ları serialize edilir; eski peer senkron kapanır. Yeni peer kurulamazsa agent anında `webrtc_reject(reason=peer_setup_failed)` gönderir ve JPEG fallback'i tetikler.
 - **Media telemetry:** `media.encoder`, `effective_capture_fps`, `capture_quality` ve `target_bitrate_bps` additive meta/status alanları. Hardware encoder henüz dürüstçe ilan edilmez; mevcut aiortc encoder kullanılır.
 - **P1 security/resilience observe paketi:** signed-heartbeat/ACL drift adayları, ETW korelasyon, deception/canary health, network dry-run/version rollback, DPAPI offline queue, identity burst aggregate, operator-key metadata ve read-only TPM capability. Tümü default-off/observe; production enforcement ve floor değişmedi.
 

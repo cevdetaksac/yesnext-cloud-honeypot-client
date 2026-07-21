@@ -240,7 +240,7 @@ class RemoteDesktopStreamer:
         screen/capture 0×0 → CAPTURE_NO_DESKTOP.
         """
         with self._lock:
-            self._requested_fps = max(1.0, min(float(fps or DEFAULT_FPS), 10.0))
+            self._requested_fps = max(1.0, min(float(fps or DEFAULT_FPS), 30.0))
             self._requested_quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
             self._requested_max_width = max(
                 640, min(int(max_width or DEFAULT_MAX_WIDTH), 1920)

@@ -319,6 +319,7 @@ class AiortcMediaTransport(OptionalMediaTransport):
         self._connection_state = "new"
         self._ice_state = "new"
         self._ice_checking_task = None
+        self._offer_lock = None
         self._codec = ""
         self._preferred_codec = ""
         self._error = ""
@@ -434,30 +435,48 @@ class AiortcMediaTransport(OptionalMediaTransport):
     async def _handle_signal_async(self, message: dict) -> dict:
         action = str(message.get("action") or "").lower()
         if action == "offer":
-            await self._create_peer(
-                str(message["session_id"]),
-                str(message["stream_id"]),
-                configuration=message.get("_rtc_configuration"),
-            )
-            description = self._runtime["RTCSessionDescription"](
-                sdp=str(message.get("sdp") or ""), type="offer"
-            )
-            await self._pc.setRemoteDescription(description)
-            self._prefer_h264()
-            answer = await self._pc.createAnswer()
-            await self._pc.setLocalDescription(answer)
-            local = self._pc.localDescription
-            self._signal_sender({
-                "t": "webrtc_signal",
-                "action": "answer",
-                "protocol": 1,
-                "session_id": self._session_id,
-                "stream_id": self._stream_id,
-                "sdp": local.sdp,
-                "type": local.type,
-                "ice": "non-trickle",
-            })
-            return {"accepted": True, "action": "offer"}
+            if self._offer_lock is None:
+                self._offer_lock = asyncio.Lock()
+            async with self._offer_lock:
+                session_id = str(message["session_id"])
+                stream_id = str(message["stream_id"])
+                try:
+                    # Synchronous teardown inside the serialized offer section:
+                    # no old peer callback can overwrite the new peer state.
+                    await self._create_peer(
+                        session_id,
+                        stream_id,
+                        configuration=message.get("_rtc_configuration"),
+                    )
+                    description = self._runtime["RTCSessionDescription"](
+                        sdp=str(message.get("sdp") or ""), type="offer"
+                    )
+                    await self._pc.setRemoteDescription(description)
+                    self._prefer_h264()
+                    answer = await self._pc.createAnswer()
+                    await self._pc.setLocalDescription(answer)
+                    local = self._pc.localDescription
+                    self._signal_sender({
+                        "t": "webrtc_signal",
+                        "action": "answer",
+                        "protocol": 1,
+                        "session_id": self._session_id,
+                        "stream_id": self._stream_id,
+                        "sdp": local.sdp,
+                        "type": local.type,
+                        "ice": "non-trickle",
+                    })
+                    return {"accepted": True, "action": "offer"}
+                except Exception:
+                    await self._close_pc()
+                    self._send_reject(
+                        session_id, stream_id, "peer_setup_failed"
+                    )
+                    self._fail("peer setup failed")
+                    return {
+                        "accepted": False,
+                        "error": "peer setup failed",
+                    }
         if action == "answer":
             if self._pc is None:
                 return {"accepted": False, "error": "no local offer"}
@@ -467,6 +486,21 @@ class AiortcMediaTransport(OptionalMediaTransport):
             await self._pc.setRemoteDescription(description)
             return {"accepted": True, "action": "answer"}
         return {"accepted": False, "error": f"unsupported signal: {action}"}
+
+    def _send_reject(
+        self, session_id: str, stream_id: str, reason: str
+    ) -> None:
+        try:
+            self._signal_sender({
+                "t": "webrtc_signal",
+                "action": "webrtc_reject",
+                "protocol": 1,
+                "session_id": str(session_id),
+                "stream_id": str(stream_id),
+                "reason": str(reason)[:80],
+            })
+        except Exception:
+            pass
 
     async def _create_peer(
         self, session_id: str, stream_id: str, configuration=None

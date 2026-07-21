@@ -88,6 +88,8 @@ ALLOWED_COMMANDS: Set[str] = {
     "self_update", "check_update",
     # Disaster recovery (contract ≥4.6.0 — agent/disaster-recovery.md)
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
+    # Network Guard (contract ≥4.7.0 — agent/network-guard.md)
+    "network_snapshot", "network_restore", "list_network_baseline",
 }
 
 # High-frequency IR commands — skip global cmd/min rate limit
@@ -112,6 +114,8 @@ _IR_URGENT_COMMANDS = frozenset({
     "remote_session_prepare", "list_local_users",
     # Disaster recovery — must reach a compromised host instantly
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
+    # Network Guard — offline bomb response must reach host instantly
+    "network_snapshot", "network_restore", "list_network_baseline",
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
@@ -139,6 +143,8 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "disable_all_users", "contain_user",
     # Disaster recovery (destructive / reboot) — server confirm + HMAC
     "create_user", "remote_logon", "set_autologon", "reboot",
+    # Network Guard — restore mutates adapters/DNS/firewall/drives
+    "network_restore",
 }
 
 # Hard-skip only (AGENT_DISABLE_ALL_USERS_PROMPT) — Administrator is NOT here
@@ -182,6 +188,7 @@ class RemoteCommandExecutor:
         self.health_monitor = health_monitor  # SystemHealthMonitor (wired after init)
         self.cleanup_manager = cleanup_manager  # DataCleanupManager (wired after init)
         self.ransomware_shield = ransomware_shield
+        self.network_guard = None  # NetworkGuard — wired after init (≥4.7.0)
         self.threat_intel = None  # ThreatIntelManager — wired after init (WS push)
 
         self._running = False
@@ -2185,6 +2192,55 @@ class RemoteCommandExecutor:
         try:
             q = rs.get_quarantine()
             return {"success": True, "data": q}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Network Guard (contract ≥4.7.0 — agent/network-guard.md) ────
+
+    def _cmd_network_snapshot(self, params: dict) -> dict:
+        """Capture a fresh network baseline immediately."""
+        try:
+            from client_network_guard import capture_baseline, save_baseline
+            saved = save_baseline(capture_baseline())
+            ng = getattr(self, "network_guard", None)
+            if ng is not None:
+                ng._last_baseline = saved
+            return {"success": True, "message": "Network baseline captured",
+                    "data": {"version": saved.get("version"),
+                             "captured_at": saved.get("captured_at")}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_list_network_baseline(self, params: dict) -> dict:
+        ng = getattr(self, "network_guard", None)
+        try:
+            if ng is not None:
+                return {"success": True, "data": ng.list_baseline()}
+            from client_network_guard import load_baseline, verify_baseline
+            base = load_baseline() or {}
+            return {"success": True, "data": {
+                "version": base.get("version"),
+                "captured_at": base.get("captured_at"),
+                "verified": verify_baseline(base) if base else False,
+            }}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_restore(self, params: dict) -> dict:
+        """Restore network/drives from signed baseline (server-confirmed)."""
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"success": False, "error": "NetworkGuard not available"}
+        try:
+            targets = params.get("targets")
+            out = ng.restore_network(targets=targets)
+            ok = "error" not in out
+            self._recovery_audit("network_restore",
+                                 f"targets={targets or 'all'} "
+                                 f"actions={len(out.get('restore_actions') or [])}")
+            return {"success": ok,
+                    "message": "Network restore attempted",
+                    "data": out}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

@@ -357,6 +357,7 @@ class CloudHoneypotClient:
         self.ransomware_shield = None
         self.health_monitor = None
         self.process_protection = None
+        self.network_guard = None
         if ENABLE_THREAT_DETECTION and not self.frontend_only:
             try:
                 from client_constants import (
@@ -368,6 +369,18 @@ class CloudHoneypotClient:
                         auto_response=self.auto_response,
                         threat_engine=self.threat_engine,
                     )
+                # Network Guard — offline ransomware bomb + net-drive recovery (≥4.7.0)
+                try:
+                    from client_network_guard import NetworkGuard
+                    from client_network_guard import load_config as _ng_load_config
+                    self.network_guard = NetworkGuard(
+                        alert_pipeline=self.alert_pipeline,
+                        ransomware_shield=self.ransomware_shield,
+                        config=_ng_load_config(getattr(self, "config", None)),
+                    )
+                except Exception as nge:
+                    log(f"⚠️ NetworkGuard init failed: {nge}")
+                    self.network_guard = None
                 self.health_monitor = SystemHealthMonitor(
                     api_client=self.api_client,
                     token_getter=lambda: self.state.get("token", ""),
@@ -391,6 +404,11 @@ class CloudHoneypotClient:
         # Wire ransomware shield into remote command executor (created earlier)
         if getattr(self, "remote_commands", None) is not None and self.ransomware_shield is not None:
             self.remote_commands.ransomware_shield = self.ransomware_shield
+        # Wire network guard into remote command executor + health monitor
+        if getattr(self, "remote_commands", None) is not None and self.network_guard is not None:
+            self.remote_commands.network_guard = self.network_guard
+        if getattr(self, "health_monitor", None) is not None and self.network_guard is not None:
+            self.health_monitor.network_guard = self.network_guard
 
         # Cloud threat-intel (daemon only) — soft if API not ready
         self.threat_intel = None
@@ -2673,6 +2691,8 @@ class CloudHoneypotClient:
         try:
             if getattr(self, "ransomware_shield", None):
                 self.ransomware_shield.start()
+            if getattr(self, "network_guard", None):
+                self.network_guard.start()
             if getattr(self, "health_monitor", None):
                 self.health_monitor.start()
                 # Push sessions/processes immediately so dashboard is not empty for ~60s
@@ -2705,7 +2725,7 @@ class CloudHoneypotClient:
                 check_previous_session_on_boot,
                 start_deadman_beacon,
             )
-            start_motor_session(os.getpid(), str(getattr(self, "version", "") or ""))
+            start_motor_session(os.getpid(), str(getattr(self, "version", "") or __version__ or ""))
             check_previous_session_on_boot()
             start_deadman_beacon(60.0)
         except Exception as e:

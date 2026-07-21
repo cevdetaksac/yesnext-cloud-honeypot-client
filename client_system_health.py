@@ -1195,6 +1195,12 @@ class SystemHealthMonitor:
             payload["snapshot"]["persistence"] = get_persistence_status()
         except Exception:
             pass
+        try:
+            ng = getattr(self, "network_guard", None)
+            if ng is not None:
+                payload["snapshot"]["network_guard"] = ng.status()
+        except Exception:
+            pass
 
         runtime = self._build_agent_runtime()
         if runtime:

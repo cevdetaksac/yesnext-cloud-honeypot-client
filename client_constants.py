@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.6.0"  # Survival: Guardian service, tamper wire, create_user, remote_logon break-glass
+VERSION = "4.7.0"  # Network Guard: offline ransomware bomb detection + net-drive backup/recovery
 
 
 CLIENT_VERSION = VERSION  # Main version constant

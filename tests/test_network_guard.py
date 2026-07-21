@@ -1,0 +1,205 @@
+"""Unit tests for Network Guard (contract >=4.7.0 — agent/network-guard.md)."""
+
+import os
+import sys
+import json
+import tempfile
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import client_network_guard as ng
+
+
+class TestScoring(unittest.TestCase):
+    def test_canary_is_max(self):
+        self.assertEqual(ng.score_signals(False, False, False, canary=True), 100)
+
+    def test_net_cut_plus_storm_triggers(self):
+        # net_cut + fs_storm should clear the default 70 threshold
+        s = ng.score_signals(net_cut=True, fs_storm=True, suspicious_origin=False)
+        self.assertGreaterEqual(s, 70)
+
+    def test_single_signal_below_threshold(self):
+        self.assertLess(ng.score_signals(net_cut=True, fs_storm=False,
+                                         suspicious_origin=False), 70)
+        self.assertLess(ng.score_signals(net_cut=False, fs_storm=True,
+                                         suspicious_origin=False), 70)
+
+    def test_storm_plus_origin_triggers(self):
+        s = ng.score_signals(net_cut=False, fs_storm=True, suspicious_origin=True)
+        self.assertGreaterEqual(s, 65)
+
+    def test_capped_at_100(self):
+        self.assertEqual(ng.score_signals(True, True, True, True, False), 100)
+
+
+class TestConnectivityDiff(unittest.TestCase):
+    def test_internet_lost_flagged(self):
+        base = {"connectivity": {"internet_ok": True}, "adapters": []}
+        cur = {"internet_ok": False, "_adapters": []}
+        d = ng.diff_connectivity(base, cur)
+        self.assertTrue(d["internet_lost"])
+        self.assertTrue(d["net_cut"])
+
+    def test_no_cut_when_still_online(self):
+        base = {"connectivity": {"internet_ok": True}, "adapters": []}
+        cur = {"internet_ok": True, "_adapters": []}
+        d = ng.diff_connectivity(base, cur)
+        self.assertFalse(d["net_cut"])
+
+    def test_adapter_down_flagged(self):
+        base = {"connectivity": {"internet_ok": True},
+                "adapters": [{"name": "Ethernet", "state": "up"}]}
+        cur = {"internet_ok": True,
+               "_adapters": [{"name": "Ethernet", "state": "disabled"}]}
+        d = ng.diff_connectivity(base, cur)
+        self.assertIn("Ethernet", d["adapters_down"])
+        self.assertTrue(d["net_cut"])
+
+    def test_no_baseline_is_safe(self):
+        d = ng.diff_connectivity(None, {"internet_ok": True, "_adapters": []})
+        self.assertFalse(d["net_cut"])
+
+
+class TestBaselineDiff(unittest.TestCase):
+    def test_first_baseline_is_change(self):
+        self.assertTrue(ng._baseline_meaningful_change(None, {"mapped_drives": []}))
+
+    def test_same_topology_no_change(self):
+        a = {"mapped_drives": [{"letter": "Z:"}], "shares": [], "adapters": [],
+             "firewall": {"domain": "on"}}
+        b = dict(a)
+        self.assertFalse(ng._baseline_meaningful_change(a, b))
+
+    def test_new_mapped_drive_is_change(self):
+        a = {"mapped_drives": [], "shares": [], "adapters": [], "firewall": {}}
+        b = {"mapped_drives": [{"letter": "Z:"}], "shares": [], "adapters": [],
+             "firewall": {}}
+        self.assertTrue(ng._baseline_meaningful_change(a, b))
+
+
+class TestSigning(unittest.TestCase):
+    def test_sign_verify_round_trip(self):
+        with mock.patch.object(ng, "_read_token", return_value="tok-123"):
+            payload = {"version": 1, "mapped_drives": [], "adapters": []}
+            payload["sig"] = ng._sign_baseline(payload)
+            self.assertTrue(ng.verify_baseline(payload))
+
+    def test_tamper_breaks_signature(self):
+        with mock.patch.object(ng, "_read_token", return_value="tok-123"):
+            payload = {"version": 1, "mapped_drives": []}
+            payload["sig"] = ng._sign_baseline(payload)
+            payload["mapped_drives"] = [{"letter": "X:", "unc": "\\\\evil\\s"}]
+            self.assertFalse(ng.verify_baseline(payload))
+
+    def test_missing_sig_is_invalid(self):
+        self.assertFalse(ng.verify_baseline({"version": 1}))
+
+
+class TestSaveBaselineRotation(unittest.TestCase):
+    def test_version_bumps_and_persists(self):
+        with tempfile.TemporaryDirectory() as d:
+            bfile = os.path.join(d, "network_baseline.json")
+            hdir = os.path.join(d, "history")
+            with mock.patch.object(ng, "BASELINE_FILE", bfile), \
+                 mock.patch.object(ng, "BASELINE_HISTORY_DIR", hdir), \
+                 mock.patch.object(ng, "MACHINE_DATA_DIR", d), \
+                 mock.patch.object(ng, "_read_token", return_value="t"):
+                p1 = ng.save_baseline({"mapped_drives": [], "shares": [],
+                                       "adapters": [], "firewall": {"domain": "on"},
+                                       "connectivity": {}})
+                self.assertEqual(p1["version"], 1)
+                # topology change -> version 2
+                p2 = ng.save_baseline({"mapped_drives": [{"letter": "Z:"}],
+                                       "shares": [], "adapters": [],
+                                       "firewall": {"domain": "on"},
+                                       "connectivity": {}})
+                self.assertEqual(p2["version"], 2)
+                loaded = ng.load_baseline()
+                self.assertEqual(loaded["version"], 2)
+                self.assertTrue(ng.verify_baseline(loaded))
+
+
+class TestConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = ng.load_config(None)
+        self.assertTrue(c["enabled"])
+        self.assertFalse(c["auto_kill"])
+        self.assertTrue(c["auto_restore"])
+
+    def test_override_from_client_config(self):
+        c = ng.load_config({"protection": {"network_guard": {
+            "auto_kill": True, "score_threshold": 90, "bogus": 1}}})
+        self.assertTrue(c["auto_kill"])
+        self.assertEqual(c["score_threshold"], 90)
+        self.assertNotIn("bogus", c)
+
+
+class TestStatus(unittest.TestCase):
+    def test_status_shape(self):
+        guard = ng.NetworkGuard(config=ng.load_config(None))
+        guard._last_baseline = {"version": 3, "mapped_drives": [{"letter": "Z:"}],
+                                "connectivity": {"internet_ok": True},
+                                "captured_at": "2026-07-21T00:00:00+00:00"}
+        st = guard.status()
+        self.assertEqual(st["baseline_version"], 3)
+        self.assertEqual(st["mapped_drives"], 1)
+        self.assertTrue(st["internet_ok"])
+        self.assertFalse(st["auto_kill"])
+        self.assertEqual(st["suspended_processes"], 0)
+
+
+class TestCommandWhitelist(unittest.TestCase):
+    def test_network_commands_registered(self):
+        from client_remote_commands import (
+            ALLOWED_COMMANDS, REQUIRES_CONFIRMATION,
+        )
+        for c in ("network_snapshot", "network_restore", "list_network_baseline"):
+            self.assertIn(c, ALLOWED_COMMANDS)
+        self.assertIn("network_restore", REQUIRES_CONFIRMATION)
+        # read-only snapshot/list must NOT require confirmation
+        self.assertNotIn("network_snapshot", REQUIRES_CONFIRMATION)
+        self.assertNotIn("list_network_baseline", REQUIRES_CONFIRMATION)
+
+    def test_handlers_exist(self):
+        from client_remote_commands import RemoteCommandExecutor
+        ex = RemoteCommandExecutor(token_getter=lambda: "")
+        for c in ("network_snapshot", "network_restore", "list_network_baseline"):
+            self.assertTrue(hasattr(ex, f"_cmd_{c}"), c)
+
+
+class TestTriggerFlow(unittest.TestCase):
+    def test_suspend_first_and_alert(self):
+        sent = []
+
+        class _Pipe:
+            def send_urgent(self, a):
+                sent.append(a)
+
+        guard = ng.NetworkGuard(alert_pipeline=_Pipe(),
+                                config=ng.load_config(None))
+        suspects = [{"pid": 4242, "image": "invoice.exe",
+                     "path": "C:\\Users\\Public\\invoice.exe",
+                     "cmdline": "invoice.exe", "suspicious_origin": True}]
+        netdiff = {"internet_lost": True, "adapters_down": ["Ethernet"],
+                   "net_cut": True}
+        with mock.patch.object(guard, "_suspend_pid", return_value=True) as sp, \
+             mock.patch.object(guard, "_emergency_vss", return_value=True), \
+             mock.patch.object(guard, "restore_network",
+                               return_value={"restore_actions": ["adapter_enable:Ethernet"]}):
+            guard._trigger("network_cut+fs_storm", 90, netdiff, suspects,
+                           baseline={"adapters": []})
+        sp.assert_called_once_with(4242)
+        self.assertEqual(len(sent), 1)
+        alert = sent[0]
+        self.assertEqual(alert["threat_type"], "ransomware_offline_bomb")
+        ngc = alert["system_context"]["network_guard"]
+        self.assertTrue(ngc["network"]["restored"])
+        self.assertEqual(ngc["suspects"][0]["state"], "suspended")
+        self.assertTrue(ngc["vss_emergency_snapshot"])
+
+
+if __name__ == "__main__":
+    unittest.main()

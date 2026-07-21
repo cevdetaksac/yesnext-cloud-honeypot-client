@@ -1,3 +1,13 @@
+# v4.7.0
+- Contract 1.3.0 — Network Guard (offline fidye bombası + ağ sürücü yedek/kurtarma):
+  - **A) Baseline:** `network_baseline.json` (imzalı, HMAC) — mapped drive / shares / adapter / DNS / route / firewall / connectivity; 30 dk periyot + boot; son 10 sürüm rotasyonu.
+  - **B) Offline tespit:** internetsiz davranışsal skorlama — ağ-kesme (baseline delta) + per-process yazma fırtınası (psutil io_counters) + şüpheli köken; ağ-kesme + FS-fırtınası → canary beklemeden tetik.
+  - **C) Containment (suspend-first):** şüpheli süreçler önce **suspend** (kill değil), acil VSS snapshot, quarantine kaydı; operatör onayıyla kill/release; opsiyonel `auto_kill`.
+  - **D) Kurtarma:** `auto_restore` ile adapter/DNS/firewall/mapped-drive baseline'dan geri yüklenir → daemon buluta yeniden bağlanır.
+  - **E) Alarm:** `ransomware_offline_bomb` urgent (`system_context.network_guard`, suspects/network/restored/vss).
+  - Komutlar: `network_snapshot`, `network_restore` (confirm), `list_network_baseline`; STATUS/health `network_guard{}` bloğu.
+  - Fix: `motor_session.json` version alanı artık `__version__` ile dolar.
+
 # v4.6.0
 - Contract 1.2.0 — survival + disaster recovery:
   - **Guardian:** `CloudHoneypotGuardian` Windows servisi (SCM restart-on-failure) + motor çapraz watchdog

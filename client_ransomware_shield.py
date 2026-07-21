@@ -680,6 +680,54 @@ class RansomwareShield:
         }
         self._detections.append(detection)
 
+        # Arm quarantine and attribute the writer before publishing the urgent
+        # alert. The scan is bounded to <=4s; empty suspects are still valid.
+        containment = {
+            "trigger": f"canary {change_type}: {canary.path}",
+            "suspects": [],
+            "actions": [],
+            "quarantine": {"active": True, "entries": 0, "kills": 0},
+        }
+        try:
+            containment = self._contain_after_hit(
+                trigger=containment["trigger"],
+                focus_path=canary.path,
+            )
+        except Exception as e:
+            # Alert delivery must survive a containment implementation failure.
+            log(f"[RANSOMWARE-SHIELD] containment error before urgent: {e}")
+        ransomware_context = {
+            "trigger": containment.get("trigger") or (
+                f"canary {change_type}: {canary.path}"
+            ),
+            "file": canary.path,
+            "change_type": change_type,
+            "suspects": list(containment.get("suspects") or []),
+            "quarantine": dict(containment.get("quarantine") or {}),
+        }
+        raw_events = [{
+            "event_type": "canary_file_tampered",
+            "file": canary.path,
+            "full_path": canary.path,
+            "change_type": change_type,
+            "timestamp": detection["timestamp"],
+        }]
+        raw_events.extend(
+            {
+                "event_type": "ransomware_suspect_process",
+                "process_name": suspect.get("image") or "",
+                "image": suspect.get("image") or "",
+                "process_path": suspect.get("path") or "",
+                "path": suspect.get("path") or "",
+                "pid": suspect.get("pid") or 0,
+                "cmdline": suspect.get("cmdline") or "",
+                "command_line": suspect.get("cmdline") or "",
+                "sha256": suspect.get("sha256") or "",
+            }
+            for suspect in ransomware_context["suspects"]
+            if isinstance(suspect, dict)
+        )
+
         # Feed to threat engine
         if self.on_alert:
             self.on_alert({
@@ -716,19 +764,22 @@ class RansomwareShield:
                         f"Acil müdahale önerilir!"
                     ),
                     "threat_score": 100,
-                    "auto_response_taken": ["emergency_alert"],
+                    "target_service": "SYSTEM",
+                    "recommended_action": "isolate_host",
+                    "auto_response_taken": (
+                        ["emergency_alert"]
+                        + list(containment.get("actions") or [])
+                    ),
+                    "raw_events": raw_events,
+                    "system_context": {
+                        "ransomware": ransomware_context,
+                    },
                 })
             except Exception:
                 pass
 
         # Ransomware tespit — aktif şüpheli IP'leri engelle
         self._block_suspicious_ips(f"canary {change_type}: {filename}")
-
-        # Kill suspect writers + IFEO quarantine until unlock
-        self._contain_after_hit(
-            trigger=f"canary {change_type}: {canary.path}",
-            focus_path=canary.path,
-        )
 
     # ── Katman 3: Suspicious Process Detection ────────────────────
 
@@ -1102,7 +1153,7 @@ class RansomwareShield:
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] quarantine persist error: {e}")
 
-    def _contain_after_hit(self, trigger: str, focus_path: str = "") -> None:
+    def _contain_after_hit(self, trigger: str, focus_path: str = "") -> dict:
         """Kill writers of canary path + IFEO-block their images until unlock.
 
         Arms quarantine immediately (STATUS/GUI), then best-effort attribution.
@@ -1150,7 +1201,18 @@ class RansomwareShield:
             if not self._quarantine.get("active"):
                 # Operator unlocked while we scanned
                 log("[RANSOMWARE-SHIELD] Containment skipped — already unlocked")
-                return
+                return {
+                    "trigger": trigger,
+                    "suspects": suspects,
+                    "actions": [],
+                    "quarantine": {
+                        "active": False,
+                        "entries": 0,
+                        "kills": int(
+                            self._stats.get("quarantine_kills") or 0
+                        ),
+                    },
+                }
             entries = list(self._quarantine.get("entries") or [])
             known = {
                 (e.get("image") or "").lower()
@@ -1174,6 +1236,7 @@ class RansomwareShield:
                         "image": image,
                         "path": s.get("path") or "",
                         "pid": pid,
+                        "cmdline": s.get("cmdline") or "",
                         "sha256": s.get("sha256") or "",
                         "ifeo": bool(ifeo_ok),
                         "at": datetime.now().isoformat(),
@@ -1203,6 +1266,16 @@ class RansomwareShield:
             "timestamp": datetime.now().isoformat(),
         }
         self._detections.append(detection)
+        return {
+            "trigger": trigger,
+            "suspects": suspects,
+            "actions": actions[:20],
+            "quarantine": {
+                "active": True,
+                "entries": len(entries),
+                "kills": int(self._stats.get("quarantine_kills") or 0),
+            },
+        }
 
     def _find_suspect_processes(self, focus_path: str) -> List[dict]:
         """Best-effort: processes with open handles under canary root / file.
@@ -1231,7 +1304,7 @@ class RansomwareShield:
         my_pid = os.getpid()
         checked = 0
         deadline = time.time() + 3.5
-        for proc in psutil.process_iter(["pid", "name", "exe"]):
+        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
             if time.time() > deadline:
                 break
             try:
@@ -1246,6 +1319,12 @@ class RansomwareShield:
                 if checked > 250:
                     break
                 exe = info.get("exe") or ""
+                cmdline_raw = info.get("cmdline") or []
+                cmdline = (
+                    " ".join(str(part) for part in cmdline_raw)
+                    if isinstance(cmdline_raw, (list, tuple))
+                    else str(cmdline_raw)
+                )
                 matched = False
                 try:
                     for of in proc.open_files() or []:
@@ -1272,6 +1351,7 @@ class RansomwareShield:
                     "pid": pid,
                     "image": pname,
                     "path": exe,
+                    "cmdline": cmdline,
                     "sha256": sha,
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied):

@@ -1,3 +1,9 @@
+# v4.5.67
+- Contract 1.1.3: Canary urgent alert artık quarantine/suspect taramasından sonra zengin payload gönderir.
+- `target_service=SYSTEM`, `recommended_action=isolate_host`, structured `raw_events`.
+- `system_context.ransomware`: file, change_type, suspects (image/path/PID/cmdline/SHA-256), quarantine özeti.
+- Health snapshot: `ransomware_quarantine` (active/trigger/entries) — cloud popup/fleet fallback.
+
 # v4.5.66
 - Contract gap close (`honeypot-contract` 1.0.0):
   - `POST /register` → `protection.block_rules` ProgramData’ya yazılır; boot + ThreatEngine normalize/apply

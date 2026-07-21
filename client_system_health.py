@@ -1120,12 +1120,37 @@ class SystemHealthMonitor:
         vss_shadow_count = 0
         ransomware_shield_status = "disabled"
         canary_files_intact = True
+        ransomware_quarantine = {
+            "active": False,
+            "locked_at": "",
+            "trigger": "",
+            "entries": [],
+        }
         if self._ransomware_shield:
             try:
                 ransomware_shield_status = "active" if self._ransomware_shield._running else "disabled"
                 rs_stats = self._ransomware_shield.get_stats()
                 canary_files_intact = rs_stats.get("canary_alerts", 0) == 0
                 vss_shadow_count = getattr(self._ransomware_shield, "_vss_count", 0) or 0
+                quarantine = self._ransomware_shield.get_quarantine()
+                ransomware_quarantine = {
+                    "active": bool(quarantine.get("active")),
+                    "locked_at": quarantine.get("locked_at") or "",
+                    "trigger": quarantine.get("trigger") or "",
+                    "entries": [
+                        {
+                            "image": entry.get("image") or "",
+                            "path": entry.get("path") or "",
+                            "pid": entry.get("pid") or 0,
+                            "cmdline": entry.get("cmdline") or "",
+                            "sha256": entry.get("sha256") or "",
+                            "ifeo": bool(entry.get("ifeo")),
+                            "at": entry.get("at") or "",
+                        }
+                        for entry in (quarantine.get("entries") or [])
+                        if isinstance(entry, dict)
+                    ],
+                }
             except Exception:
                 ransomware_shield_status = "error"
 
@@ -1161,6 +1186,7 @@ class SystemHealthMonitor:
                 "vss_shadow_count": vss_shadow_count,
                 "ransomware_shield_status": ransomware_shield_status,
                 "canary_files_intact": canary_files_intact,
+                "ransomware_quarantine": ransomware_quarantine,
                 "client_memory_mb": self_memory_mb,
             },
         }

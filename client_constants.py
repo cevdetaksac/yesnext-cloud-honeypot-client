@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.5.66"  # Contract: register protection.block_rules + WS threat_intel_updated
+VERSION = "4.5.67"  # Contract 1.1.3: enriched ransomware canary wire payload
 
 
 CLIENT_VERSION = VERSION  # Main version constant

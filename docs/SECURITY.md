@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---------|-----------|
-| **4.5.67+** | Yes (production floor — see contract `FLEET.md`) |
+| **4.5.68+** | Yes (production floor — see contract `FLEET.md`) |
 | 4.5.x | Yes |
 | 4.4.x | Upgrade recommended |
 | < 4.4 | Upgrade required |

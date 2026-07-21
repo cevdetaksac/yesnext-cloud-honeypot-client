@@ -2,7 +2,7 @@
 
 ## Shared contract
 
-API / agent davranış SoT: [`../../honeypot-contract`](../../honeypot-contract) (`VERSION` ≥ **1.1.4**, `FLEET.md`).
+API / agent davranış SoT: [`../../honeypot-contract`](../../honeypot-contract) (`VERSION` ≥ **1.1.6**, `FLEET.md`).
 
 ## Build & Release
 

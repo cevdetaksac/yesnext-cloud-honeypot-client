@@ -447,6 +447,14 @@ class CloudHoneypotClient:
         if getattr(self, "remote_commands", None) and getattr(self, "health_monitor", None):
             self.remote_commands.health_monitor = self.health_monitor
 
+        # Wire observe-health sources into health monitor (contract 1.4.2):
+        # command_signing (ZT-600) + event_log_health (ID-401) additive blocks.
+        if getattr(self, "health_monitor", None):
+            if getattr(self, "remote_commands", None):
+                self.health_monitor.remote_commands = self.remote_commands
+            if getattr(self, "event_watcher", None):
+                self.health_monitor.event_watcher = self.event_watcher
+
         # Initialize Faz 4 modules (v4.0) — Performance Optimizer, False Positive Tuner
         self.perf_optimizer = None
         self.fp_tuner = None
@@ -2730,6 +2738,9 @@ class CloudHoneypotClient:
                     self.remote_commands.cleanup_manager = self.cleanup_manager
                 if getattr(self, "health_monitor", None) is not None:
                     self.remote_commands.health_monitor = self.health_monitor
+                    self.health_monitor.remote_commands = self.remote_commands
+                    if getattr(self, "event_watcher", None) is not None:
+                        self.health_monitor.event_watcher = self.event_watcher
                 if getattr(self, "ransomware_shield", None) is not None:
                     self.remote_commands.ransomware_shield = self.ransomware_shield
                 log("[MOTOR] RemoteCommandExecutor constructed (daemon ensure)")

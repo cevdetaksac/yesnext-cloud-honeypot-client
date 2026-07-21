@@ -59,8 +59,22 @@ class TestResilienceStormBreaker(unittest.TestCase):
         resilience.record_recovery_attempt("daemon", ok=False, duration_ms=10)
         resilience.note_stand_down("update_or_operator_stop")
         snap = resilience.snapshot()
-        self.assertEqual(snap["stand_down_reason"], "update_or_operator_stop")
+        # Contract 1.4.2 enum: update | operator_pin | uninstall | null
+        self.assertEqual(snap["stand_down_reason"], "update")
         self.assertFalse(snap["restart_storm"])
+
+    def test_stand_down_reason_normalizes_to_contract_enum(self):
+        for raw, expected in [
+            ("update", "update"),
+            ("operator_pin", "operator_pin"),
+            ("pin_stop", "operator_pin"),
+            ("uninstall", "uninstall"),
+            ("something_update_related", "update"),
+        ]:
+            resilience.note_stand_down(raw)
+            self.assertEqual(resilience.snapshot()["stand_down_reason"], expected)
+        resilience.clear_stand_down()
+        self.assertIsNone(resilience.snapshot()["stand_down_reason"])
 
     def test_snapshot_includes_draft_fields(self):
         snap = resilience.snapshot(

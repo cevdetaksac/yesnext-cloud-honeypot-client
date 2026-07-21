@@ -378,6 +378,29 @@ class RemoteCommandExecutor:
             st["control_ws"] = False
         return st
 
+    def get_signing_health(self) -> dict:
+        """ZT-600 observe block for health/report (contract 1.4.2).
+
+        observe=True, enforce=False during transition. Counters are local; cloud
+        keeps its own coverage. Missing block on cloud side means legacy.
+        """
+        try:
+            from client_security_utils import command_signing_enabled
+            enabled = bool(command_signing_enabled())
+        except Exception:
+            enabled = True
+        s = self._stats
+        return {
+            "observe": enabled,
+            "enforce": False,
+            "ok": int(s.get("signature_ok", 0) or 0),
+            "missing": int(s.get("signature_missing", 0) or 0),
+            "invalid": int(s.get("signature_invalid", 0) or 0),
+            "no_token": int(s.get("signature_no_token", 0) or 0),
+            "disabled": int(s.get("signature_disabled", 0) or 0),
+            "last_error": "",
+        }
+
     def get_history(self) -> List[dict]:
         return list(self._history)
 

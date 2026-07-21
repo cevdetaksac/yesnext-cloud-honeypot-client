@@ -257,6 +257,26 @@ class EventLogWatcher:
             stats["uptime_seconds"] = int(time.time() - stats["started_at"])
         return stats
 
+    def get_health(self) -> dict:
+        """ID-401 observe block for health/report (contract 1.4.2).
+
+        Bounded sensor health only — no raw event payloads until the final
+        4723/4724 schema is promoted on the cloud side.
+        """
+        s = self._stats
+        return {
+            "available": bool(EVTLOG_AVAILABLE),
+            "running": bool(self._running),
+            "channels_active": int(s.get("channels_active", 0) or 0),
+            "channels_total": len(WATCHED_CHANNELS),
+            "events_processed": int(s.get("events_processed", 0) or 0),
+            "events_filtered": int(s.get("events_filtered", 0) or 0),
+            "errors": int(s.get("errors", 0) or 0),
+            "watched_ids": sorted(
+                {eid for ids in WATCHED_CHANNELS.values() for eid in ids}
+            ),
+        }
+
     def update_whitelist(self, ips: Set[str]):
         """Update whitelisted IPs (thread-safe)."""
         with self._lock:

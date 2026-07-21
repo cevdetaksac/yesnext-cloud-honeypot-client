@@ -96,10 +96,37 @@ def _prune_list(values: List[float], now: float) -> List[float]:
 _load_state()
 
 
+# Contract 1.4.2 enum: update | operator_pin | uninstall | null
+_STAND_DOWN_ENUM = {
+    "update": "update",
+    "update_or_operator_stop": "update",
+    "operator_pin": "operator_pin",
+    "operator_stop": "operator_pin",
+    "pin": "operator_pin",
+    "uninstall": "uninstall",
+}
+
+
+def _normalize_stand_down(reason: str) -> str:
+    key = str(reason or "").strip().lower()
+    if not key:
+        return ""
+    if key in _STAND_DOWN_ENUM:
+        return _STAND_DOWN_ENUM[key]
+    # Best-effort classification for legacy callers.
+    if "update" in key:
+        return "update"
+    if "uninstall" in key:
+        return "uninstall"
+    if "pin" in key or "operator" in key:
+        return "operator_pin"
+    return "update"
+
+
 def note_stand_down(reason: str) -> None:
     """Record a legitimate update/PIN/uninstall stand-down (not a storm)."""
     with _lock:
-        _state["stand_down_reason"] = str(reason or "")[:120]
+        _state["stand_down_reason"] = _normalize_stand_down(reason)
         _state["restart_storm"] = False
         _save_state()
 
@@ -242,7 +269,7 @@ def snapshot(
             "last_recovery_ok": bool(_state.get("last_recovery_ok")),
             "restart_backoff_sec": int(backoff if storm or recent_daemon else 0),
             "restart_storm": bool(storm),
-            "stand_down_reason": str(_state.get("stand_down_reason") or ""),
+            "stand_down_reason": (_state.get("stand_down_reason") or None),
             "binary_integrity": str(_state.get("binary_integrity") or "unknown"),
             "observed_at": _iso(now),
         }

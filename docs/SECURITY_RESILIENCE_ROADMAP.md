@@ -341,7 +341,15 @@ Kabul:
 
 ### P0 — Sonraki güvenlik sprinti
 
-- [~] **ZT-600** Observe telemetry landed; missing-sig enforce blocked on cloud/contract
+> Contract **1.4.2** hizalaması (2026-07-22): cloud additive health şemalarını
+> promote etti. Client `health/report` snapshot'ı artık observe blokları
+> gönderir: `command_signing{observe,enforce,ok,missing,invalid,no_token,
+> disabled}` (ZT-600), `event_log_health{}` (ID-401, ham event yok),
+> `etw_shadow{}` (RANS-301, contract anahtarına göre yeniden adlandırıldı) ve
+> `resilience.stand_down_reason` artık `update|operator_pin|uninstall|null`
+> enum'una normalize edilir. Enforce hepsi kapalı; missing = legacy.
+
+- [~] **ZT-600** Observe telemetry landed + health `command_signing` block; missing-sig enforce blocked on cloud/contract
   - [~] SR-001 Resilience SLO + local/status telemetry (cloud promote pending)
   - [~] SR-002 Restart-storm breaker
   - [~] SR-003 Guardian `installed but not running` self-heal

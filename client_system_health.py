@@ -172,6 +172,10 @@ class SystemHealthMonitor:
         self.token_getter = token_getter or (lambda: "")
         self.threat_engine = threat_engine
         self._ransomware_shield = ransomware_shield
+        # Optional wired-after references for additive observe health (1.4.2)
+        self.remote_commands = None
+        self.event_watcher = None
+        self.etw_shadow = None
 
         self._running = False
 
@@ -1199,10 +1203,25 @@ class SystemHealthMonitor:
                 payload["snapshot"]["resilience"] = persistence["resilience"]
         except Exception:
             pass
+        # RANS-301: contract key is `etw_shadow` (bounded sensor health only).
         try:
             etw = getattr(self, "etw_shadow", None)
             if etw is not None and hasattr(etw, "status"):
-                payload["snapshot"]["etw_file_io_shadow"] = etw.status()
+                payload["snapshot"]["etw_shadow"] = etw.status()
+        except Exception:
+            pass
+        # ZT-600 observe: command-signing coverage from the executor counters.
+        try:
+            rc = getattr(self, "remote_commands", None)
+            if rc is not None and hasattr(rc, "get_signing_health"):
+                payload["snapshot"]["command_signing"] = rc.get_signing_health()
+        except Exception:
+            pass
+        # ID-401: event-log sensor health (no event payload until promotion).
+        try:
+            ew = getattr(self, "event_watcher", None)
+            if ew is not None and hasattr(ew, "get_health"):
+                payload["snapshot"]["event_log_health"] = ew.get_health()
         except Exception:
             pass
         try:

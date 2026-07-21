@@ -762,10 +762,15 @@ class FirewallAgent:
         for i in range(0, len(data), BATCH):
             batch = data[i : i + BATCH]
             batch_ids: List[str] = []
+            batch_ips: List[str] = []
             for item in batch:
                 try:
                     block_id = str(item["id"]).strip()
-                    ip_or_cidr = str(item.get("ip_or_cidr", "")).strip()
+                    ip_or_cidr = str(
+                        item.get("ip_or_cidr")
+                        or item.get("ip")
+                        or ""
+                    ).strip()
                 except Exception as e:
                     self.logger.error(f"Invalid unblock item: {e}")
                     failed += 1
@@ -781,6 +786,8 @@ class FirewallAgent:
                     self.logger.info(f"Removed block {block_id} ({ip_or_cidr})")
                     batch_ids.append(block_id)
                     removed_ids.append(block_id)
+                    if ip_clean and ip_clean not in batch_ips:
+                        batch_ips.append(ip_clean)
                     # Local cache only — do NOT re-hit netsh / alternate unblock APIs
                     if ip_clean and self.auto_response:
                         try:
@@ -802,11 +809,7 @@ class FirewallAgent:
                     )
 
             if batch_ids:
-                body = {"token": self.token, "block_ids": batch_ids}
-                _, ack_code = self._post_json("/api/agent/block-removed", body)
-                if ack_code != 200:
-                    self.logger.error(f"block-removed HTTP {ack_code}")
-                    # IDs stay remove_pending; next poll retries
+                self._ack_blocks_removed(batch_ids, batch_ips)
             if i + BATCH < len(data):
                 time.sleep(0.2)
 
@@ -814,6 +817,76 @@ class FirewallAgent:
             f"[FW-SYNC] pending_unblocks={total} removed={len(removed_ids)} failed={failed}"
         )
         return removed_ids
+
+    def _ack_blocks_removed(self, block_ids: List[str], ips: Optional[List[str]] = None) -> int:
+        """POST /api/agent/block-removed — prefer block_ids + ips (dashboard SoT).
+
+        Live 4.8.4 finding: cloud returns HTTP 200 with ``updated: 0`` when the
+        body only carries ``block_ids`` for remove_pending rows, so the dashboard
+        stays on "Kaldırılıyor…". ACK'ing with ``ip`` / ``ips`` actually clears
+        those rows (``updated > 0``). Send both; if the batch ACK reports
+        updated=0, fall back to per-IP ACK.
+        """
+        ips = [ip for ip in (ips or []) if ip]
+        # Prefer int IDs when possible — cloud store is numeric
+        id_payload: list = []
+        for bid in block_ids:
+            try:
+                id_payload.append(int(bid))
+            except (TypeError, ValueError):
+                id_payload.append(bid)
+
+        body = {
+            "token": self.token,
+            "block_ids": id_payload,
+        }
+        if len(ips) == 1:
+            body["ip"] = ips[0]
+        if ips:
+            body["ips"] = ips
+
+        resp, ack_code = self._post_json("/api/agent/block-removed", body)
+        updated = 0
+        if isinstance(resp, dict):
+            try:
+                updated = int(resp.get("updated") or 0)
+            except (TypeError, ValueError):
+                updated = 0
+        if ack_code != 200:
+            self.logger.error(f"block-removed HTTP {ack_code} body={resp}")
+            return 0
+
+        self.logger.info(
+            f"[FW-SYNC] block-removed ACK updated={updated} "
+            f"ids={len(block_ids)} ips={len(ips)}"
+        )
+        if updated > 0:
+            return updated
+
+        # Fallback: cloud matched neither ids nor ips list — try per-IP
+        recovered = 0
+        for ip in ips:
+            r2, code2 = self._post_json(
+                "/api/agent/block-removed",
+                {"token": self.token, "ip": ip},
+            )
+            u2 = 0
+            if isinstance(r2, dict):
+                try:
+                    u2 = int(r2.get("updated") or 0)
+                except (TypeError, ValueError):
+                    u2 = 0
+            if code2 == 200 and u2 > 0:
+                recovered += u2
+                self.logger.info(
+                    f"[FW-SYNC] block-removed per-IP ACK ip={ip} updated={u2}"
+                )
+            else:
+                self.logger.warning(
+                    f"[FW-SYNC] block-removed per-IP ACK ip={ip} "
+                    f"HTTP {code2} updated={u2} body={r2}"
+                )
+        return recovered
 
     # --------------- Migration & sync --------------- #
 

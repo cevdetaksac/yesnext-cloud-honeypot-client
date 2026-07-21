@@ -740,6 +740,18 @@ class AutoResponse:
                     "POST", "agent/block-removed",
                     data={"token": token, "ip": ip},
                 )
+                if isinstance(result, dict):
+                    updated = result.get("updated")
+                    log(
+                        f"[AUTO-RESPONSE] ✅ block-removed reported: {ip} "
+                        f"updated={updated}"
+                    )
+                    if updated == 0:
+                        log(
+                            f"[AUTO-RESPONSE] ⚠️ block-removed updated=0 for {ip} "
+                            f"— cloud row may stay in 'removing' (dashboard)"
+                        )
+                    return
                 if result:
                     log(f"[AUTO-RESPONSE] ✅ block-removed reported: {ip}")
                     return

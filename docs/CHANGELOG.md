@@ -1,3 +1,8 @@
+# v4.8.5
+- **Dashboard "Kaldırılıyor…" takılı kalma fix:** Client yerel firewall kuralını siliyordu ve `pending-unblocks` kuyruğunu boşaltıyordu, ama `POST /api/agent/block-removed` ACK'i yalnız `block_ids` taşıyordu. Canlı probe: aynı endpoint `ip` ile `updated>0` dönüyor, `block_ids`-only ile çoğu zaman `updated:0` — cloud "removing" satırını kapatmıyor, dashboard butonu sonsuza dek "Kaldırılıyor…" kalıyor. FW-SYNC artık ACK'te **hem `block_ids` (int) hem `ips`/`ip`** gönderir; `updated=0` olursa IP başına fallback ACK dener. Yanıt `updated=` artık loglanır.
+- AutoResponse unblock raporu da `updated=` değerini loglar (`updated=0` uyarısı).
+- 3 unit test. **Cloud TODO:** `block-removed` remove_pending satırlarını `block_ids` ile de `updated>0` yapmalı; kuyruk ACK gelene kadar tutulmalı (GET'te silinmemeli).
+
 # v4.8.4
 - **Whitelist "eklendi ama görünmüyor" fix (cloud SoT):** frontend-only GUI'de engine nesneleri (`threat_engine`/`auto_response`/`event_watcher`) `None` olduğundan whitelist ekleme yalnız yerel setlere yazmaya çalışıyor, buluta **boş liste** gönderiyor (mevcut cloud whitelist'i silme riski) ve tablo hep "Whitelist boş" kalıyordu. Artık:
   - `_persist_whitelist_to_cloud(add/remove)` bulutun güncel `whitelist_ips`'ini okur, yerel setlerle birleştirir, açık add/remove deltasını uygular — asla kör overwrite yapmaz.

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.8.4"  # Whitelist cloud SoT fix: GUI merges threats/config whitelist_ips (frontend-only add no longer no-op/wipe)
+VERSION = "4.8.5"  # block-removed ACK now sends ips(+block_ids); fixes dashboard stuck on Kaldırılıyor
 
 
 CLIENT_VERSION = VERSION  # Main version constant

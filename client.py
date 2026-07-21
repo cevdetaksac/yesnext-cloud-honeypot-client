@@ -1384,7 +1384,12 @@ class CloudHoneypotClient:
     def _ipc_persistence_summary(self) -> dict:
         try:
             from client_tamper import get_persistence_status
-            return get_persistence_status()
+            # We are already inside the daemon STATUS socket. Never probe that
+            # same socket recursively; the server is single-threaded.
+            is_motor = bool(getattr(self, "_is_daemon_motor", False))
+            rc = getattr(self, "remote_commands", None)
+            daemon_ok = bool(is_motor and rc and getattr(rc, "_running", False))
+            return get_persistence_status(daemon_ok_override=daemon_ok)
         except Exception:
             return {}
 

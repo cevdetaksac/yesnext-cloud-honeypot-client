@@ -200,7 +200,14 @@ def report_tamper(
     threading.Thread(target=_send, name="TamperUrgent", daemon=True).start()
 
 
-def get_persistence_status() -> dict:
+def get_persistence_status(daemon_ok_override=None) -> dict:
+    """Return persistence health without recursive daemon IPC.
+
+    `daemon_ok_override` is mandatory for callers already serving the daemon
+    STATUS socket. Calling is_motor_healthy() from inside STATUS recursively
+    queued another STATUS request on the same single-threaded server and could
+    exhaust the listener until every GUI/Guardian probe timed out.
+    """
     try:
         from client_guardian_service import (
             is_guardian_service_installed,
@@ -211,11 +218,14 @@ def get_persistence_status() -> dict:
     except Exception:
         svc_ok = False
         svc_inst = False
-    try:
-        from client_daemon_ipc import is_motor_healthy
-        daemon_ok = bool(is_motor_healthy())
-    except Exception:
-        daemon_ok = False
+    if daemon_ok_override is not None:
+        daemon_ok = bool(daemon_ok_override)
+    else:
+        try:
+            from client_daemon_ipc import is_motor_healthy
+            daemon_ok = bool(is_motor_healthy())
+        except Exception:
+            daemon_ok = False
     try:
         from client_operator_stop import is_operator_stop_active
         op_stop = is_operator_stop_active()

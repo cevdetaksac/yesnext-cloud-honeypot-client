@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.3"  # Operator-approved suspend + GUI Security Layers + hard alert-only
+VERSION = "4.7.4"  # Hotfix: STATUS persistence recursion exhausted single-thread IPC
 
 
 CLIENT_VERSION = VERSION  # Main version constant

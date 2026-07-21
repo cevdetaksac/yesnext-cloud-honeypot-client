@@ -1,3 +1,6 @@
+# v4.7.4
+- **IPC health hotfix:** daemon `STATUS` oluştururken `get_persistence_status()` tekrar aynı `:58632 STATUS` soketini çağırıyordu. Tek-thread control server recursive self-call kuyruğuyla doluyor; GUI/Guardian motor sorguları timeout oluyor ve çok sayıda `CLOSE_WAIT` bırakıyordu. STATUS artık yerel daemon durumunu override olarak geçirir ve kendi soketini probe etmez. Regression test eklendi.
+
 # v4.7.3
 - **Operator-approved containment (hard safety):** Network Guard detection is **always alert-only**. Cloud config cannot enable `auto_contain` / `auto_kill` / `auto_restore`. Suspend only via confirmed `suspend_process` (exact `pid` + image/path + `process_start_time`); `resume_process` releases.
 - **GUI Control Center:** new **Güvenlik Katmanları** tab — ransomware / canary / Network Guard toggles write immediately via `POST /api/threats/config`, rollback on failure; daemon applies on `threat_config_updated` WS push.

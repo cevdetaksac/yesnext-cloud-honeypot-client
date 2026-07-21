@@ -1379,7 +1379,35 @@ class CloudHoneypotClient:
             "motor_ok": bool(is_motor and rc_running),
             "rs_quarantine": self._ipc_rs_quarantine_summary(),
             "persistence": self._ipc_persistence_summary(),
+            "network_guard": self._ipc_network_guard_summary(),
+            "ransomware_running": self._ipc_rs_running(),
         }
+
+    def _ipc_rs_running(self) -> bool:
+        rs = getattr(self, "ransomware_shield", None)
+        if rs is None:
+            return False
+        try:
+            return bool(rs.get_stats().get("running"))
+        except Exception:
+            return False
+
+    def _ipc_network_guard_summary(self) -> dict:
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"present": False}
+        try:
+            st = ng.status() or {}
+            return {
+                "present": True,
+                "enabled": bool(st.get("enabled", True)),
+                "running": bool(getattr(ng, "_running", False)),
+                "suspended_processes": int(st.get("suspended_processes") or 0),
+                "baseline_age_sec": st.get("baseline_age_sec"),
+                "internet_ok": st.get("internet_ok"),
+            }
+        except Exception:
+            return {"present": True}
 
     def _ipc_persistence_summary(self) -> dict:
         try:

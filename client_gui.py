@@ -136,7 +136,8 @@ class ModernGUI:
         self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
         self._nav_buttons: Dict[str, dict] = {}
         self._pages_built = {
-            "status": False, "threat": False, "services": False, "layers": False,
+            "status": False, "threat": False, "services": False,
+            "layers": False, "settings": False,
         }
         self._page_placeholders = {}
         self._page_data_loaded = {}
@@ -146,6 +147,7 @@ class ModernGUI:
             ("threat", "🛡", self.t("tab_threat_center")),
             ("services", "🐝", self.t("tab_services")),
             ("layers", "⚙", self.t("tab_security_layers")),
+            ("settings", "🛠", self.t("tab_settings")),
         ]
 
         for page_id, icon, label in nav_items:
@@ -293,6 +295,8 @@ class ModernGUI:
                 self._build_services_section(page)
             elif page_id == "layers":
                 self._build_security_layers(page)
+            elif page_id == "settings":
+                self._build_settings_page(page)
             else:
                 return False
             self._pages_built[page_id] = True
@@ -381,6 +385,18 @@ class ModernGUI:
                 self.root.after(50, self._lazy_load_threat_data)
             except Exception:
                 self._lazy_load_threat_data()
+        elif page_id == "layers":
+            # Always re-sync toggles with the cloud source of truth on revisit
+            # so the shown state can never drift from the live daemon config.
+            try:
+                self.root.after(50, self._load_security_layers)
+            except Exception:
+                self._load_security_layers()
+        elif page_id == "settings":
+            try:
+                self.root.after(50, self._load_settings_values)
+            except Exception:
+                self._load_settings_values()
         log(f"[PERF] nav '{page_id}' switch {(time.time() - t0) * 1000:.0f}ms")
 
     def _create_sidebar_nav_item(
@@ -539,7 +555,8 @@ class ModernGUI:
             text_color=COLORS["text"], corner_radius=5,
         )
         settings_btn.pack(side="right", padx=2, pady=5)
-        settings_btn.configure(command=lambda: self._show_popup_menu(settings_btn, "settings"))
+        # Sidebar "Ayarlar" sekmesine git — eski popup menü çift anlam yaratıyordu
+        settings_btn.configure(command=lambda: self._show_page("settings"))
 
         # Dashboard butonu
         ctk.CTkButton(
@@ -1281,11 +1298,21 @@ class ModernGUI:
             switch.pack(side="right", padx=14)
             self._layer_switches[key] = switch
 
+        footer = ctk.CTkFrame(shell, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(8, 16))
         self._layers_sync_label = ctk.CTkLabel(
-            shell, text=self.t("layers_syncing"),
+            footer, text=self.t("layers_syncing"),
             font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
         )
-        self._layers_sync_label.pack(anchor="w", padx=18, pady=(8, 16))
+        self._layers_sync_label.pack(side="left")
+        ctk.CTkButton(
+            footer, text=f"🛠 {self.t('prot_manage_settings')}",
+            font=ctk.CTkFont(size=11), width=110, height=26,
+            fg_color="transparent", hover_color=COLORS["accent"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text"], corner_radius=6,
+            command=lambda: self._show_page("settings"),
+        ).pack(side="right")
         self._load_security_layers()
 
     @staticmethod
@@ -1308,11 +1335,13 @@ class ModernGUI:
         self._layer_values = values
         for key, switch in getattr(self, "_layer_switches", {}).items():
             try:
+                # CTkSwitch.select()/deselect() are no-ops while the widget is
+                # disabled, so enable it FIRST and only then set the knob state.
+                switch.configure(state="normal")
                 if values.get(key, True):
                     switch.select()
                 else:
                     switch.deselect()
-                switch.configure(state="normal")
             except Exception:
                 pass
         try:
@@ -1374,12 +1403,14 @@ class ModernGUI:
             response = self.app.api_client.update_threat_config(token, patch)
             if response is None:
                 def _rollback():
+                    # Re-enable before select/deselect — a disabled CTkSwitch
+                    # ignores select()/deselect() and would keep the old knob.
+                    for ctl in self._layer_switches.values():
+                        ctl.configure(state="normal")
                     if old_value:
                         switch.select()
                     else:
                         switch.deselect()
-                    for ctl in self._layer_switches.values():
-                        ctl.configure(state="normal")
                     self._layers_sync_label.configure(
                         text=self.t("layers_sync_failed"),
                         text_color=COLORS["red"],
@@ -1403,10 +1434,269 @@ class ModernGUI:
         ).start()
 
     # ═══════════════════════════════════════════════════════════════
+    #  TAB 5: AYARLAR — cloud threats/config ile çift yönlü eşitleme
+    # ═══════════════════════════════════════════════════════════════
+    def _build_settings_page(self, parent):
+        """Settings tab — widgets generated from client_settings_util.SECTIONS."""
+        from client_settings_util import SECTIONS
+
+        shell = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        shell.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            shell, text=f"🛠  {self.t('settings_title')}",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            shell, text=self.t("settings_subtitle"), justify="left", wraplength=760,
+            font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"],
+        ).pack(anchor="w", padx=18, pady=(0, 12))
+
+        self._settings_widgets: Dict[str, dict] = {}
+
+        for sec_label_key, fields in SECTIONS:
+            sec = ctk.CTkFrame(
+                shell, fg_color=COLORS["bg"], corner_radius=8,
+                border_width=1, border_color=COLORS["border"],
+            )
+            sec.pack(fill="x", padx=18, pady=6)
+            ctk.CTkLabel(
+                sec, text=self.t(sec_label_key),
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+
+            for flat_key, kind, label_key, extra in fields:
+                row = ctk.CTkFrame(sec, fg_color="transparent")
+                row.pack(fill="x", padx=12, pady=3)
+                ctk.CTkLabel(
+                    row, text=self.t(label_key), font=ctk.CTkFont(size=12),
+                    text_color=COLORS["text"], anchor="w",
+                ).pack(side="left", fill="x", expand=True)
+
+                if kind == "bool":
+                    widget = ctk.CTkSwitch(row, text="", width=48, state="disabled")
+                    widget.pack(side="right", padx=4)
+                    meta = {"kind": kind, "widget": widget}
+                elif kind == "choice":
+                    from client_settings_util import CHOICE_LABEL_KEYS
+                    label_map = CHOICE_LABEL_KEYS.get(flat_key, {})
+                    # Display human labels; keep reverse map for save
+                    display_values = [
+                        self.t(label_map[v]) if v in label_map else v
+                        for v in (extra or [])
+                    ]
+                    value_by_display = {
+                        (self.t(label_map[v]) if v in label_map else v): v
+                        for v in (extra or [])
+                    }
+                    display_by_value = {v: d for d, v in value_by_display.items()}
+                    first = display_values[0] if display_values else ""
+                    var = ctk.StringVar(value=first)
+                    widget = ctk.CTkOptionMenu(
+                        row, values=display_values, variable=var,
+                        width=180, height=26, font=ctk.CTkFont(size=11),
+                        state="disabled",
+                    )
+                    widget._settings_var = var
+                    widget.pack(side="right", padx=4)
+                    meta = {
+                        "kind": kind, "widget": widget,
+                        "value_by_display": value_by_display,
+                        "display_by_value": display_by_value,
+                    }
+                elif kind in ("int", "time"):
+                    widget = ctk.CTkEntry(
+                        row, width=80, height=26, font=ctk.CTkFont(size=12),
+                        justify="center", state="disabled",
+                    )
+                    widget.pack(side="right", padx=4)
+                    meta = {"kind": kind, "widget": widget}
+                else:  # str
+                    widget = ctk.CTkEntry(
+                        row, width=280, height=26, font=ctk.CTkFont(size=12),
+                        state="disabled",
+                    )
+                    widget.pack(side="right", padx=4)
+                    meta = {"kind": kind, "widget": widget}
+
+                self._settings_widgets[flat_key] = meta
+            ctk.CTkFrame(sec, height=6, fg_color="transparent").pack()
+
+        # Alt satır: durum etiketi + kaydet
+        footer = ctk.CTkFrame(shell, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(8, 16))
+        self._settings_status_label = ctk.CTkLabel(
+            footer, text=self.t("layers_syncing"),
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+        )
+        self._settings_status_label.pack(side="left")
+        self._settings_save_btn = ctk.CTkButton(
+            footer, text=self.t("settings_save"),
+            font=ctk.CTkFont(size=12, weight="bold"), width=140, height=30,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=6,
+            command=self._save_settings, state="disabled",
+        )
+        self._settings_save_btn.pack(side="right")
+
+        # Title-row save — visible without scrolling past webhook
+        self._settings_save_btn_top = ctk.CTkButton(
+            shell, text=self.t("settings_save"),
+            font=ctk.CTkFont(size=12, weight="bold"), width=140, height=28,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=6,
+            command=self._save_settings, state="disabled",
+        )
+        self._settings_save_btn_top.place(relx=1.0, x=-18, y=18, anchor="ne")
+
+        self._load_settings_values()
+
+    def _settings_set_status(self, text: str, color: str):
+        try:
+            self._settings_status_label.configure(text=text, text_color=color)
+        except Exception:
+            pass
+
+    def _apply_settings_values(self, values: dict):
+        """Fill widgets from flat values, then enable editing."""
+        for flat_key, meta in getattr(self, "_settings_widgets", {}).items():
+            kind, widget = meta["kind"], meta["widget"]
+            val = values.get(flat_key)
+            try:
+                # Enable FIRST — disabled CTk widgets ignore state mutations
+                widget.configure(state="normal")
+                if kind == "bool":
+                    if val:
+                        widget.select()
+                    else:
+                        widget.deselect()
+                elif kind == "choice":
+                    display = meta.get("display_by_value", {}).get(str(val), str(val))
+                    widget._settings_var.set(display)
+                else:
+                    widget.delete(0, "end")
+                    widget.insert(0, "" if val is None else str(val))
+            except Exception:
+                pass
+        for btn_name in ("_settings_save_btn", "_settings_save_btn_top"):
+            try:
+                getattr(self, btn_name).configure(state="normal")
+            except Exception:
+                pass
+        self._settings_set_status(f"✓ {self.t('layers_synced')}", COLORS["green"])
+
+    def _collect_settings_values(self) -> dict:
+        values = {}
+        for flat_key, meta in getattr(self, "_settings_widgets", {}).items():
+            kind, widget = meta["kind"], meta["widget"]
+            try:
+                if kind == "bool":
+                    values[flat_key] = bool(widget.get())
+                elif kind == "choice":
+                    display = widget._settings_var.get()
+                    values[flat_key] = meta.get("value_by_display", {}).get(
+                        display, display
+                    )
+                else:
+                    values[flat_key] = widget.get()
+            except Exception:
+                pass
+        return values
+
+    def _load_settings_values(self):
+        token = self.app.state.get("token", "")
+        if not token:
+            self._settings_set_status(self.t("layers_no_token"), COLORS["orange"])
+            return
+
+        def _worker():
+            from client_settings_util import extract_settings_values
+            config = self.app.api_client.fetch_threat_config(token) or {}
+            config = self._effective_threat_config(config)
+            values = extract_settings_values(config)
+            self._gui_safe(lambda: self._apply_settings_values(values))
+
+        threading.Thread(
+            target=_worker, name="GUI-Settings-Load", daemon=True
+        ).start()
+
+    def _save_settings(self):
+        from client_settings_util import build_threat_config_patch
+        token = self.app.state.get("token", "")
+        if not token:
+            self._settings_set_status(self.t("layers_no_token"), COLORS["orange"])
+            return
+        values = self._collect_settings_values()
+        patch, errors = build_threat_config_patch(values)
+        if errors:
+            labels = []
+            from client_settings_util import SECTIONS
+            for _sec, fields in SECTIONS:
+                for flat_key, _kind, label_key, _extra in fields:
+                    if flat_key in errors:
+                        labels.append(self.t(label_key))
+            self._settings_set_status(
+                self.t("settings_invalid").format(fields=", ".join(labels)),
+                COLORS["red"],
+            )
+            return
+        if not patch:
+            return
+
+        try:
+            self._settings_save_btn.configure(state="disabled")
+            self._settings_save_btn_top.configure(state="disabled")
+        except Exception:
+            pass
+        self._settings_set_status(self.t("layers_syncing"), COLORS["blue"])
+
+        def _worker():
+            response = self.app.api_client.update_threat_config(token, patch)
+            if response is None:
+                def _fail():
+                    self._settings_set_status(
+                        self.t("layers_sync_failed"), COLORS["red"]
+                    )
+                    try:
+                        self._settings_save_btn.configure(state="normal")
+                        self._settings_save_btn_top.configure(state="normal")
+                    except Exception:
+                        pass
+                self._gui_safe(_fail)
+                return
+            # Cloud accepted — re-read effective config so the daemon and GUI
+            # both converge on the same source of truth.
+            from client_settings_util import extract_settings_values
+            effective = self._effective_threat_config(response)
+            if not any(k in effective for k in (
+                "alert_email_enabled", "auto_block_enabled", "silent_hours"
+            )):
+                effective = self._effective_threat_config(
+                    self.app.api_client.fetch_threat_config(token) or {}
+                )
+            values2 = extract_settings_values(effective)
+
+            def _done():
+                self._apply_settings_values(values2)
+                self._settings_set_status(
+                    f"✓ {self.t('settings_saved')}", COLORS["green"]
+                )
+            self._gui_safe(_done)
+
+        threading.Thread(
+            target=_worker, name="GUI-Settings-Save", daemon=True
+        ).start()
+
+    # ═══════════════════════════════════════════════════════════════
     #  DASHBOARD İSTATİSTİK KARTLARI
     # ═══════════════════════════════════════════════════════════════
     def _build_dashboard(self, parent):
         """Mini dashboard — canlı istatistik kartları (Tab 1: Anlık Durum)."""
+        # Koruma şeridi ÖNCE — ilk bakışta tüm katmanlar scroll'suz görünsün
+        self._build_protection_strip(parent)
+
         sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
         sec.pack(fill="x", pady=(0, 12))
 
@@ -1498,6 +1788,248 @@ class ModernGUI:
                                           on_click=handler)
             card.grid(row=row, column=col, padx=6, pady=5, sticky="nsew")
             self._dash_cards[key] = card
+
+    # ═══════════════════════════════════════════════════════════════
+    #  KORUMA DURUMU ŞERİDİ (Tab 1 — tüm katmanların canlı özeti)
+    # ═══════════════════════════════════════════════════════════════
+    def _build_protection_strip(self, parent):
+        """Live one-glance status chips for every protection layer + shortcuts."""
+        sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
+        sec.pack(fill="x", pady=(0, 12))
+
+        hdr = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(
+            hdr, text="🛡", font=self._emoji_font(14),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+        ctk.CTkLabel(
+            hdr, text=f"  {self.t('prot_strip_title')}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(side="left")
+
+        # Sağda kısayollar — teknik bilgi gerektirmeden yönetim
+        ctk.CTkButton(
+            hdr, text=self.t("prot_manage_settings"),
+            font=ctk.CTkFont(size=11), width=100, height=24,
+            fg_color="transparent", hover_color=COLORS["accent"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text"], corner_radius=6,
+            command=lambda: self._show_page("settings"),
+        ).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(
+            hdr, text=self.t("prot_manage_layers"),
+            font=ctk.CTkFont(size=11), width=120, height=24,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=6,
+            command=lambda: self._show_page("layers"),
+        ).pack(side="right", padx=(4, 4))
+
+        ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"]).pack(
+            fill="x", padx=16, pady=(0, 8)
+        )
+
+        grid = ctk.CTkFrame(sec, fg_color="transparent")
+        grid.pack(fill="x", padx=12, pady=(0, 12))
+        for c in range(3):
+            grid.columnconfigure(c, weight=1)
+
+        self._prot_chips: Dict[str, dict] = {}
+        chip_defs = [
+            # (key, emoji, label_key, on_click)
+            ("motor",      "⚙️", "prot_chip_motor",      self._detail_self_protect),
+            ("ransomware", "🧬", "prot_chip_ransomware", self._detail_ransomware),
+            ("netguard",   "🌐", "prot_chip_netguard",   lambda: self._show_page("layers")),
+            ("guardian",   "🛟", "prot_chip_guardian",   self._detail_persistence),
+            ("honeypots",  "🐝", "prot_chip_honeypots",  lambda: self._show_page("services")),
+            ("quarantine", "🔐", "prot_chip_quarantine", self._detail_ransomware),
+        ]
+        for idx, (key, emoji, label_key, handler) in enumerate(chip_defs):
+            row, col = divmod(idx, 3)
+            chip = ctk.CTkFrame(
+                grid, fg_color=COLORS["bg"], corner_radius=8,
+                border_width=1, border_color=COLORS["border"], cursor="hand2",
+            )
+            chip.grid(row=row, column=col, padx=5, pady=4, sticky="nsew")
+
+            inner = ctk.CTkFrame(chip, fg_color="transparent")
+            inner.pack(fill="x", padx=10, pady=8)
+            ctk.CTkLabel(
+                inner, text=emoji, font=self._emoji_font(14),
+            ).pack(side="left", padx=(0, 6))
+            text_col = ctk.CTkFrame(inner, fg_color="transparent")
+            text_col.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                text_col, text=self.t(label_key),
+                font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            ).pack(anchor="w")
+            status_lbl = ctk.CTkLabel(
+                text_col, text="…",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=COLORS["text_dim"],
+            )
+            status_lbl.pack(anchor="w")
+
+            def _bind_click(widget, fn=handler, frame=chip):
+                widget.bind("<Button-1>", lambda _e: fn())
+                frame.bind(
+                    "<Enter>", lambda _e: frame.configure(border_color=COLORS["blue"])
+                )
+                frame.bind(
+                    "<Leave>", lambda _e: frame.configure(border_color=COLORS["border"])
+                )
+            for w in (chip, inner, text_col, status_lbl):
+                _bind_click(w)
+
+            self._prot_chips[key] = {"frame": chip, "status": status_lbl}
+
+    def _set_prot_chip(self, key: str, text: str, color: str):
+        chip = getattr(self, "_prot_chips", {}).get(key)
+        if not chip:
+            return
+        try:
+            chip["status"].configure(text=text, text_color=color)
+        except Exception:
+            pass
+
+    def _refresh_protection_strip(self):
+        """Update chips from cached daemon STATUS (or local engines if any)."""
+        if not getattr(self, "_prot_chips", None):
+            return
+        st = getattr(self, "_cached_daemon_status", None) or {}
+        on = self.t("prot_state_on")
+        off = self.t("prot_state_off")
+
+        # 1) Motor (SYSTEM daemon)
+        motor_ok = bool(getattr(self, "_cached_motor_ok", False))
+        self._set_prot_chip(
+            "motor", on if motor_ok else off,
+            COLORS["green"] if motor_ok else COLORS["red"],
+        )
+
+        # 2) Ransomware Shield — daemon truth first, local engine fallback
+        rs_running = st.get("ransomware_running")
+        if rs_running is None:
+            rs = getattr(self.app, "ransomware_shield", None)
+            try:
+                rs_running = bool(rs and rs.get_stats().get("running"))
+            except Exception:
+                rs_running = False
+        self._set_prot_chip(
+            "ransomware", on if rs_running else off,
+            COLORS["green"] if rs_running else COLORS["red"],
+        )
+
+        # 3) Network Guard
+        ng = st.get("network_guard") or {}
+        if ng.get("present"):
+            ng_on = bool(ng.get("running")) and bool(ng.get("enabled", True))
+            extra = ""
+            susp = int(ng.get("suspended_processes") or 0)
+            if susp:
+                extra = f" · {susp} susp"
+            self._set_prot_chip(
+                "netguard", (on if ng_on else off) + extra,
+                COLORS["orange"] if susp else (
+                    COLORS["green"] if ng_on else COLORS["red"]),
+            )
+        else:
+            local_ng = getattr(self.app, "network_guard", None)
+            ng_on = bool(local_ng and getattr(local_ng, "_running", False))
+            self._set_prot_chip(
+                "netguard", on if ng_on else "—",
+                COLORS["green"] if ng_on else COLORS["text_dim"],
+            )
+
+        # 4) Guardian / persistence + tamper
+        pers = st.get("persistence") or {}
+        svc_ok = bool(pers.get("service_ok"))
+        tamper = int(pers.get("tamper_count_24h") or 0)
+        if pers:
+            if tamper > 0:
+                self._set_prot_chip(
+                    "guardian", f"⚠ {tamper}/24h", COLORS["orange"]
+                )
+            else:
+                self._set_prot_chip(
+                    "guardian", on if svc_ok else off,
+                    COLORS["green"] if svc_ok else COLORS["orange"],
+                )
+        else:
+            self._set_prot_chip("guardian", "—", COLORS["text_dim"])
+
+        # 5) Honeypot services
+        try:
+            active = len(self.app.service_manager.running_services)
+            total = len(self.app.PORT_TABLOSU) or 1
+            self._set_prot_chip(
+                "honeypots", f"{active}/{total}",
+                COLORS["green"] if active > 0 else COLORS["text_dim"],
+            )
+        except Exception:
+            pass
+
+        # 6) RS quarantine
+        rq = st.get("rs_quarantine") or {}
+        if rq.get("active"):
+            self._set_prot_chip(
+                "quarantine",
+                self.t("prot_quarantine_active").format(
+                    count=int(rq.get("entries") or 0)
+                ),
+                COLORS["red"],
+            )
+        else:
+            self._set_prot_chip(
+                "quarantine", self.t("prot_quarantine_clear"), COLORS["green"]
+            )
+
+    # ── Detail: Guardian / kalıcılık durumu ── #
+    def _detail_persistence(self):
+        popup = self._show_detail_window(f"🛟 {self.t('prot_chip_guardian')}", height=430)
+        content = popup._content
+        st = getattr(self, "_cached_daemon_status", None) or {}
+        pers = st.get("persistence") or {}
+        if not pers:
+            try:
+                from client_daemon_ipc import get_status
+                pers = (get_status(timeout=3.0) or {}).get("persistence") or {}
+            except Exception:
+                pers = {}
+        if not pers:
+            ctk.CTkLabel(content, text=self.t("detail_no_data"),
+                         text_color=COLORS["text_dim"]).pack(anchor="w", padx=4)
+            return
+        rows = [
+            ("prot_pers_daemon", bool(pers.get("daemon_ok"))),
+            ("prot_pers_service", bool(pers.get("service_ok"))),
+            ("prot_pers_tasks", bool(pers.get("tasks_armed"))),
+            ("prot_pers_selfprot", bool(pers.get("self_protection"))),
+        ]
+        for label_key, ok in rows:
+            row = ctk.CTkFrame(content, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=3)
+            ctk.CTkLabel(
+                row, text="🟢" if ok else "🔴", font=self._emoji_font(12),
+            ).pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(
+                row, text=self.t(label_key), font=ctk.CTkFont(size=13),
+                text_color=COLORS["text"],
+            ).pack(side="left")
+        tamper = int(pers.get("tamper_count_24h") or 0)
+        color = COLORS["orange"] if tamper else COLORS["text_dim"]
+        ctk.CTkLabel(
+            content,
+            text=self.t("prot_pers_tamper").format(count=tamper),
+            font=ctk.CTkFont(size=12), text_color=color,
+        ).pack(anchor="w", padx=8, pady=(10, 2))
+        if pers.get("operator_stop"):
+            ctk.CTkLabel(
+                content, text=self.t("prot_pers_operator_stop"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=COLORS["orange"],
+            ).pack(anchor="w", padx=8, pady=2)
 
     # ═══════════════════════════════════════════════════════════════
     #  TAB 2: TEHDİT MERKEZİ
@@ -4432,37 +4964,83 @@ class ModernGUI:
 
     # ── Detail: Self-Protection ── #
     def _detail_self_protect(self):
-        """Self-protection durumu detayları."""
-        popup = self._show_detail_window(f"🔒 {self.t('card_protection')}", height=300)
+        """Protection engine / self-protection detayları.
+
+        Frontend-only GUI'de yerel `process_protection` nesnesi bulunmaz; bu
+        nesne yalnızca SYSTEM daemon sürecinde yaşar. Bu yüzden durumu, koruma
+        şeridi chip'iyle AYNI kaynaktan — daemon STATUS (IPC) — okuruz. Böylece
+        "chip AKTİF ama popup OFF" çelişkisi ortadan kalkar.
+        """
+        popup = self._show_detail_window(f"🔒 {self.t('card_protection')}", height=360)
         content = popup._content
 
-        pp = getattr(self.app, 'process_protection', None)
-        if pp:
-            ctk.CTkLabel(content, text=f"🔒 {self.t('card_protection')}: ACTIVE",
-                         font=ctk.CTkFont(size=16, weight="bold"),
-                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=(0, 4))
+        st = getattr(self, "_cached_daemon_status", None) or {}
+        if not st:
+            try:
+                from client_daemon_ipc import get_status
+                st = get_status(timeout=3.0) or {}
+            except Exception:
+                st = {}
+        pers = st.get("persistence") or {}
+
+        pp = getattr(self.app, "process_protection", None)
+        motor_ok = bool(getattr(self, "_cached_motor_ok", False) or st.get("motor_ok"))
+        # Koruma AKTİF sayılır: yerel engine varsa, daemon self_protection true ise,
+        # ya da SYSTEM motoru sağlıklıysa (frontend GUI için tek gerçek kaynak).
+        prot_on = bool(pp) or bool(pers.get("self_protection")) or motor_ok
+
+        on, off = self.t("prot_state_on"), self.t("prot_state_off")
+        ctk.CTkLabel(
+            content,
+            text=f"🔒 {self.t('card_protection')}: {on if prot_on else off}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["green"] if prot_on else COLORS["red"],
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+        if prot_on:
             ctk.CTkLabel(content, text=self.t("detail_sp_desc"),
                          font=ctk.CTkFont(size=12),
                          text_color=COLORS["text"]).pack(anchor="w", padx=8, pady=2)
-        else:
-            ctk.CTkLabel(content, text=f"🔒 {self.t('card_protection')}: OFF",
-                         font=ctk.CTkFont(size=16, weight="bold"),
-                         text_color=COLORS["red"]).pack(anchor="w", padx=8, pady=(0, 4))
 
-        # MemoryGuard durumu
-        mg = getattr(self.app, 'memory_guard', None)
-        if mg:
-            ctk.CTkLabel(content, text=f"\n🧠 MemoryGuard: ACTIVE",
+        # Koruma motoru (SYSTEM daemon) — şeritteki "Koruma Motoru" chip'iyle aynı
+        ctk.CTkLabel(
+            content,
+            text=f"⚙️ {self.t('prot_chip_motor')}: {on if motor_ok else off}",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["green"] if motor_ok else COLORS["red"],
+        ).pack(anchor="w", padx=8, pady=(8, 1))
+
+        # Guardian / kalıcılık servisi
+        if pers:
+            svc_ok = bool(pers.get("service_ok"))
+            tamper = int(pers.get("tamper_count_24h") or 0)
+            ctk.CTkLabel(
+                content,
+                text=f"🛟 {self.t('prot_chip_guardian')}: {on if svc_ok else off}",
+                font=ctk.CTkFont(size=12),
+                text_color=COLORS["green"] if svc_ok else COLORS["orange"],
+            ).pack(anchor="w", padx=8, pady=1)
+            if tamper > 0:
+                ctk.CTkLabel(
+                    content, text=f"⚠ tamper 24h: {tamper}",
+                    font=ctk.CTkFont(size=12),
+                    text_color=COLORS["orange"],
+                ).pack(anchor="w", padx=8, pady=1)
+
+        # MemoryGuard — yerel nesne varsa ya da motor sağlıklıysa aktiftir
+        mg = getattr(self.app, "memory_guard", None)
+        if mg or motor_ok:
+            ctk.CTkLabel(content, text="🧠 MemoryGuard: ACTIVE",
                          font=ctk.CTkFont(size=13, weight="bold"),
-                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=(4, 2))
-            try:
-                import psutil
-                client_mem = psutil.Process().memory_info().rss / (1024 * 1024)
-                ctk.CTkLabel(content, text=f"Current: {client_mem:.0f} MB",
-                             font=ctk.CTkFont(size=12),
-                             text_color=COLORS["text"]).pack(anchor="w", padx=8, pady=1)
-            except Exception:
-                pass
+                         text_color=COLORS["green"]).pack(anchor="w", padx=8, pady=(8, 2))
+            if mg:
+                try:
+                    import psutil
+                    client_mem = psutil.Process().memory_info().rss / (1024 * 1024)
+                    ctk.CTkLabel(content, text=f"Current: {client_mem:.0f} MB",
+                                 font=ctk.CTkFont(size=12),
+                                 text_color=COLORS["text"]).pack(anchor="w", padx=8, pady=1)
+                except Exception:
+                    pass
 
     # ── Detail: Threat Level ── #
     def _detail_threat_level(self):
@@ -5099,15 +5677,23 @@ class ModernGUI:
                 except Exception:
                     return
                 ok = False
+                st = {}
                 try:
-                    from client_daemon_ipc import is_motor_healthy
-                    ok = bool(is_motor_healthy(timeout=0.8))
+                    from client_daemon_ipc import get_status
+                    st = get_status(timeout=0.8) or {}
+                    ok = bool(st.get("motor_ok") or (
+                        st.get("daemon") and st.get("remote_commands_running")
+                    ))
                 except Exception:
+                    st = {}
                     ok = False
                 if not ok:
                     rc = getattr(self.app, "remote_commands", None)
                     ok = bool(rc is not None and getattr(rc, "_running", False))
                 self._cached_motor_ok = ok
+                # Full daemon STATUS payload for the protection strip
+                # (persistence, network_guard, ransomware_running, rs_quarantine)
+                self._cached_daemon_status = st if st.get("ok") else {}
                 import time as _t
                 _t.sleep(3.0)
 
@@ -5312,6 +5898,26 @@ class ModernGUI:
                         self._update_card("ransomware", "OFF", COLORS["text_dim"])
                 except Exception:
                     pass
+            else:
+                # Frontend-only GUI: read shield state from daemon STATUS cache
+                try:
+                    dst = getattr(self, "_cached_daemon_status", None) or {}
+                    rq = dst.get("rs_quarantine") or {}
+                    rs_alerts = int(rq.get("alerts_total") or 0)
+                    rs_running = dst.get("ransomware_running")
+                    if rq.get("active"):
+                        self._update_card(
+                            "ransomware",
+                            f"⚠ {int(rq.get('entries') or 0)}", COLORS["red"],
+                        )
+                    elif rs_alerts > 0:
+                        self._update_card("ransomware", f"⚠ {rs_alerts}", COLORS["red"])
+                    elif rs_running:
+                        self._update_card("ransomware", "SAFE", COLORS["green"])
+                    elif rs_running is False and dst:
+                        self._update_card("ransomware", "OFF", COLORS["text_dim"])
+                except Exception:
+                    pass
 
             # 10) CPU / RAM usage (v4.0 Faz 3)
             hm = getattr(self.app, 'health_monitor', None)
@@ -5327,14 +5933,28 @@ class ModernGUI:
                     pass
 
             # 11) Self-Protection status (v4.0 Faz 3)
-            pp = getattr(self.app, 'process_protection', None)
-            if pp:
-                try:
+            # Kart, koruma şeridi chip'iyle AYNI kaynağı kullanmalı: yerel
+            # process_protection nesnesi frontend GUI'de yoktur, bu yüzden
+            # daemon STATUS (motor_ok / persistence.self_protection) gerçeği
+            # esas alınır — aksi halde chip AKTİF, kart OFF çelişkisi doğar.
+            try:
+                pp = getattr(self.app, 'process_protection', None)
+                dst = getattr(self, "_cached_daemon_status", None) or {}
+                pers = dst.get("persistence") or {}
+                motor_ok = bool(getattr(self, "_cached_motor_ok", False) or dst.get("motor_ok"))
+                prot_on = bool(pp) or bool(pers.get("self_protection")) or motor_ok
+                if prot_on:
                     self._update_card("self_protect", "ACTIVE", COLORS["green"])
-                except Exception:
-                    pass
-            else:
-                self._update_card("self_protect", "OFF", COLORS["text_dim"])
+                else:
+                    self._update_card("self_protect", "OFF", COLORS["text_dim"])
+            except Exception:
+                pass
+
+            # 11b) Koruma Durumu şeridi — daemon STATUS cache'inden
+            try:
+                self._refresh_protection_strip()
+            except Exception:
+                pass
 
             # 12) Trend mini-charts — sadece threat sekmesi açıkken
             if self._active_page == "threat":

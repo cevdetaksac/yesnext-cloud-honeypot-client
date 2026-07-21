@@ -1,3 +1,13 @@
+# v4.8.1
+- **Koruma detay popup'ı çelişki fix:** "Koruma Motoru" chip/kartı **AKTİF** derken detay popup'ı **Koruma: OFF** gösteriyordu. Kök neden: popup yerel `process_protection` nesnesini okuyordu; bu nesne yalnız SYSTEM daemon sürecinde yaşar, frontend-only GUI'de her zaman `None`. Popup ve `self_protect` kartı artık chip ile **aynı kaynağı** (daemon STATUS: `motor_ok` + `persistence.self_protection`) kullanır. Popup ayrıca motor, Guardian servisi, 24s tamper ve MemoryGuard durumunu tek ekranda tutarlı gösterir.
+
+# v4.8.0
+- **GUI Koruma Durumu şeridi (Anlık Durum):** tüm koruma katmanları tek bakışta — Koruma Motoru, Ransomware Shield, Network Guard, Guardian servisi, honeypot servisleri, karantina. Chip'ler tıklanınca ilgili detay popup'ı/sekmesi açılır; "Katmanları Yönet" ve "Ayarlar" kısayolları eklendi.
+- **Yeni Ayarlar sekmesi:** E-posta bildirimleri, otomatik engelleme (eşik/süre/limitler), sessiz saatler ve webhook artık GUI'den yönetilir. Tüm değerler `GET/POST /api/threats/config` ile buluta yazılır; kaydetten sonra efektif config yeniden okunur (bulut = source of truth). Şema + patch üretimi `client_settings_util.py`'de, 10 unit test ile.
+- **Güvenlik Katmanları toggle render fix:** `CTkSwitch.select()/deselect()` widget `disabled` iken sessizce no-op — toggle'lar config `True` olsa bile hep KAPALI görünüyordu. Artık önce `state="normal"` sonra knob set edilir (rollback yolu dahil). Katmanlar ve Ayarlar sekmeleri her ziyarette buluttan yeniden eşitlenir.
+- **Daemon STATUS genişletildi:** `network_guard{present,enabled,running,suspended_processes,baseline_age_sec,internet_ok}` ve `ransomware_running` alanları eklendi — frontend GUI ransomware/nw-guard durumunu motordan okur (yerel engine yokken "OFF" yanılgısı biter).
+- Guardian/persistence detay popup'ı: motor, servis, görevler, öz-koruma, 24 saatlik tamper sayısı ve operator-stop durumu tek ekranda.
+
 # v4.7.6
 - **Toplam Saldırı popup fix:** kart bulut `attack-count` (kümülatif) gösterirken detay popup yalnızca yerel `threat_engine`'i okuyordu. GUI frontend-only çalıştığında engine `None` olduğundan popup her zaman "Veri bulunamadı" veriyordu. Yeni `THREAT_TOP` IPC komutu ile motordan gerçek saldırgan listesi çekilir; motorda anlık IP context yoksa boş ekran yerine bulut toplamı + açıklama gösterilir.
 - **Günlük log retention:** ana client, threat ve lifecycle logları artık doğrudan `*-YYYY-MM-DD.log` dosyalarına yazılır; yerel gün değişiminde yeni dosyaya geçer ve yalnızca son 7 takvim gününü tutar.

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.7.6"  # Daily client/threat/lifecycle/update logs; 7-day retention
+VERSION = "4.8.1"  # GUI: protection detail popup now uses daemon STATUS (no AKTİF-vs-OFF mismatch)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

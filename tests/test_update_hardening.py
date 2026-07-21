@@ -76,6 +76,22 @@ class TestWriteAndParse(unittest.TestCase):
         ok, detail = validate_powershell_parse(dst)
         self.assertTrue(ok, detail)
 
+    def test_update_lock_survives_until_new_daemon_is_ready(self):
+        src = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "scripts", "update-and-install.ps1",
+        ))
+        with open(src, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+        ensure_idx = raw.rfind("Ensure-DaemonMotor -ExePath $exe")
+        clear_idx = raw.rfind("Clear-UpdateLock")
+        self.assertGreater(ensure_idx, 0)
+        self.assertGreater(
+            clear_idx,
+            ensure_idx,
+            "update lock must be cleared only after the new daemon is ready",
+        )
+
     def test_emergency_bootstrap_parses(self):
         dst = os.path.join(self._tdir, "emergency.ps1")
         path = write_emergency_bootstrap(dst)

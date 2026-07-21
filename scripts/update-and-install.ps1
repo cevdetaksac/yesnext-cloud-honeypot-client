@@ -443,11 +443,14 @@ try {
     Restore-HoneypotTasks
 }
 
-Clear-UpdateLock
-try { Write-UpdateUiStatus -Phase "done" -Detail "install_complete" } catch {}
-
 # CRITICAL: Stop-HoneypotTasks disabled Background+Watchdog - always restore + start motor
 [void](Ensure-DaemonMotor -ExePath $exe)
+
+# Keep the update lock alive until the new daemon has completed its boot-time
+# previous-session check. Clearing it before Ensure-DaemonMotor made a planned
+# installer stop look like unexpected_exit / agent_tamper on every update.
+Clear-UpdateLock
+try { Write-UpdateUiStatus -Phase "done" -Detail "install_complete" } catch {}
 
 if (-not $Silent) {
     # Interactive NSIS path - visible onboarding/GUI

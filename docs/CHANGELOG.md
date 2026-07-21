@@ -1,3 +1,6 @@
+# v4.7.5
+- **Update/tamper handoff hotfix:** `update-and-install.ps1` artık `update_in_progress.lock` dosyasını yeni daemon `Ensure-DaemonMotor` ile hazır olduktan sonra temizler. Önceden lock daemon boot'tan önce siliniyor; planlı installer kapanışı yeni motor tarafından `unexpected_exit` / `agent_tamper` sayılıyordu.
+
 # v4.7.4
 - **IPC health hotfix:** daemon `STATUS` oluştururken `get_persistence_status()` tekrar aynı `:58632 STATUS` soketini çağırıyordu. Tek-thread control server recursive self-call kuyruğuyla doluyor; GUI/Guardian motor sorguları timeout oluyor ve çok sayıda `CLOSE_WAIT` bırakıyordu. STATUS artık yerel daemon durumunu override olarak geçirir ve kendi soketini probe etmez. Regression test eklendi.
 

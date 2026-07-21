@@ -3,6 +3,7 @@
 """GUI singleton / handoff smoke tests (mutex names + helpers)."""
 
 import unittest
+import uuid
 from unittest import mock
 
 
@@ -32,8 +33,6 @@ class TestHandoffHelpers(unittest.TestCase):
     def test_gui_mutex_exclusive(self):
         import win32api
         import win32event
-        import winerror
-        from client_constants import GUI_MUTEX_NAME
         import client_instance as ci
 
         # Reset module globals for isolation
@@ -44,10 +43,14 @@ class TestHandoffHelpers(unittest.TestCase):
                 pass
             ci._GUI_MUTEX_HANDLE = None
 
-        self.assertTrue(ci.try_acquire_gui_mutex())
-        # Second acquire in same process still sees ALREADY_EXISTS on CreateMutex
-        # because first handle is held — try_acquire should return False
-        self.assertFalse(ci.try_acquire_gui_mutex())
+        # Never contend with a real GUI that may be running on the developer's
+        # desktop. The helper semantics are independent of the production name.
+        test_mutex_name = f"Local\\CloudHoneypotGuiTest-{uuid.uuid4()}"
+        with mock.patch.object(ci, "GUI_MUTEX_NAME", test_mutex_name):
+            self.assertTrue(ci.try_acquire_gui_mutex())
+            # Second acquire in the same process sees ALREADY_EXISTS because
+            # the first handle is held.
+            self.assertFalse(ci.try_acquire_gui_mutex())
 
         try:
             win32api.CloseHandle(ci._GUI_MUTEX_HANDLE)

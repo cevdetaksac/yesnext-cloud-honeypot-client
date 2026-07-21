@@ -9,9 +9,6 @@ on:
 jobs:
   test:
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: cloud-client
     steps:
       - uses: actions/checkout@v4
 

@@ -1,3 +1,9 @@
+# v4.9.8
+- **Kaynak köşe bilgisi:** üst barda küçük badge — App CPU%/RAM MB · Host CPU%/RAM% · ağ ↓↑ (daemon STATUS `resources`; tıkla → CPU/RAM detay).
+- **Motor CPU önceliği (RES-101):** Session-0 daemon `ABOVE_NORMAL` (asla `REALTIME`); config `security.motor_priority` (`above_normal`|`high`|`normal`); RES-102 lite guard yüksek motor CPU’da NORMAL’e düşer.
+- STATUS additive `resources{}` (host + process + priority) — process listesi yok (IPC hafif).
+- **Realtime presence (contract 1.4.12 / api/11):** uyku öncesi WS `presence` suspend (+ HTTP `POST /api/presence` ≤2s); servis/OS kapanırken `goodbye` sonra close; uyanınca reconnect + online; update/uninstall/operator_stop reason’ları; GUI quit ≠ offline (motor ayaktaysa). Power: `PowerRegisterSuspendResumeNotification` + console shutdown handler.
+
 # v4.9.7
 - **Threat Intel HP-INTEL apply (contract 09 / honeypot-contract 1.4.9):** bundle `firewall_blocks` → `HP-INTEL-<id>` inbound+outbound (no longer `HP-BLOCK-*` / AutoResponse 24h); severity/allowlist/expires/orphan reconcile; `firewall_removed` in ACK; ETag meta+cache durable; 304 → expire reconcile; clear_firewall includes `HP-INTEL-*`.
 - **successful_logon skor/auto-block fix:** bare RDP/success artık `threat_score` ≤70 (sessiz saat ≤80), asla 100; `should_auto_block()` bare success’te false; HP-BLOCK yalnız brute_force_then_success / honeypot / block_rules / operator; sessiz saat firewall kesmez (alert/challenge); whitelist skor düşürür.

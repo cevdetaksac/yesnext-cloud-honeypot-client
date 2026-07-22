@@ -1454,6 +1454,7 @@ class CloudHoneypotClient:
             "network_guard": self._ipc_network_guard_summary(),
             "ransomware_running": self._ipc_rs_running(),
             "resilience": self._ipc_resilience_summary(),
+            "resources": self._ipc_resources_summary(),
         }
 
     def _ipc_rs_running(self) -> bool:
@@ -1505,6 +1506,14 @@ class CloudHoneypotClient:
                 guardian_installed=persistence.get("service_installed"),
                 guardian_running=persistence.get("service_ok"),
             )
+        except Exception:
+            return {}
+
+    def _ipc_resources_summary(self) -> dict:
+        """Compact host + motor process usage for GUI corner badge (no lists)."""
+        try:
+            from client_resources import collect_resources
+            return collect_resources(getattr(self, "health_monitor", None))
         except Exception:
             return {}
 
@@ -2646,11 +2655,37 @@ class CloudHoneypotClient:
             log(f"[EXIT] Kapanış hatası: {e}")
             sys.exit(1)
 
-    def graceful_exit(self, code: int = 0):
+    def graceful_exit(self, code: int = 0, *, goodbye_reason: str = "shutdown"):
         """Merkezi temiz çıkış — tüm kaynakları serbest bırakır"""
         try:
             log(f"[EXIT] Graceful exit başlatılıyor (code={code})")
             self._quit_protect_until = 0.0
+            # Presence goodbye before tearing down WS (daemon motor only)
+            if getattr(self, "_is_daemon_motor", False) and goodbye_reason:
+                try:
+                    reason = goodbye_reason
+                    try:
+                        from client_operator_stop import is_operator_stop_active
+                        if is_operator_stop_active() and reason in ("shutdown", ""):
+                            reason = "operator_stop"
+                    except Exception:
+                        pass
+                    try:
+                        from client_utils import is_update_in_progress
+                        if is_update_in_progress() and reason in ("shutdown", "operator_stop"):
+                            reason = "update"
+                    except Exception:
+                        try:
+                            from client_updater import is_update_in_progress as _uip
+                            if _uip() and reason in ("shutdown", "operator_stop"):
+                                reason = "update"
+                        except Exception:
+                            pass
+                    from client_presence import emit_lifecycle_mirror, signal_goodbye
+                    signal_goodbye(reason, http_fallback=True, close_after=False)
+                    emit_lifecycle_mirror("daemon_stopping", reason)
+                except Exception:
+                    pass
             if getattr(self, "_is_daemon_motor", False):
                 try:
                     from client_tamper import mark_graceful_motor_shutdown, stop_deadman_beacon
@@ -2696,9 +2731,9 @@ class CloudHoneypotClient:
             if getattr(self, 'health_monitor', None):
                 try: self.health_monitor.stop()
                 except Exception: pass
-            # Stop Faz 2 modules (v4.0)
+            # Stop Faz 2 modules (v4.0) — goodbye already sent; skip duplicate
             if getattr(self, 'remote_commands', None):
-                try: self.remote_commands.stop()
+                try: self.remote_commands.stop(goodbye_reason=None)
                 except Exception: pass
             if getattr(self, 'auto_response', None):
                 try: self.auto_response.stop()
@@ -2919,6 +2954,21 @@ class CloudHoneypotClient:
         self.frontend_only = False
         self.state["token"] = self.token_manager.load_token()
         self.state["public_ip"] = ClientHelpers.get_public_ip()
+
+        # RES-101: ABOVE_NORMAL (never REALTIME) so commands stay responsive under host load
+        try:
+            from client_process_priority import apply_motor_priority, start_priority_guard
+            apply_motor_priority()
+            start_priority_guard()
+        except Exception as e:
+            log(f"[PRIORITY] init failed: {e}")
+
+        # Contract 1.4.12: sleep/hibernate/shutdown → dashboard presence within ~2s
+        try:
+            from client_power_presence import start_power_presence_watcher
+            start_power_presence_watcher()
+        except Exception as e:
+            log(f"[POWER] presence watcher failed: {e}")
 
         try:
             from client_tamper import (

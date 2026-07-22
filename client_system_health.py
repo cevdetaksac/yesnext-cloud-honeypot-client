@@ -1329,6 +1329,8 @@ class SystemHealthMonitor:
             "disk_usage_percent": self._latest.get("disk_usage_percent", 0),
             "process_count": self._latest.get("process_count", 0),
             "connection_count": self._latest.get("connection_count", 0),
+            "net_recv_bps": self._latest.get("net_bytes_recv_rate", 0),
+            "net_sent_bps": self._latest.get("net_bytes_sent_rate", 0),
             "anomalies": list(self._anomalies),
             "active_sessions": list(self._stats.get("active_sessions") or []),
             "top_processes": list(self._stats.get("top_processes") or [])[:30],

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.7"  # HP-INTEL apply + successful_logon no-block + whitelist enforce
+VERSION = "4.9.8"  # resource badge + ABOVE_NORMAL + realtime presence (1.4.12)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

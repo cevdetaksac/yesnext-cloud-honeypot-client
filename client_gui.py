@@ -594,6 +594,82 @@ class ModernGUI:
             font=ctk.CTkFont(size=11), text_color=COLORS["orange"] if DEBUG_MODE else COLORS["text_dim"],
         ).pack(side="right", padx=(4, 4))
 
+        # Kaynak kullanımı (motor STATUS → CPU/RAM/ağ) — versiyonun solunda
+        ctk.CTkFrame(bar, width=1, fg_color=COLORS["border"]).pack(
+            side="right", fill="y", padx=4, pady=7
+        )
+        self._resource_badge = ctk.CTkLabel(
+            bar,
+            text=self.t("resource_badge_na"),
+            font=ctk.CTkFont(size=10, family="Consolas"),
+            text_color=COLORS["text_dim"],
+            cursor="hand2",
+        )
+        self._resource_badge.pack(side="right", padx=(2, 2))
+        try:
+            self._resource_badge.bind("<Button-1>", lambda _e: self._detail_cpu_ram())
+        except Exception:
+            pass
+        try:
+            self.root.after(1200, self._refresh_resource_badge)
+        except Exception:
+            pass
+
+    def _refresh_resource_badge(self):
+        """Top-bar corner: motor process + host CPU/RAM/net from STATUS cache."""
+        lbl = getattr(self, "_resource_badge", None)
+        if lbl is None:
+            return
+        try:
+            st = getattr(self, "_cached_daemon_status", None) or {}
+            res = st.get("resources") if isinstance(st, dict) else None
+            if not isinstance(res, dict) or not res:
+                lbl.configure(text=self.t("resource_badge_na"), text_color=COLORS["text_dim"])
+                return
+
+            from client_resources import format_bps
+
+            p_cpu = res.get("process_cpu_percent")
+            p_ram = res.get("process_rss_mb")
+            h_cpu = res.get("host_cpu_percent")
+            h_ram = res.get("host_memory_percent")
+            down = format_bps(res.get("net_recv_bps"))
+            up = format_bps(res.get("net_sent_bps"))
+
+            proc_bit = "—"
+            if p_cpu is not None and p_ram is not None:
+                proc_bit = f"{float(p_cpu):.0f}%/{float(p_ram):.0f}MB"
+            elif p_ram is not None:
+                proc_bit = f"{float(p_ram):.0f}MB"
+
+            host_bit = "—"
+            if h_cpu is not None and h_ram is not None:
+                host_bit = f"{float(h_cpu):.0f}%/{float(h_ram):.0f}%"
+
+            text = self.t("resource_badge").format(
+                proc=proc_bit, host=host_bit, down=down, up=up
+            )
+            hot = False
+            try:
+                hot = float(h_cpu or 0) >= 90 or float(p_cpu or 0) >= 40
+            except Exception:
+                hot = False
+            color = COLORS["orange"] if hot else COLORS["text_dim"]
+            lbl.configure(text=text, text_color=color)
+
+            prio = (res.get("priority") or {}).get("applied") or ""
+            tip = self.t("resource_badge_tip").format(priority=prio or "—")
+            try:
+                lbl.configure(textvariable=None)
+            except Exception:
+                pass
+            self._resource_badge_tip = tip
+        except Exception:
+            try:
+                lbl.configure(text=self.t("resource_badge_na"), text_color=COLORS["text_dim"])
+            except Exception:
+                pass
+
     def _build_update_banner(self, root):
         """Top banner for dashboard self_update progress (daemon → ProgramData → GUI)."""
         self._update_banner = ctk.CTkFrame(
@@ -5897,6 +5973,10 @@ class ModernGUI:
         # Skip until status widgets exist
         if self._pages_built.get("status"):
             self._refresh_dashboard()
+        try:
+            self._refresh_resource_badge()
+        except Exception:
+            pass
 
         ticks_per_ip = max(1, int(20000 / self._refresh_ms))  # ~20 sn
         if not hasattr(self, '_ip_table_tick'):
@@ -6112,18 +6192,30 @@ class ModernGUI:
                 except Exception:
                     pass
 
-            # 10) CPU / RAM usage (v4.0 Faz 3)
-            hm = getattr(self.app, 'health_monitor', None)
-            if hm:
-                try:
-                    snap = hm.get_snapshot() if hasattr(hm, 'get_snapshot') else {}
-                    cpu = snap.get("cpu_percent", 0)
-                    ram = snap.get("memory_percent", 0)
-                    cpu_color = COLORS["red"] if cpu > 90 else (
-                        COLORS["orange"] if cpu > 70 else COLORS["text_dim"])
-                    self._update_card("cpu_usage", f"{cpu:.0f}% / {ram:.0f}%", cpu_color)
-                except Exception:
-                    pass
+            # 10) CPU / RAM usage — prefer daemon STATUS resources (frontend-safe)
+            try:
+                dst = getattr(self, "_cached_daemon_status", None) or {}
+                res = dst.get("resources") if isinstance(dst, dict) else None
+                cpu = ram = None
+                if isinstance(res, dict) and res:
+                    cpu = res.get("host_cpu_percent")
+                    ram = res.get("host_memory_percent")
+                if cpu is None or ram is None:
+                    hm = getattr(self.app, "health_monitor", None)
+                    if hm and hasattr(hm, "get_snapshot"):
+                        snap = hm.get_snapshot() or {}
+                        cpu = snap.get("cpu_percent", 0) if cpu is None else cpu
+                        ram = snap.get("memory_percent", 0) if ram is None else ram
+                if cpu is not None and ram is not None:
+                    cpu_f = float(cpu)
+                    ram_f = float(ram)
+                    cpu_color = COLORS["red"] if cpu_f > 90 else (
+                        COLORS["orange"] if cpu_f > 70 else COLORS["text_dim"])
+                    self._update_card(
+                        "cpu_usage", f"{cpu_f:.0f}% / {ram_f:.0f}%", cpu_color
+                    )
+            except Exception:
+                pass
 
             # 11) Self-Protection status (v4.0 Faz 3)
             # Kart, koruma şeridi chip'iyle AYNI kaynağı kullanmalı: yerel

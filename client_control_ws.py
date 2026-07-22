@@ -120,7 +120,12 @@ class AgentControlWebSocket:
         self._thread.start()
         log("[CONTROL-WS] starting (wss …/ws/agent/control)")
 
-    def stop(self):
+    def stop(self, *, goodbye_reason: Optional[str] = None):
+        if goodbye_reason:
+            try:
+                self.send_goodbye(goodbye_reason)
+            except Exception:
+                pass
         self._running = False
         self._connected = False
         with self._ws_lock:
@@ -160,6 +165,50 @@ class AgentControlWebSocket:
             "state": state,
             "ts": datetime.now(timezone.utc).isoformat(),
         })
+
+    def send_presence(self, state: str, reason: str = "") -> bool:
+        """Contract api/11-presence-realtime.md — sleep/wake/offline pulse."""
+        payload = {
+            "v": PROTOCOL_V,
+            "t": "presence",
+            "state": str(state or "").strip().lower(),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        if reason:
+            payload["reason"] = str(reason).strip().lower()
+        ok = self.send_json(payload)
+        if ok:
+            self._stats["presence_sent"] = int(self._stats.get("presence_sent") or 0) + 1
+        return ok
+
+    def send_goodbye(self, reason: str = "shutdown") -> bool:
+        """Planned stop — cloud marks offline immediately (no 12s debounce)."""
+        ok = self.send_json({
+            "v": PROTOCOL_V,
+            "t": "goodbye",
+            "reason": str(reason or "shutdown").strip().lower(),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        if ok:
+            self._stats["goodbye_sent"] = int(self._stats.get("goodbye_sent") or 0) + 1
+            try:
+                time.sleep(0.05)
+            except Exception:
+                pass
+        return ok
+
+    def request_reconnect(self) -> None:
+        """Force socket close so the loop reconnects (post-sleep zombie TCP)."""
+        with self._ws_lock:
+            ws = self._ws
+            self._ws = None
+        self._connected = False
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        log("[CONTROL-WS] reconnect requested")
 
     def send_command_result(
         self,
@@ -259,6 +308,11 @@ class AgentControlWebSocket:
                         self.on_connected()
                 except Exception as exc:
                     log(f"[CONTROL-WS] on_connected hook error: {exc}")
+                try:
+                    from client_presence import on_control_ws_connected
+                    on_control_ws_connected()
+                except Exception:
+                    pass
 
                 ws.settimeout(RECV_TIMEOUT_SEC)
                 last_ping = time.time()
@@ -325,6 +379,12 @@ class AgentControlWebSocket:
             })
             return
         if t == "pong":
+            return
+        if t == "presence_ack":
+            log(
+                f"[CONTROL-WS] presence_ack accepted={data.get('accepted')} "
+                f"presence={data.get('presence')}"
+            )
             return
         if t == "hello":
             log(f"[CONTROL-WS] server hello protocol={data.get('protocol')}")

@@ -161,8 +161,12 @@ Kabul:
 
 - [ ] **RES-101 — Ölçümlü priority policy:** varsayılan `NORMAL`; yalnız motorun
   control/heartbeat thread'i için gerektiğinde `ABOVE_NORMAL` PoC.
-- [ ] **RES-102 — Priority safety guard:** CPU, scheduler latency ve UI/RDP
+  **Landed (client ≥4.9.8):** Session-0 daemon process-wide `ABOVE_NORMAL`
+  (`client_process_priority.py`); config `security.motor_priority`
+  (`above_normal`|`high`|`normal`); REALTIME reddedilir.
+- [~] **RES-102 — Priority safety guard:** CPU, scheduler latency ve UI/RDP
   erişilebilirliği bozulursa otomatik normal seviyeye dönüş.
+  **Lite (client ≥4.9.8):** motor CPU ≥55% ~45s → NORMAL.
 - [X] Process-wide `REALTIME_PRIORITY_CLASS` üretimde kullanılmayacak.
 
 ### Watchdog ve process koruma

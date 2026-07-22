@@ -269,6 +269,18 @@ class RemoteCommandExecutor:
                 on_connected=self._drain_offline_urgent_queue,
             )
             self._control_ws.start()
+            try:
+                from client_presence import configure as configure_presence
+                configure_presence(
+                    control_ws=self._control_ws,
+                    api_client=self.api_client,
+                    token_getter=self.token_getter,
+                    reconnect_cb=self._control_ws.request_reconnect,
+                )
+                from client_presence import reset_goodbye_flag
+                reset_goodbye_flag()
+            except Exception as e:
+                log(f"[REMOTE-CMD] presence configure failed: {e}")
         except Exception as e:
             log(f"[REMOTE-CMD] control WS start failed (HTTP poll only): {e}")
             self._control_ws = None
@@ -390,11 +402,22 @@ class RemoteCommandExecutor:
             daemon=True,
         ).start()
 
-    def stop(self):
-        """Stop polling, control WS, and remote desktop stream."""
+    def stop(self, goodbye_reason: Optional[str] = "shutdown"):
+        """Stop polling, control WS, and remote desktop stream.
+
+        goodbye_reason: WS/HTTP presence offline signal (None = skip goodbye,
+        e.g. transient internal restart). Default shutdown for graceful exits.
+        """
         self._running = False
         try:
+            if goodbye_reason:
+                from client_presence import signal_goodbye
+                signal_goodbye(str(goodbye_reason), http_fallback=True, close_after=False)
+        except Exception:
+            pass
+        try:
             if self._control_ws:
+                # goodbye already sent via presence module; just close
                 self._control_ws.stop()
         except Exception:
             pass

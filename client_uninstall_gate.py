@@ -205,6 +205,11 @@ def run_uninstall_gate(argv: Optional[list] = None) -> int:
             details={**base, "pin_required": False},
         )
         _arm_uninstall_stand_down()
+        try:
+            from client_presence import signal_goodbye
+            signal_goodbye("uninstall", http_fallback=True, close_after=False)
+        except Exception:
+            pass
         return 0
 
     # PIN required
@@ -254,6 +259,11 @@ def run_uninstall_gate(argv: Optional[list] = None) -> int:
         details={**base, "pin_required": True, "pin_verified": True},
     )
     _arm_uninstall_stand_down()
+    try:
+        from client_presence import signal_goodbye
+        signal_goodbye("uninstall", http_fallback=True, close_after=False)
+    except Exception:
+        pass
     return 0
 
 

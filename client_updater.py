@@ -634,6 +634,11 @@ def check_updates_and_apply_silent() -> bool:
                 disarm_for_update(reason="silent_update_exit")
             except Exception:
                 pass
+            try:
+                from client_presence import signal_goodbye
+                signal_goodbye("update", http_fallback=True, close_after=False)
+            except Exception:
+                pass
             # Ask any sibling GUI/daemon to exit cleanly (this process may be updater-only)
             try:
                 import socket as _sock

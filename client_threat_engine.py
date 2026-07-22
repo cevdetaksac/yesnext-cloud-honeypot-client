@@ -29,14 +29,15 @@ from client_helpers import log
 # ── Threat Scores ─────────────────────────────────────────────────
 
 THREAT_SCORES: Dict[str, int] = {
-    # Authentication
-    "successful_logon":                75,   # Interactive / generic 4624 — always alert
-    "successful_logon_rdp":             85,
-    "successful_logon_network":         70,
-    "successful_logon_sql":             80,
+    # Authentication — bare success is alert-worthy, NEVER critical/100 alone.
+    # Caps enforced in _calculate_score / should_auto_block (contract: office RDP).
+    "successful_logon":                45,   # Interactive / generic 4624
+    "successful_logon_rdp":             55,   # RemoteInteractive — external/new IP band
+    "successful_logon_network":         40,
+    "successful_logon_sql":             50,
     "failed_logon_single":               5,
     "failed_logon_burst":               40,   # 10+ failures in 5 min
-    "failed_then_success":              95,
+    "failed_then_success":              95,   # Brute then success — MAY block
 
     # Privilege escalation / identity
     "new_user_created":                 90,
@@ -56,17 +57,43 @@ THREAT_SCORES: Dict[str, int] = {
     "unexpected_restart":               50,
 
     # SQL-specific
-    "sql_successful_logon":             80,
+    "sql_successful_logon":             50,
     "sql_failed_logon":                  5,
     "xp_cmdshell_executed":            100,   # Command execution via SQL
 
-    # RDP-specific
-    "rdp_connection_succeeded":         85,
-    "rdp_session_logon":                80,
-    "rdp_session_reconnect":            60,
+    # RDP-specific (session noise — keep below auto-block threshold)
+    "rdp_connection_succeeded":         50,
+    "rdp_session_logon":                45,
+    "rdp_session_reconnect":            35,
 
     # Honeypot-specific
     "honeypot_credential":              90,   # Anyone hitting a honeypot is malicious
+}
+
+# Bare successful-logon score ceilings (100 reserved for canary/VSS/tamper/ransomware)
+SUCCESS_LOGON_SCORE_CAP = 70          # new / external IP
+SUCCESS_LOGON_SCORE_CAP_SILENT = 80   # during silent hours (still no auto-block)
+
+# Correlation / threat_type aliases that mean "bare success" (no block)
+BARE_SUCCESS_TYPES: Set[str] = {
+    "successful_logon",
+    "successful_logon_rdp",
+    "successful_logon_network",
+    "successful_logon_sql",
+    "sql_successful_logon",
+    "rdp_connection_succeeded",
+    "rdp_session_logon",
+    "rdp_session_reconnect",
+    "rdp_login_success",
+    "explicit_credential_logon",
+}
+
+# Correlation rules that MAY auto-block after a successful logon
+BLOCKABLE_SUCCESS_CORRELATIONS: Set[str] = {
+    "brute_force_then_access",
+    "honeypot_brute_force",
+    "post_exploitation",
+    # lateral_movement kept alert-elevated but block only with prior fails — see should_auto_block
 }
 
 # Correlation rule definitions
@@ -101,9 +128,9 @@ CORRELATION_RULES = [
         "trigger": "multi_service_logon",
         "distinct_services": 2,
         "window": 3600,                      # 1 hour
-        "score": 85,
-        "severity": "critical",
-        "auto_response": ["block_ip", "notify_urgent"],
+        "score": 75,
+        "severity": "high",
+        "auto_response": ["notify_urgent"],  # alert only — bare multi-service ≠ HP-BLOCK
     },
     {
         "name": "post_exploitation",
@@ -177,6 +204,46 @@ RDP_LOGON_TYPES: Set[str] = {
 CONTEXT_CLEANUP_INTERVAL = 300       # 5 min
 # Max age for IP context entries without new events
 CONTEXT_MAX_AGE = 86400              # 24 hours
+
+
+def should_auto_block(
+    event_type: str,
+    *,
+    correlation_rule: str = "",
+    failed_attempts: int = 0,
+    is_whitelisted: bool = False,
+    is_honeypot: bool = False,
+    operator_forced: bool = False,
+) -> bool:
+    """Decide whether this event may create an HP-BLOCK firewall rule.
+
+    Bare successful_logon / rdp success → never.
+    Block only for: brute_force_then_success (correlation / failed_then_success),
+    honeypot IOC, protection.block_rules path (caller), or explicit operator command.
+    """
+    if is_whitelisted:
+        return False
+    if operator_forced:
+        return True
+    if is_honeypot or event_type == "honeypot_credential":
+        return True
+    et = (event_type or "").strip().lower()
+    rule = (correlation_rule or "").strip()
+    if rule in ("brute_force_then_access", "honeypot_brute_force", "post_exploitation"):
+        return True
+    if et == "failed_then_success" or (
+        et in BARE_SUCCESS_TYPES and failed_attempts >= 3 and rule == "brute_force_then_access"
+    ):
+        return True
+    # Bare success family — alert / challenge / email only
+    if et in BARE_SUCCESS_TYPES or et in {
+        "successful_logon", "rdp_login_success",
+    }:
+        return False
+    if et in LOGON_EVENT_TYPES:
+        return False
+    # Critical non-auth (audit clear, xp_cmdshell, etc.) still block via severity path
+    return True
 
 # Default block rules when no API rules are configured.
 # Her servis için ideal varsayılan koruma — kullanıcı dashboard'dan özelleştirebilir.
@@ -264,6 +331,12 @@ class IPContext:
             self.first_seen = now
 
         self.threat_score = min(100.0, self.threat_score + score)
+        # Cap cumulative score when only bare-success noise is stacking
+        etype = event.get("event_type", "")
+        if etype in BARE_SUCCESS_TYPES or etype in LOGON_EVENT_TYPES:
+            # Allow climb above success cap only once failed_then_success / non-auth added score
+            if self.failed_attempts < 3 and score < 90:
+                self.threat_score = min(float(SUCCESS_LOGON_SCORE_CAP_SILENT), self.threat_score)
         self.events.append({
             "event_type": event.get("event_type", ""),
             "event_id": event.get("event_id", 0),
@@ -272,7 +345,6 @@ class IPContext:
         })
 
         # Update counters
-        etype = event.get("event_type", "")
         if etype in FAILED_LOGON_TYPES or etype == "failed_logon_single":
             self.failed_attempts += 1
         if etype in LOGON_EVENT_TYPES:
@@ -499,45 +571,84 @@ class ThreatEngine:
             # 3. Correlation rules
             correlation_match = self._check_correlations(ip_key, ctx, event)
 
+            # Whitelist — lower effective score, never HP-BLOCK from this path
+            whitelisted = ip_key in getattr(self, "_whitelist_ips", set())
+
             # 4. Alert decision — successful logons always emit (urgent path)
             force_urgent = event_type in URGENT_IMMEDIATE_TYPES
             if correlation_match:
                 corr_sev = correlation_match["severity"]
                 if force_urgent and corr_sev not in ("critical", "high"):
                     corr_sev = "high"
+                corr_score = float(correlation_match["score"])
+                if whitelisted:
+                    corr_score = min(corr_score, 40.0)
+                    corr_sev = "warning" if corr_sev == "critical" else corr_sev
+                auto_resp = list(correlation_match.get("auto_response") or [])
+                if "block_ip" in auto_resp and not should_auto_block(
+                    event_type,
+                    correlation_rule=correlation_match.get("name") or "",
+                    failed_attempts=ctx.failed_attempts,
+                    is_whitelisted=whitelisted,
+                    is_honeypot=(event_type == "honeypot_credential"),
+                ):
+                    auto_resp = [a for a in auto_resp if a != "block_ip"]
+                    if "notify_urgent" not in auto_resp:
+                        auto_resp.append("notify_urgent")
                 self._emit_alert(
                     event=event,
                     ctx=ctx,
-                    score=correlation_match["score"],
+                    score=corr_score,
                     severity=corr_sev,
                     rule_name=correlation_match["name"],
                     description=correlation_match["description"],
-                    auto_response=correlation_match.get("auto_response", []),
+                    auto_response=auto_resp,
                     force_urgent=force_urgent or corr_sev in ("critical", "high"),
                 )
             elif force_urgent or score >= SEVERITY_THRESHOLDS["warning"]:
-                severity = self._score_to_severity(max(score, ctx.threat_score))
+                alert_score = float(score)
+                if event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES:
+                    # Report capped score for bare success (not cumulative 100 from stacking)
+                    alert_score = min(alert_score, float(self._success_score_cap(event)))
+                    if whitelisted:
+                        alert_score = min(alert_score, 25.0)
+                severity = self._score_to_severity(alert_score)
                 if force_urgent and severity not in ("critical", "high"):
-                    severity = "high"
-                # Honeypot credential veya critical skor → anında IP blokla
+                    # Keep urgent delivery but do not inflate bare success to critical
+                    if event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES:
+                        severity = "high"
+                    else:
+                        severity = "high"
                 # Identity password events stay alert-only (no disable/lockout).
-                standalone_auto_response = []
+                standalone_auto_response: List[str] = []
                 if event_type in (
                     "password_change_attempt",
                     "password_reset_attempt",
                 ):
                     standalone_auto_response = []
-                elif event_type == "honeypot_credential" or severity == "critical":
+                elif should_auto_block(
+                    event_type,
+                    correlation_rule="",
+                    failed_attempts=ctx.failed_attempts,
+                    is_whitelisted=whitelisted,
+                    is_honeypot=(event_type == "honeypot_credential"),
+                ) and (
+                    event_type == "honeypot_credential"
+                    or severity == "critical"
+                ):
                     standalone_auto_response = ["block_ip", "notify_urgent"]
+                elif force_urgent or severity in ("high", "critical"):
+                    standalone_auto_response = ["notify_urgent"]
                 self._emit_alert(
                     event=event,
                     ctx=ctx,
-                    score=score,
+                    score=alert_score,
                     severity=severity,
                     rule_name="",
                     description=f"{event_type} detected from {ip_key}",
                     auto_response=standalone_auto_response,
                     force_urgent=force_urgent or severity in ("critical", "high"),
+                    alert_threat_score=int(alert_score),
                 )
 
             # Update stats
@@ -647,6 +758,16 @@ class ThreatEngine:
 
     # ── Scoring ───────────────────────────────────────────────────
 
+    def _success_score_cap(self, event: Optional[dict] = None) -> int:
+        """Ceiling for bare successful-logon scores (never 100)."""
+        try:
+            sh = getattr(self, "silent_hours_guard", None)
+            if sh and hasattr(sh, "is_silent_now") and sh.is_silent_now():
+                return SUCCESS_LOGON_SCORE_CAP_SILENT
+        except Exception:
+            pass
+        return SUCCESS_LOGON_SCORE_CAP
+
     def _calculate_score(self, event: dict) -> float:
         """Calculate threat score for a single event."""
         event_type = event.get("event_type", "")
@@ -683,15 +804,31 @@ class ThreatEngine:
                         if recent_failures >= 10:
                             base_score = THREAT_SCORES.get("failed_logon_burst", 40)
 
-        # Check for failed-then-success pattern
+        # Failed-then-success — elevated score (may block via correlation / should_auto_block)
+        brute_then_success = False
         if event_type in LOGON_EVENT_TYPES:
             source_ip = event.get("source_ip", "")
             if source_ip:
                 with self._lock:
                     ctx = self._ip_pool.get(source_ip)
                     if ctx and ctx.failed_attempts >= 3:
-                        base_score = max(base_score,
-                                         THREAT_SCORES.get("failed_then_success", 95))
+                        base_score = max(
+                            base_score,
+                            THREAT_SCORES.get("failed_then_success", 95),
+                        )
+                        brute_then_success = True
+
+        # Whitelist: dampen
+        source_ip = (event.get("source_ip") or "").strip()
+        if source_ip and source_ip in getattr(self, "_whitelist_ips", set()):
+            base_score = min(base_score, 20)
+
+        # Cap bare success — 100 reserved for canary/VSS/tamper/ransomware
+        if (
+            (event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES)
+            and not brute_then_success
+        ):
+            base_score = min(base_score, self._success_score_cap(event))
 
         return float(base_score)
 
@@ -904,7 +1041,8 @@ class ThreatEngine:
 
     def _emit_alert(self, event: dict, ctx: IPContext, score: float,
                     severity: str, rule_name: str, description: str,
-                    auto_response: List[str], force_urgent: bool = False):
+                    auto_response: List[str], force_urgent: bool = False,
+                    alert_threat_score: Optional[int] = None):
         """Build alert dict and forward to alert pipeline callback."""
 
         # Rate limiting — don't spam for same IP/type
@@ -933,6 +1071,29 @@ class ThreatEngine:
         ctx.alerts_sent += 1
         self._stats["alerts_generated"] += 1
 
+        # Bare success: never publish cumulative 100 from stacked RDP events
+        reported_score = (
+            int(alert_threat_score)
+            if alert_threat_score is not None
+            else int(score if score else ctx.threat_score)
+        )
+        if (
+            (etype in BARE_SUCCESS_TYPES or etype in LOGON_EVENT_TYPES)
+            and not rule_name
+        ):
+            reported_score = min(reported_score, int(self._success_score_cap(event)))
+
+        # Final safety: bare success never carries block_ip
+        safe_response = list(auto_response or [])
+        if not should_auto_block(
+            etype,
+            correlation_rule=rule_name or "",
+            failed_attempts=int(getattr(ctx, "failed_attempts", 0) or 0),
+            is_whitelisted=(ctx.ip in getattr(self, "_whitelist_ips", set())),
+            is_honeypot=(etype == "honeypot_credential"),
+        ):
+            safe_response = [a for a in safe_response if a != "block_ip"]
+
         alert = {
             "alert_id": str(uuid.uuid4()),
             "timestamp": now,
@@ -946,11 +1107,11 @@ class ThreatEngine:
             "username": event.get("username", ""),
             # Never forward credential material from Event Log / honeypot parsers.
             "password": "",
-            "threat_score": int(ctx.threat_score),
+            "threat_score": reported_score,
             "event_ids": [event.get("event_id", 0)],
             "correlation_rule": rule_name,
-            "recommended_action": self._recommend_action(severity, rule_name),
-            "auto_response": auto_response,
+            "recommended_action": self._recommend_action(severity, rule_name, etype),
+            "auto_response": safe_response,
             "force_urgent": bool(force_urgent),
             "ip_context": {
                 "failed_attempts": ctx.failed_attempts,
@@ -1021,7 +1182,7 @@ class ThreatEngine:
         return titles.get(etype, f"⚠️ {etype.replace('_', ' ').title()}")
 
     @staticmethod
-    def _recommend_action(severity: str, rule_name: str) -> str:
+    def _recommend_action(severity: str, rule_name: str, event_type: str = "") -> str:
         """Return recommended action text."""
         if rule_name and rule_name.startswith("api_rule_"):
             return "IP blocked by dashboard block rule — review attack pattern"
@@ -1030,7 +1191,13 @@ class ThreatEngine:
         if rule_name == "post_exploitation":
             return "Block IP, isolate system, review installed services and user accounts"
         if rule_name == "lateral_movement":
-            return "Block IP, audit all sessions from this IP across services"
+            return "Review multi-service sessions — alert only unless brute-force history"
+        et = (event_type or "").strip().lower()
+        if et in BARE_SUCCESS_TYPES or et in LOGON_EVENT_TYPES:
+            return (
+                "Notify / logon challenge — do not firewall-block bare successful logon; "
+                "whitelist office IPs if expected"
+            )
         if severity == "critical":
             return "Investigate immediately — potential active compromise"
         if severity == "high":

@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -244,6 +244,127 @@ class WindowsFirewallBackend(FirewallBackend):
             return "missing", rc, out, err
         return "failed", rc, out, err
 
+    # ── Threat-intel dedicated rules (HP-INTEL-*) ─────────────────
+
+    @staticmethod
+    def intel_rule_name(rule_id: str) -> str:
+        """Stable Windows firewall rule name: HP-INTEL-<id>."""
+        import re
+        raw = (rule_id or "").strip() or "unknown"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-")[:96]
+        return f"HP-INTEL-{safe or 'unknown'}"
+
+    def _delete_intel_rule_by_name(self, name: str) -> str:
+        """Delete HP-INTEL rule (in + out). Returns removed|missing|failed."""
+        # Omit dir= so both inbound and outbound with same name are cleared.
+        rc, out, err = run_cmd([
+            "netsh", "advfirewall", "firewall", "delete", "rule",
+            f"name={name}",
+        ])
+        combined = f"{out}\n{err}".lower()
+        if rc == 0:
+            if "0 rule" in combined:
+                return "missing"
+            return "removed"
+        if any(x in combined for x in (
+            "no rules match", "not found", "bulunamad", "eşleşen kural yok",
+        )):
+            return "missing"
+        return "failed"
+
+    def apply_intel_block(self, rule_id: str, ip_or_cidr: str) -> bool:
+        """Add inbound+outbound block as HP-INTEL-<id> (idempotent replace)."""
+        name = self.intel_rule_name(rule_id)
+        remote = (ip_or_cidr or "").strip()
+        if not remote:
+            return False
+        self._delete_intel_rule_by_name(name)
+        ok_in = self._add_rule(name, remote)
+        # Outbound block (same name; netsh allows parallel dir=out)
+        rc, out, err = run_cmd([
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={name}", "dir=out", "action=block", f"remoteip={remote}",
+        ])
+        ok_out = rc == 0
+        if not ok_out:
+            self.logger.error(
+                err.strip() or out.strip() or f"netsh add out rule failed rc={rc}"
+            )
+        return bool(ok_in or ok_out)
+
+    def remove_intel_block(self, rule_id: str = "", rule_name: str = "") -> bool:
+        """Remove HP-INTEL rule. True if removed or already absent."""
+        name = (rule_name or "").strip() or self.intel_rule_name(rule_id)
+        if not name:
+            return False
+        status = self._delete_intel_rule_by_name(name)
+        return status in ("removed", "missing")
+
+    def list_intel_rules(self) -> List[dict]:
+        """Return existing HP-INTEL-* firewall rules (name + remoteip)."""
+        ok, rules = self.scan_existing_rules_detailed()
+        if not ok:
+            # Fallback dedicated show — still try parse via show all path
+            rules = rules or []
+        out: List[dict] = []
+        for r in rules or []:
+            name = str(r.get("name") or "")
+            if name.startswith("HP-INTEL-"):
+                out.append({
+                    "name": name,
+                    "remoteip": r.get("remoteip") or "",
+                    "id": name[len("HP-INTEL-"):],
+                })
+        if out:
+            return out
+        # scan_existing may not yet include HP-INTEL — probe show rule all
+        try:
+            rc, raw, _ = run_cmd([
+                "netsh", "advfirewall", "firewall", "show", "rule", "name=all",
+            ], timeout=60)
+            if rc != 0 or not raw:
+                return out
+            current: Dict[str, str] = {}
+            for line in raw.splitlines():
+                if ":" not in line:
+                    continue
+                key, _, val = line.partition(":")
+                key_raw = key.strip().lower()
+                key_ns = key_raw.replace(" ", "")
+                val = val.strip()
+                if "rule name" in key_raw or "kural ad" in key_raw:
+                    if current.get("name", "").startswith("HP-INTEL-"):
+                        out.append({
+                            "name": current["name"],
+                            "remoteip": current.get("remoteip") or "",
+                            "id": current["name"][len("HP-INTEL-"):],
+                        })
+                    current = {"name": val}
+                elif (
+                    key_ns in ("remoteip", "uzakip", "remoteipv4", "uzakipv4")
+                    or "remoteip" in key_ns
+                    or "uzakip" in key_ns
+                ):
+                    current["remoteip"] = val
+            if current.get("name", "").startswith("HP-INTEL-"):
+                out.append({
+                    "name": current["name"],
+                    "remoteip": current.get("remoteip") or "",
+                    "id": current["name"][len("HP-INTEL-"):],
+                })
+        except Exception as e:
+            self.logger.error(f"list_intel_rules: {e}")
+        # Dedupe by name (in+out appear twice in show)
+        seen = set()
+        uniq = []
+        for r in out:
+            n = r.get("name")
+            if n in seen:
+                continue
+            seen.add(n)
+            uniq.append(r)
+        return uniq
+
     def _add_rule(self, name: str, remoteip_csv: str) -> bool:
         rc, out, err = run_cmd([
             "netsh", "advfirewall", "firewall", "add", "rule",
@@ -424,6 +545,7 @@ class WindowsFirewallBackend(FirewallBackend):
                 ("HONEYPOT_REMOTE_BLOCK_", True),
                 ("HONEYPOT_THREAT_BLOCK_", True),
                 ("HONEYPOT_BLOCK_", True),
+                ("HP-INTEL-", False),
                 ("HP-BLOCK-", False),
             ):
                 if name.startswith(prefix):

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.6"  # Update artifact cleanup + Settings PIN UI
+VERSION = "4.9.7"  # HP-INTEL apply + successful_logon no-block + whitelist enforce
 
 
 CLIENT_VERSION = VERSION  # Main version constant

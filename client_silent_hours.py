@@ -78,7 +78,7 @@ class SilentHoursConfig:
     weekend_all_day_silent: bool = True
 
     # Auto-actions
-    auto_block_ip: bool = True
+    auto_block_ip: bool = False  # Bare successful logon must not HP-BLOCK (alert/challenge only)
     auto_logoff: bool = True
     auto_disable_account: bool = True
     block_duration_hours: int = 0  # 0 = permanent (until admin clears)
@@ -293,13 +293,15 @@ class SilentHoursGuard:
 
         log(
             f"[SILENT-HOURS] 🔇 VIOLATION: {source_ip} → {service} "
-            f"({username}) — BLOCKING"
+            f"({username}) — alert only (no HP-BLOCK)"
         )
 
         actions_taken = []
 
-        # 1. Block IP via firewall
-        if self.config.auto_block_ip and self.auto_response:
+        # 1. Firewall block — DISABLED for bare successful logon.
+        # Office RDP / silent-hours access → alert + optional challenge, not HP-BLOCK.
+        # (auto_block_ip kept for config compat but ignored on success path.)
+        if False and self.config.auto_block_ip and self.auto_response:
             try:
                 self.auto_response.block_ip(
                     source_ip,
@@ -338,15 +340,14 @@ class SilentHoursGuard:
                     "description": (
                         f"Sessiz saatlerde {source_ip} adresinden {service} "
                         f"servisine başarılı giriş tespit edildi. "
-                        f"IP beyaz listede olmadığı için otomatik engelleme "
-                        f"uygulandı.\n\n"
+                        f"Firewall engeli uygulanmadı — bildirim / logon challenge tercih edilir.\n\n"
                         f"Kullanıcı: {username}\n"
                         f"Bu siz miydiniz? Dashboard'dan IP'nizi beyaz listeye ekleyin."
                     ),
                     "source_ip": source_ip,
                     "target_service": service,
                     "username": username,
-                    "threat_score": 95,
+                    "threat_score": 75,
                     "auto_response_taken": actions_taken,
                 }
                 self.alert_pipeline.send_urgent(alert_data)

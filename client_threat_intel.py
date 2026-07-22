@@ -2,17 +2,20 @@
 # -*- coding: utf-8 -*-
 """Cloud-driven threat intel — poll bundle, cache, apply defense layers.
 
-Cloud is the source of truth (see docs/CLOUD_THREAT_INTEL_API.md).
-This module does NOT scrape Abuse.ch/CISA directly.
+Contract: honeypot-contract api/09-threat-intel.md
+Cloud is the source of truth. This module does NOT scrape Abuse.ch/CISA.
+Firewall IoCs → HP-INTEL-<id> (never HP-BLOCK-*).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from client_helpers import log
 
@@ -46,6 +49,61 @@ def _severity_rank(s: str) -> int:
     return order.get((s or "").lower(), 0)
 
 
+def _parse_expires_at(raw: Any) -> Optional[datetime]:
+    if raw is None or raw == "":
+        return None
+    try:
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _is_expired(item: dict, *, now: Optional[datetime] = None) -> bool:
+    exp = _parse_expires_at(item.get("expires_at") if isinstance(item, dict) else None)
+    if exp is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return exp <= now
+
+
+def _collect_allowlist(policy: dict, bundle: dict) -> Set[str]:
+    """IPs/CIDRs that must never receive HP-INTEL blocks."""
+    out: Set[str] = set()
+
+    def _add(val: Any) -> None:
+        if isinstance(val, str):
+            v = val.strip()
+            if v:
+                out.add(v.lower().split("/")[0] if "/" not in v else v.lower())
+        elif isinstance(val, dict):
+            for key in ("ip", "value", "cidr", "ip_or_cidr"):
+                if val.get(key):
+                    _add(val.get(key))
+        elif isinstance(val, (list, tuple, set)):
+            for x in val:
+                _add(x)
+
+    for src in (
+        policy.get("allowlist"),
+        policy.get("allowlist_ips"),
+        policy.get("firewall_allowlist"),
+        bundle.get("allowlist"),
+        bundle.get("allowlist_ips"),
+    ):
+        _add(src)
+    return out
+
+
+def _iso_z_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 class ThreatIntelManager:
     """Daemon-side manager: sync from cloud + apply local layers."""
 
@@ -62,7 +120,7 @@ class ThreatIntelManager:
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
         self.ransomware_shield = ransomware_shield
-        self.auto_response = auto_response
+        self.auto_response = auto_response  # unused for intel FW (HP-BLOCK path)
         self.firewall_agent = firewall_agent
         self.on_alert = on_alert
         self.poll_sec = max(300, int(poll_sec or _POLL_SEC_DEFAULT))
@@ -71,6 +129,7 @@ class ThreatIntelManager:
         self._bundle: Dict[str, Any] = {}
         self._etag = ""
         self._version = ""
+        self._fw_backend = None
         self._stats = {
             "syncs_ok": 0,
             "syncs_304": 0,
@@ -90,7 +149,6 @@ class ThreatIntelManager:
         threading.Thread(
             target=self._loop, name="ThreatIntelSync", daemon=True
         ).start()
-        # Immediate first sync (non-blocking already in thread after short delay)
         threading.Thread(
             target=self._startup_sync, name="ThreatIntelBoot", daemon=True
         ).start()
@@ -111,6 +169,20 @@ class ThreatIntelManager:
     def get_bundle(self) -> dict:
         with self._lock:
             return dict(self._bundle or {})
+
+    def _backend(self):
+        """WindowsFirewallBackend — prefer FirewallAgent's, else lazy own."""
+        agent = self.firewall_agent
+        if agent is not None:
+            be = getattr(agent, "backend", None)
+            if be is not None and hasattr(be, "apply_intel_block"):
+                return be
+        if self._fw_backend is None:
+            from client_firewall import WindowsFirewallBackend
+            self._fw_backend = WindowsFirewallBackend(
+                logging.getLogger("honeypot.threat_intel_fw")
+            )
+        return self._fw_backend
 
     # ── sync ────────────────────────────────────────────────────
 
@@ -159,6 +231,23 @@ class ThreatIntelManager:
         if result.get("not_modified"):
             self._stats["syncs_304"] += 1
             self._touch_meta(ok=True)
+            # Reconcile expires/orphans locally; ACK only if FW state changed
+            try:
+                if self._bundle:
+                    applied = self.apply_bundle(self._bundle)
+                    changed = int(applied.get("firewall_added") or 0) + int(
+                        applied.get("firewall_removed") or 0
+                    )
+                    if changed:
+                        self._touch_meta(ok=True, applied=applied)
+                        if hasattr(self.api_client, "ack_threat_intel"):
+                            self.api_client.ack_threat_intel(
+                                token=token,
+                                bundle_version=self._version,
+                                stats=applied,
+                            )
+            except Exception as e:
+                log(f"[THREAT-INTEL] 304 reconcile error: {e}")
             return True
 
         bundle = result.get("bundle")
@@ -192,7 +281,10 @@ class ThreatIntelManager:
 
         log(
             f"[THREAT-INTEL] applied bundle={self._version} "
-            f"fw={applied.get('firewall_added', 0)} rs={applied.get('ransomware_rules', 0)}"
+            f"fw+={applied.get('firewall_added', 0)} "
+            f"fw-={applied.get('firewall_removed', 0)} "
+            f"skip={applied.get('firewall_skipped', 0)} "
+            f"rs={applied.get('ransomware_rules', 0)}"
         )
         return True
 
@@ -205,6 +297,7 @@ class ThreatIntelManager:
         stats = {
             "firewall_added": 0,
             "firewall_skipped": 0,
+            "firewall_removed": 0,
             "ransomware_rules": 0,
             "process_watch": 0,
             "banners": 0,
@@ -212,7 +305,13 @@ class ThreatIntelManager:
         }
 
         try:
-            stats.update(self._apply_firewall(layers.get("firewall_blocks") or [], policy))
+            stats.update(
+                self._apply_firewall(
+                    layers.get("firewall_blocks") or [],
+                    policy,
+                    bundle=b,
+                )
+            )
         except Exception as e:
             stats["errors"].append(f"firewall:{e}")
 
@@ -238,7 +337,6 @@ class ThreatIntelManager:
         except Exception as e:
             stats["errors"].append(f"banners:{e}")
 
-        # KEV / hardening: log for now (dashboard surfaces via cloud)
         try:
             kev = layers.get("kev_cves") or []
             if kev:
@@ -248,54 +346,147 @@ class ThreatIntelManager:
 
         return stats
 
-    def _apply_firewall(self, blocks: list, policy: dict) -> dict:
-        out = {"firewall_added": 0, "firewall_skipped": 0}
-        if not policy.get("auto_block_firewall", True):
+    def _apply_firewall(
+        self,
+        blocks: list,
+        policy: dict,
+        *,
+        bundle: Optional[dict] = None,
+    ) -> dict:
+        """Reconcile HP-INTEL-* rules to bundle.firewall_blocks (contract 09)."""
+        out = {
+            "firewall_added": 0,
+            "firewall_skipped": 0,
+            "firewall_removed": 0,
+        }
+        backend = self._backend()
+        if backend is None or not hasattr(backend, "apply_intel_block"):
             out["firewall_skipped"] = len(blocks) if isinstance(blocks, list) else 0
             return out
+
+        # Policy off → remove all intel rules, do not add
+        if not policy.get("auto_block_firewall", True):
+            try:
+                existing = backend.list_intel_rules()
+                for r in existing:
+                    if backend.remove_intel_block(rule_name=r.get("name") or ""):
+                        out["firewall_removed"] += 1
+            except Exception as e:
+                log(f"[THREAT-INTEL] policy-off purge error: {e}")
+            out["firewall_skipped"] = len(blocks) if isinstance(blocks, list) else 0
+            return out
+
         min_sev = str(policy.get("intel_block_requires_severity_at_least") or "high")
         max_rules = int(policy.get("max_firewall_rules_from_intel") or 500)
+        allow = _collect_allowlist(policy, bundle or {})
+        now = datetime.now(timezone.utc)
+
         if not isinstance(blocks, list):
-            return out
+            blocks = []
 
-        # Prefer AutoResponse / threat block path when available
-        blocker = None
-        if self.auto_response and hasattr(self.auto_response, "block_ip"):
-            blocker = self.auto_response.block_ip
-        elif self.firewall_agent and hasattr(self.firewall_agent, "block_ip"):
-            blocker = self.firewall_agent.block_ip
-
-        if not blocker:
-            out["firewall_skipped"] = len(blocks)
-            return out
-
-        added = 0
+        candidates: List[dict] = []
         for item in blocks:
-            if added >= max_rules:
+            if not isinstance(item, dict):
                 out["firewall_skipped"] += 1
                 continue
-            if not isinstance(item, dict):
-                continue
             if (item.get("action") or "block_ip") != "block_ip":
+                out["firewall_skipped"] += 1
                 continue
             if _severity_rank(item.get("severity") or "") < _severity_rank(min_sev):
                 out["firewall_skipped"] += 1
                 continue
-            ip = str(item.get("value") or "").strip()
-            if not ip:
-                continue
-            reason = str(item.get("reason") or item.get("family") or "threat_intel")[:120]
-            try:
-                blocker(ip, reason=f"INTEL:{reason}")
-                added += 1
-            except TypeError:
-                try:
-                    blocker(ip)
-                    added += 1
-                except Exception:
-                    out["firewall_skipped"] += 1
-            except Exception:
+            if _is_expired(item, now=now):
                 out["firewall_skipped"] += 1
+                continue
+            ip = str(item.get("value") or item.get("ip") or item.get("ip_or_cidr") or "").strip()
+            if not ip:
+                out["firewall_skipped"] += 1
+                continue
+            ip_key = ip.lower().split("/")[0]
+            if ip.lower() in allow or ip_key in allow:
+                out["firewall_skipped"] += 1
+                continue
+            # Local AutoResponse whitelist (operator) — never intel-block
+            try:
+                ar = self.auto_response
+                if ar is not None:
+                    check = getattr(ar, "_is_whitelisted", None) or getattr(
+                        ar, "is_whitelisted", None
+                    )
+                    if callable(check) and check(ip_key):
+                        out["firewall_skipped"] += 1
+                        continue
+            except Exception:
+                pass
+            rule_id = str(item.get("id") or ip).strip()
+            candidates.append({
+                **item,
+                "_ip": ip,
+                "_id": rule_id,
+                "_sev": _severity_rank(item.get("severity") or ""),
+            })
+
+        # Highest severity first when over cap
+        candidates.sort(key=lambda x: (-x["_sev"], x["_id"]))
+        if len(candidates) > max_rules:
+            out["firewall_skipped"] += len(candidates) - max_rules
+            candidates = candidates[:max_rules]
+
+        desired_names: Set[str] = set()
+        desired_ids: Dict[str, str] = {}  # name -> ip
+        for c in candidates:
+            name = backend.intel_rule_name(c["_id"])
+            desired_names.add(name)
+            desired_ids[name] = c["_ip"]
+
+        # Orphan cleanup — HP-INTEL not in desired set
+        try:
+            existing = backend.list_intel_rules()
+        except Exception as e:
+            existing = []
+            log(f"[THREAT-INTEL] list_intel_rules: {e}")
+
+        existing_names = {str(r.get("name") or "") for r in existing}
+        for r in existing:
+            name = str(r.get("name") or "")
+            if not name.startswith("HP-INTEL-"):
+                continue
+            if name not in desired_names:
+                try:
+                    if backend.remove_intel_block(rule_name=name):
+                        out["firewall_removed"] += 1
+                except Exception:
+                    pass
+
+        # Add / refresh desired
+        added = 0
+        for c in candidates:
+            name = backend.intel_rule_name(c["_id"])
+            ip = c["_ip"]
+            already = name in existing_names
+            # If present with same remoteip, treat as keep (not added)
+            if already:
+                try:
+                    remote = ""
+                    for r in existing:
+                        if r.get("name") == name:
+                            remote = str(r.get("remoteip") or "")
+                            break
+                    if remote and ip in remote.replace(" ", ""):
+                        continue  # already applied
+                except Exception:
+                    pass
+            try:
+                ok = backend.apply_intel_block(c["_id"], ip)
+                if ok:
+                    if not already:
+                        added += 1
+                else:
+                    out["firewall_skipped"] += 1
+            except Exception as e:
+                out["firewall_skipped"] += 1
+                log(f"[THREAT-INTEL] apply_intel_block {c['_id']}: {e}")
+
         out["firewall_added"] = added
         self._stats["firewall_applied"] = added
         return out
@@ -307,7 +498,6 @@ class ThreatIntelManager:
         if not shield:
             return 0
         n = 0
-        # Prefer explicit merge API if present; else set attributes carefully
         exts = rs.get("extensions") if isinstance(rs.get("extensions"), list) else []
         procs = rs.get("process_names") if isinstance(rs.get("process_names"), list) else []
         patterns = rs.get("cmdline_patterns") if isinstance(rs.get("cmdline_patterns"), list) else []
@@ -318,7 +508,6 @@ class ThreatIntelManager:
             except Exception as e:
                 log(f"[THREAT-INTEL] merge_cloud_intel failed: {e}")
 
-        # Fallback: extend known list attributes if they exist
         for attr, values in (
             ("_extra_extensions", [str(x).lower() for x in exts if x]),
             ("_extra_process_names", [str(x).lower() for x in procs if x]),
@@ -342,7 +531,6 @@ class ThreatIntelManager:
     def _apply_process_watch(self, items: list) -> int:
         if not isinstance(items, list) or not items:
             return 0
-        # Store for future process scanner; emit summary alert once
         with self._lock:
             self._bundle.setdefault("_applied_process_watch", items)
         if self.on_alert:
@@ -382,6 +570,19 @@ class ThreatIntelManager:
     # ── cache ───────────────────────────────────────────────────
 
     def _load_cache(self) -> None:
+        # Prefer meta etag (survives body without etag field)
+        try:
+            meta_path = _meta_path()
+            if os.path.isfile(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as fh:
+                    meta = json.load(fh)
+                if isinstance(meta, dict):
+                    self._etag = str(meta.get("etag") or self._etag or "")
+                    if not self._version:
+                        self._version = str(meta.get("bundle_version") or "")
+        except Exception:
+            pass
+
         path = _cache_path()
         try:
             if not os.path.isfile(path):
@@ -390,10 +591,14 @@ class ThreatIntelManager:
                 data = json.load(fh)
             if isinstance(data, dict):
                 self._bundle = data
-                self._version = str(data.get("bundle_version") or "")
-                self._etag = str(data.get("etag") or "")
-                log(f"[THREAT-INTEL] cache loaded version={self._version}")
-                # Re-apply cached rules after restart
+                self._version = str(data.get("bundle_version") or self._version or "")
+                body_etag = str(data.get("etag") or "")
+                if body_etag:
+                    self._etag = body_etag
+                log(
+                    f"[THREAT-INTEL] cache loaded version={self._version} "
+                    f"etag={'yes' if self._etag else 'no'}"
+                )
                 try:
                     self.apply_bundle(data)
                 except Exception as e:
@@ -405,9 +610,13 @@ class ThreatIntelManager:
         try:
             os.makedirs(_programdata_dir(), exist_ok=True)
             path = _cache_path()
+            payload = dict(self._bundle or {})
+            # Persist etag inside cache so If-None-Match survives restart
+            if self._etag:
+                payload["etag"] = self._etag
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self._bundle, fh, ensure_ascii=False, indent=2)
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
         except Exception as e:
             log(f"[THREAT-INTEL] cache save error: {e}")
@@ -417,6 +626,7 @@ class ThreatIntelManager:
             os.makedirs(_programdata_dir(), exist_ok=True)
             meta = {
                 "last_check_at": time.time(),
+                "last_check_at_iso": _iso_z_now(),
                 "ok": ok,
                 "bundle_version": self._version,
                 "etag": self._etag,

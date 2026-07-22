@@ -1,3 +1,8 @@
+# v4.9.7
+- **Threat Intel HP-INTEL apply (contract 09):** bundle `firewall_blocks` → `HP-INTEL-<id>` inbound+outbound (no longer `HP-BLOCK-*` / AutoResponse 24h); severity/allowlist/expires/orphan reconcile; `firewall_removed` in ACK; ETag meta+cache durable; 304 → expire reconcile; clear_firewall includes `HP-INTEL-*`.
+- **successful_logon skor/auto-block fix:** bare RDP/success artık `threat_score` ≤70 (sessiz saat ≤80), asla 100; `should_auto_block()` bare success’te false; HP-BLOCK yalnız brute_force_then_success / honeypot / block_rules / operator; sessiz saat firewall kesmez (alert/challenge); whitelist skor düşürür.
+- **Whitelist asla engellenmez:** `block_ip` whitelist’te skip + mevcut kuralı anında kaldırır; `update_whitelist` → `enforce_whitelist_unblocks` (HP-BLOCK + HP-INTEL).
+
 # v4.9.6
 - **Update disk bloat:** başarılı kurulum sonrası `ProgramData\YesNext\CloudHoneypotClient\update\` altındaki `cloud-client-installer*.exe` + `run-update-*.ps1` + Downloads kopyaları + `TEMP\honeypot_*update_*` temizlenir; indirme artık user Downloads’a yazmaz; staging’de yalnızca aktif installer tutulur; daemon auto-enforce prune.
 - **Ayarlar → Güvenlik PIN:** yerel PIN belirle / değiştir / kaldır bölümü (durum + dashboard ipucu); cloud SECTIONS dışında `GuiLock`.

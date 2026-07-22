@@ -220,10 +220,14 @@ class AutoResponse:
             log(f"[AUTO-RESPONSE] ⚪ Auto-block disabled — skip {ip}")
             return False
 
-        # Safety: whitelist check
+        # Safety: whitelist check — never block; clear existing block if any
         if self._is_whitelisted(ip):
             log(f"[AUTO-RESPONSE] ⚪ Skipped whitelist IP: {ip}")
             self._stats["whitelisted_skipped"] += 1
+            try:
+                self.unblock_ip(ip)
+            except Exception:
+                pass
             return False
 
         # Safety: already blocked?
@@ -335,26 +339,50 @@ class AutoResponse:
         except Exception:
             rule_names.append(f"{FIREWALL_RULE_PREFIX}-{ip}")
 
+        # Also drop any HP-INTEL-* rules whose RemoteIP matches this host
+        try:
+            from client_firewall import WindowsFirewallBackend
+            import logging as _logging
+            be = WindowsFirewallBackend(_logging.getLogger("honeypot.wl_unblock"))
+            for r in be.list_intel_rules() or []:
+                remote = str(r.get("remoteip") or "")
+                name = str(r.get("name") or "")
+                if not name:
+                    continue
+                ip_root = (ip or "").split("/")[0]
+                if ip_root and (ip_root == remote.split("/")[0] or ip_root in remote.replace(" ", "")):
+                    if name not in rule_names:
+                        rule_names.append(name)
+        except Exception:
+            pass
+
         success = False
         hard_fail = False
         for rule_name in rule_names:
-            cmd = [
-                "netsh", "advfirewall", "firewall", "delete", "rule",
-                f"name={rule_name}", "dir=in",
+            # Prefer delete without dir= so in+out HP-INTEL pairs clear together
+            cmds = [
+                [
+                    "netsh", "advfirewall", "firewall", "delete", "rule",
+                    f"name={rule_name}",
+                ],
+                [
+                    "netsh", "advfirewall", "firewall", "delete", "rule",
+                    f"name={rule_name}", "dir=in",
+                ],
             ]
-            ok, out = self._run_system_cmd_detail(cmd)
-            combined = (out or "").lower()
-            if ok:
-                if "0 rule" not in combined:
-                    success = True
-                # missing rule still OK (idempotent)
-                if "0 rule" in combined or "no rules match" in combined:
-                    success = success or True
-            else:
-                if any(x in combined for x in ("no rules match", "not found", "bulunamad")):
-                    success = True  # already gone
-                elif any(x in combined for x in ("access", "denied", "privilege")):
-                    hard_fail = True
+            for cmd in cmds:
+                ok, out = self._run_system_cmd_detail(cmd)
+                combined = (out or "").lower()
+                if ok:
+                    if "0 rule" not in combined:
+                        success = True
+                    if "0 rule" in combined or "no rules match" in combined:
+                        success = success or True
+                else:
+                    if any(x in combined for x in ("no rules match", "not found", "bulunamad")):
+                        success = True  # already gone
+                    elif any(x in combined for x in ("access", "denied", "privilege")):
+                        hard_fail = True
 
         if success or not hard_fail:
             # Treat pure-missing as success
@@ -585,10 +613,41 @@ class AutoResponse:
     # ── Whitelist Management ──────────────────────────────────────
 
     def update_whitelist(self, ips: Set[str], subnets: Optional[List[str]] = None):
-        """Update whitelist IPs and subnets (thread-safe)."""
-        self.whitelist_ips = set(ips)
+        """Update whitelist IPs and subnets (thread-safe).
+
+        Immediately clears any existing HP-BLOCK / HP-INTEL rules for those IPs.
+        """
+        self.whitelist_ips = set(ips or set())
         if subnets is not None:
             self.whitelist_subnets = list(subnets)
+        try:
+            n = self.enforce_whitelist_unblocks()
+            if n:
+                log(f"[AUTO-RESPONSE] Whitelist enforce: cleared {n} block(s)")
+        except Exception as e:
+            log(f"[AUTO-RESPONSE] Whitelist enforce error: {e}")
+
+    def enforce_whitelist_unblocks(self) -> int:
+        """Remove firewall blocks for every currently whitelisted IP (idempotent)."""
+        targets: Set[str] = set()
+        with self._lock:
+            targets |= set(self.whitelist_ips or set())
+            # In-memory blocks that match whitelist/subnets
+            for ip in list(self._blocks.keys()):
+                if self._is_whitelisted(ip):
+                    targets.add(ip)
+
+        cleared = 0
+        for ip in sorted(targets):
+            if not ip or ip in ("127.0.0.1", "::1"):
+                continue
+            try:
+                # Always attempt delete — unblock_ip is idempotent
+                if self.unblock_ip(ip):
+                    cleared += 1
+            except Exception as e:
+                log(f"[AUTO-RESPONSE] whitelist unblock {ip}: {e}")
+        return cleared
 
     def apply_threat_config(self, config: dict):
         """Apply GET /api/threats/config auto-block fields."""

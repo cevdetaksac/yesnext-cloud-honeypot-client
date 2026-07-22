@@ -414,6 +414,7 @@ class DataCleanupManager:
                 "$rules = Get-NetFirewallRule | Where-Object { "
                 "  $n = $_.DisplayName; "
                 "  $n -like 'HP-BLOCK-*' -or "
+                "  $n -like 'HP-INTEL-*' -or "
                 "  $n -like 'HONEYPOT_BLOCK*' -or "
                 "  $n -like 'HONEYPOT_THREAT_BLOCK_*' -or "
                 "  $n -like 'HONEYPOT_BLOCK_REMOTE_*' -or "

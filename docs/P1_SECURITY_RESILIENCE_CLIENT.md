@@ -1,9 +1,9 @@
 # P1 Security & Resilience — Client implementation record
 
 > Date: 2026-07-22  
-> Contract baseline: 1.4.2  
+> Contract baseline: 1.4.5  
 > Production floor: client 4.9.0 (unchanged)  
-> Policy: observe-only/default-off until canonical schemas are promoted.
+> Policy: observe-only/default-off until cloud enables dashboard consume + flags.
 
 ## Landed client surfaces
 
@@ -12,8 +12,8 @@
 | RES-103 | `client_resilience_p1.make_heartbeat_proof` / `verify_heartbeat_proof` | Candidate HMAC heartbeat proof + local verify; default off, no Guardian reject-stale |
 | RES-105/106 | `client_resilience_p1.acl_drift_status` | DACL fingerprint only; no ACL mutation, raw principals never uploaded |
 | RANS-302/303 | `client_etw_shadow.sample().correlation` | Dropped/restart/buffer health + bounded fan-out/rename/write correlation; optional named `psutil` fallback (`etw_psutil_fallback`); shadow only |
-| DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` + `is_forbidden_canary_path` | Counts only; Desktop paths rejected/removed from default config |
-| DEC-205/206/208/209 | `BaseHoneypot.get_health` | Existing handler/rate/backlog budgets exposed; static profile honestly reported |
+| DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` + health `canary_coverage` | Counts only; Desktop forbidden; on `health/report` |
+| DEC-205/206/208/209 | `BaseHoneypot.get_health` → snapshot `deception_health[]` | Existing handler/rate/backlog budgets; static profile honestly reported |
 | NET-501/502 | `plan_network_restore`, `load_baseline_version`, `dry_run`, `rollback_version` | Signed baseline required; destructive restore remains confirm-gated |
 | OOB-501 | `client_offline_queue` | DPAPI + HMAC + bounded/idempotent queue; no ingest wiring before contract |
 | ID-402/403 | `PasswordBurstCorrelator` | Aggregate health only; no password/raw event retention; auto lockout false |

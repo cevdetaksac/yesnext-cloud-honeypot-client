@@ -387,7 +387,8 @@ Kabul:
   + named `source`/`fallback` (`stub`|`psutil`) observe sampler
   (`threat_detection.etw_psutil_fallback`, default off; real provider/corpus pending)
 - [~] DEC-201/202 canary coverage counts (path-free health; Desktop config bait
-  removed + deploy-time Desktop path reject; matrix expansion pending)
+  removed + deploy-time Desktop path reject; matrix expansion pending);
+  `canary_coverage` + `deception_health[]` now on `health/report` (contract 1.4.5)
 - [~] RES-103 signed-heartbeat candidate + local `verify_heartbeat_proof`
   (`client_resilience_p1`; default off; Guardian reject-stale not wired)
 - [~] RES-105 SACL/access audit (bounded DACL fingerprint landed; SACL privilege

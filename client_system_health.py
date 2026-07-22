@@ -172,10 +172,12 @@ class SystemHealthMonitor:
         self.token_getter = token_getter or (lambda: "")
         self.threat_engine = threat_engine
         self._ransomware_shield = ransomware_shield
-        # Optional wired-after references for additive observe health (1.4.2)
+        # Optional wired-after references for additive observe health (1.4.2+)
         self.remote_commands = None
         self.event_watcher = None
         self.etw_shadow = None
+        self.service_manager = None
+        self.network_guard = None
 
         self._running = False
 
@@ -1243,6 +1245,22 @@ class SystemHealthMonitor:
             from client_device_identity import observe_enabled, probe_tpm
             if observe_enabled():
                 payload["snapshot"]["device_identity"] = probe_tpm()
+        except Exception:
+            pass
+        # DEC-201/202: path-free canary coverage counts (contract 1.4.5).
+        try:
+            shield = self._ransomware_shield
+            if shield is not None and hasattr(shield, "get_stats"):
+                cov = (shield.get_stats() or {}).get("canary_coverage")
+                if isinstance(cov, dict):
+                    payload["snapshot"]["canary_coverage"] = cov
+        except Exception:
+            pass
+        # DEC-205/206/208/209: credential-free deception budgets.
+        try:
+            sm = getattr(self, "service_manager", None)
+            if sm is not None and hasattr(sm, "get_deception_health"):
+                payload["snapshot"]["deception_health"] = sm.get_deception_health()
         except Exception:
             pass
 

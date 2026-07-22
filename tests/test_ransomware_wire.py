@@ -83,7 +83,18 @@ class TestHealthRansomwareWire(unittest.TestCase):
 
             @staticmethod
             def get_stats():
-                return {"canary_alerts": 1}
+                return {
+                    "canary_alerts": 1,
+                    "canary_coverage": {
+                        "mode": "observe",
+                        "configured": True,
+                        "files_total": 1,
+                        "files_intact": 0,
+                        "files_missing": 1,
+                        "roots_covered": 1,
+                        "coverage_ok": False,
+                    },
+                }
 
             @staticmethod
             def get_quarantine():
@@ -121,6 +132,11 @@ class TestHealthRansomwareWire(unittest.TestCase):
         self.assertEqual(
             quarantine["entries"][0]["cmdline"], "evil.exe --encrypt"
         )
+        cov = snapshot["canary_coverage"]
+        self.assertEqual(cov["files_total"], 1)
+        self.assertEqual(cov["files_intact"], 0)
+        self.assertFalse(cov["coverage_ok"])
+        self.assertNotIn("Users", str(cov))
 
 
 class TestCanaryPolicy(unittest.TestCase):

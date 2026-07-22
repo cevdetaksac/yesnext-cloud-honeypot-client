@@ -426,6 +426,8 @@ class CloudHoneypotClient:
             self.remote_commands.network_guard = self.network_guard
         if getattr(self, "health_monitor", None) is not None and self.network_guard is not None:
             self.health_monitor.network_guard = self.network_guard
+        if getattr(self, "health_monitor", None) is not None:
+            self.health_monitor.service_manager = getattr(self, "service_manager", None)
 
         # Cloud threat-intel (daemon only) — soft if API not ready
         self.threat_intel = None
@@ -2761,6 +2763,9 @@ class CloudHoneypotClient:
                     self.health_monitor.remote_commands = self.remote_commands
                     if getattr(self, "event_watcher", None) is not None:
                         self.health_monitor.event_watcher = self.event_watcher
+                    self.health_monitor.service_manager = getattr(
+                        self, "service_manager", None
+                    )
                 if getattr(self, "ransomware_shield", None) is not None:
                     self.remote_commands.ransomware_shield = self.ransomware_shield
                 log("[MOTOR] RemoteCommandExecutor constructed (daemon ensure)")

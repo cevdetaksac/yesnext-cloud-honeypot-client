@@ -276,6 +276,19 @@ class ServiceManager:
                 }
         return result
 
+    def get_deception_health(self) -> list:
+        """Bounded DEC health for health/report (no credentials/banners)."""
+        rows = []
+        with self._lock:
+            items = list(self._honeypots.items())
+        for _name, hp in items:
+            try:
+                if hasattr(hp, "get_health"):
+                    rows.append(hp.get_health())
+            except Exception:
+                continue
+        return rows[:16]
+
     @property
     def running_services(self) -> list[str]:
         """Çalışan servis adlarının listesi."""

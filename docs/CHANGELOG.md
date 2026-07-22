@@ -1,3 +1,6 @@
+# v4.9.9
+- **Priority hotfix:** `SetPriorityClass` 64-bit handle (ctypes `WinDLL` + restype/argtypes) — 4.9.8 lab’de winerr=6 ile NORMAL’de kalıyordu; artık `above_normal` uygulanır.
+
 # v4.9.8
 - **Kaynak köşe bilgisi:** üst barda küçük badge — App CPU%/RAM MB · Host CPU%/RAM% · ağ ↓↑ (daemon STATUS `resources`; tıkla → CPU/RAM detay).
 - **Motor CPU önceliği (RES-101):** Session-0 daemon `ABOVE_NORMAL` (asla `REALTIME`); config `security.motor_priority` (`above_normal`|`high`|`normal`); RES-102 lite guard yüksek motor CPU’da NORMAL’e düşer.

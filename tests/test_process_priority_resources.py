@@ -26,14 +26,14 @@ class TestPriorityResolve(unittest.TestCase):
         self.assertEqual(_resolve_level("high"), "high")
         self.assertEqual(_resolve_level("bogus"), "above_normal")
 
-    @patch("client_process_priority.ctypes")
-    def test_apply_never_realtime(self, mock_ctypes):
+    @patch("client_process_priority.ctypes.WinDLL")
+    def test_apply_never_realtime(self, mock_windll):
         from client_process_priority import (
             ABOVE_NORMAL_PRIORITY_CLASS,
             apply_motor_priority,
         )
         mock_k = MagicMock()
-        mock_ctypes.windll.kernel32 = mock_k
+        mock_windll.return_value = mock_k
         mock_k.GetCurrentProcess.return_value = 1
         mock_k.SetPriorityClass.return_value = 1
         apply_motor_priority("realtime")

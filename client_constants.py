@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.8"  # resource badge + ABOVE_NORMAL + realtime presence (1.4.12)
+VERSION = "4.9.9"  # priority SetPriorityClass 64-bit handle fix (+4.9.8 features)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

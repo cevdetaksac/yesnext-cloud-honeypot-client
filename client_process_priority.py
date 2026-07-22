@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import threading
 import time
+from ctypes import wintypes
 from typing import Any, Dict, Optional
 
 try:
@@ -75,11 +76,14 @@ def apply_motor_priority(level: Optional[str] = None) -> Dict[str, Any]:
     err = ""
     ok = False
     try:
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetPriorityClass.restype = wintypes.BOOL
         handle = kernel32.GetCurrentProcess()
         ok = bool(kernel32.SetPriorityClass(handle, int(pclass)))
         if not ok:
-            err = f"SetPriorityClass failed winerr={ctypes.GetLastError()}"
+            err = f"SetPriorityClass failed winerr={ctypes.get_last_error()}"
     except Exception as e:
         err = str(e)
         ok = False
@@ -104,11 +108,14 @@ def restore_normal_priority(reason: str = "") -> Dict[str, Any]:
     err = ""
     ok = False
     try:
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetPriorityClass.restype = wintypes.BOOL
         handle = kernel32.GetCurrentProcess()
         ok = bool(kernel32.SetPriorityClass(handle, NORMAL_PRIORITY_CLASS))
         if not ok:
-            err = f"SetPriorityClass failed winerr={ctypes.GetLastError()}"
+            err = f"SetPriorityClass failed winerr={ctypes.get_last_error()}"
     except Exception as e:
         err = str(e)
 

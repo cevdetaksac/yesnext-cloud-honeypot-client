@@ -402,12 +402,13 @@ Kabul:
   coverage required; contract-controlled profiles/corpus evaluation pending
 - [~] NET-501/502 restore dry-run plan + signed retained-version rollback selector
   (automatic connectivity rollback intentionally not enabled)
-- [~] OOB-501 DPAPI+HMAC bounded/idempotent offline queue primitive; ingest/ACK
-  contract before alert-pipeline wiring
+- [~] OOB-501 DPAPI+HMAC bounded/idempotent offline queue + default-off
+  spool/drain (`security.offline_urgent_queue`; batch ACK scaffold); enable
+  after normative api/ promote
 - [~] ID-402/403 password-change burst correlation in Event Log health; no raw
   identities/passwords and no auto-lockout (dashboard schema pending)
-- [~] ZT-602/603 public operator-key metadata/rotation scaffold; asymmetric
-  verify disabled until canonical algorithm/key endpoint promotion
+- [~] ZT-602/603 public operator-key poll (`security.operator_keys_observe`) +
+  inspect scaffold; asymmetric verify disabled until algorithm/vectors
 - [~] ZT-605b TLS/interception/cloud-compromise test matrix documented in
   `docs/P1_SECURITY_RESILIENCE_CLIENT.md`
 - [~] DEV-601 read-only TPM capability PoC; no key generation, enrollment or lock

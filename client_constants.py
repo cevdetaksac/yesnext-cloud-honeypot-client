@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.5"  # list_services Win32 SCM (fix empty list under TR locale)
+VERSION = "4.9.6"  # Update artifact cleanup + Settings PIN UI
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -526,7 +526,15 @@
     "settings_mode_disabled": "Kapalı",
     "settings_mode_night": "Sadece gece",
     "settings_mode_outside": "Mesai dışı",
-    "settings_mode_always": "Her zaman"
+    "settings_mode_always": "Her zaman",
+    "settings_sec_pin": "🔐 Güvenlik PIN",
+    "settings_pin_desc": "GUI açma, çıkış ve kritik işlemler için yerel PIN. Uninstall / Control Panel kaldırma da bu PIN ile korunur.",
+    "settings_pin_status_label": "Durum:",
+    "settings_pin_status_on": "PIN tanımlı",
+    "settings_pin_status_off": "PIN tanımlı değil",
+    "settings_pin_set": "PIN belirle",
+    "settings_pin_change": "PIN değiştir",
+    "settings_pin_clear": "PIN kaldır"
   },
   "en": {
     "app_title": "Cloud Honeypot Security",
@@ -1055,6 +1063,14 @@
     "settings_mode_disabled": "Off",
     "settings_mode_night": "Night only",
     "settings_mode_outside": "Outside work hours",
-    "settings_mode_always": "Always"
+    "settings_mode_always": "Always",
+    "settings_sec_pin": "🔐 Security PIN",
+    "settings_pin_desc": "Local PIN for opening the GUI, exiting, and sensitive actions. Control Panel uninstall is also gated by this PIN.",
+    "settings_pin_status_label": "Status:",
+    "settings_pin_status_on": "PIN is set",
+    "settings_pin_status_off": "No PIN set",
+    "settings_pin_set": "Set PIN",
+    "settings_pin_change": "Change PIN",
+    "settings_pin_clear": "Remove PIN"
   }
 }

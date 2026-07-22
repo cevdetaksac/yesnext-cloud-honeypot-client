@@ -1308,22 +1308,10 @@ class InstallerUpdateManager:
             except:
                 pass
             
-            # SYSTEM Session-0 has no real profile: ~/Downloads and ~/Desktop resolve to
-            # C:\Windows\System32\config\systemprofile\... which often does not exist →
-            # open() raises Errno 2 and silent updates look "stuck" for hours.
-            # Always prefer ProgramData staging (same as stage_installer_for_update).
+            # Always download into ProgramData\...\update\ — never user Downloads /
+            # systemprofile Desktop (SYSTEM Session-0 lacks a real profile; Downloads
+            # copies also accumulate across versions and bloat the disk).
             downloads_dir = _update_helper_staging_dir()
-            try:
-                # Interactive user installs may prefer Downloads when it exists and is writable
-                user_dl = os.path.join(os.path.expanduser("~"), "Downloads")
-                if (
-                    os.path.isdir(user_dl)
-                    and os.access(user_dl, os.W_OK)
-                    and "systemprofile" not in user_dl.lower()
-                ):
-                    downloads_dir = user_dl
-            except Exception:
-                pass
 
             installer_filename = f"cloud-client-installer-v{version}.exe"
             installer_path = os.path.join(downloads_dir, installer_filename)
@@ -1657,6 +1645,147 @@ def heal_update_machinery(log_func=None) -> None:
         _log(f"[UPDATE] Task resume failed: {e}")
 
 
+def _is_our_installer_filename(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return n.startswith("cloud-client-installer") and n.endswith(".exe")
+
+
+def _is_our_update_launcher_filename(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return bool(
+        n.startswith("run-update-")
+        or n.startswith("run-nsis-")
+        or n.startswith("force-restart-")
+    ) and n.endswith(".ps1")
+
+
+def cleanup_update_artifacts(
+    *,
+    keep_installer: Optional[str] = None,
+    remove_installers: bool = True,
+    remove_launchers: bool = True,
+    include_downloads: bool = True,
+    only_if_not_updating: bool = False,
+) -> Dict[str, int]:
+    """Prune staged update EXEs / launcher scripts that bloat ProgramData.
+
+    Keeps ``update-and-install.ps1`` and optional ``keep_installer``.
+    Safe to call after a successful install or on daemon startup.
+    """
+    stats = {"installers": 0, "launchers": 0, "downloads": 0, "temp_dirs": 0}
+    keep_abs = ""
+    try:
+        if keep_installer and os.path.isfile(keep_installer):
+            keep_abs = os.path.abspath(keep_installer)
+    except Exception:
+        keep_abs = ""
+
+    if only_if_not_updating:
+        try:
+            if is_update_in_progress():
+                return stats
+        except Exception:
+            pass
+
+    staging = ""
+    try:
+        staging = _update_helper_staging_dir()
+    except Exception:
+        staging = ""
+
+    if staging and os.path.isdir(staging):
+        try:
+            for name in os.listdir(staging):
+                path = os.path.join(staging, name)
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    if keep_abs and os.path.abspath(path) == keep_abs:
+                        continue
+                except Exception:
+                    pass
+                try:
+                    if remove_installers and _is_our_installer_filename(name):
+                        os.remove(path)
+                        stats["installers"] += 1
+                    elif remove_launchers and _is_our_update_launcher_filename(name):
+                        os.remove(path)
+                        stats["launchers"] += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if include_downloads and remove_installers:
+        candidates = []
+        try:
+            user_dl = os.path.join(os.path.expanduser("~"), "Downloads")
+            if os.path.isdir(user_dl) and "systemprofile" not in user_dl.lower():
+                candidates.append(user_dl)
+        except Exception:
+            pass
+        try:
+            public_dl = os.path.join(
+                os.environ.get("PUBLIC", r"C:\Users\Public"), "Downloads"
+            )
+            if os.path.isdir(public_dl):
+                candidates.append(public_dl)
+        except Exception:
+            pass
+        for folder in candidates:
+            try:
+                for name in os.listdir(folder):
+                    if not _is_our_installer_filename(name):
+                        continue
+                    path = os.path.join(folder, name)
+                    if not os.path.isfile(path):
+                        continue
+                    try:
+                        if keep_abs and os.path.abspath(path) == keep_abs:
+                            continue
+                        os.remove(path)
+                        stats["downloads"] += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    # Orphan TEMP scratch dirs from interrupted self/silent updates
+    try:
+        temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or ""
+        if temp_root and os.path.isdir(temp_root):
+            for name in os.listdir(temp_root):
+                if not (
+                    name.startswith("honeypot_update_")
+                    or name.startswith("honeypot_self_update_")
+                ):
+                    continue
+                path = os.path.join(temp_root, name)
+                if not os.path.isdir(path):
+                    continue
+                try:
+                    import shutil
+
+                    shutil.rmtree(path, ignore_errors=True)
+                    stats["temp_dirs"] += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if any(stats.values()):
+        try:
+            from client_helpers import log as _ulog
+            _ulog(
+                f"[UPDATE] Cleanup artifacts: installers={stats['installers']} "
+                f"launchers={stats['launchers']} downloads={stats['downloads']} "
+                f"temp_dirs={stats['temp_dirs']}"
+            )
+        except Exception:
+            pass
+    return stats
+
+
 def stage_installer_for_update(src_path: str, version: str = "") -> Optional[str]:
     """Copy installer to ProgramData so TEMP cleanup cannot delete it mid-helper."""
     import re
@@ -1676,7 +1805,33 @@ def stage_installer_for_update(src_path: str, version: str = "") -> Optional[str
             ver = re.sub(r"(?i)^cloud-client-installer-?", "", ver) or "latest"
         dest = os.path.join(dest_dir, f"cloud-client-installer-{ver}.exe")
         shutil.copy2(src_path, dest)
-        return dest if os.path.isfile(dest) else None
+        if not os.path.isfile(dest):
+            return None
+        # Drop older staged EXEs / launchers; keep only this installer for the helper.
+        try:
+            cleanup_update_artifacts(
+                keep_installer=dest,
+                remove_installers=True,
+                remove_launchers=True,
+                include_downloads=False,
+                only_if_not_updating=False,
+            )
+        except Exception:
+            pass
+        # Source was a TEMP/Downloads scratch copy — remove after successful stage.
+        try:
+            src_abs = os.path.abspath(src_path)
+            dest_abs = os.path.abspath(dest)
+            if src_abs != dest_abs and (
+                _is_our_installer_filename(os.path.basename(src_path))
+                or "honeypot_update_" in src_abs
+                or "honeypot_self_update_" in src_abs
+                or os.path.basename(os.path.dirname(src_abs)).startswith("honeypot_")
+            ):
+                os.remove(src_path)
+        except Exception:
+            pass
+        return dest
     except Exception:
         return src_path if os.path.isfile(src_path) else None
 

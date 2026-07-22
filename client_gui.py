@@ -405,8 +405,10 @@ class ModernGUI:
         elif page_id == "settings":
             try:
                 self.root.after(50, self._load_settings_values)
+                self.root.after(80, self._refresh_settings_pin_ui)
             except Exception:
                 self._load_settings_values()
+                self._refresh_settings_pin_ui()
         log(f"[PERF] nav '{page_id}' switch {(time.time() - t0) * 1000:.0f}ms")
 
     def _create_sidebar_nav_item(
@@ -1534,6 +1536,9 @@ class ModernGUI:
                 self._settings_widgets[flat_key] = meta
             ctk.CTkFrame(sec, height=6, fg_color="transparent").pack()
 
+        # Yerel güvenlik PIN — cloud SECTIONS dışında (GuiLock)
+        self._build_settings_pin_section(shell)
+
         # Alt satır: durum etiketi + kaydet
         footer = ctk.CTkFrame(shell, fg_color="transparent")
         footer.pack(fill="x", padx=18, pady=(8, 16))
@@ -1562,6 +1567,120 @@ class ModernGUI:
         self._settings_save_btn_top.place(relx=1.0, x=-18, y=18, anchor="ne")
 
         self._load_settings_values()
+        self._refresh_settings_pin_ui()
+
+    def _build_settings_pin_section(self, parent):
+        """Local GUI PIN: set / change / clear (not part of cloud threat-config)."""
+        sec = ctk.CTkFrame(
+            parent, fg_color=COLORS["bg"], corner_radius=8,
+            border_width=1, border_color=COLORS["border"],
+        )
+        sec.pack(fill="x", padx=18, pady=6)
+        self._settings_pin_section = sec
+
+        ctk.CTkLabel(
+            sec, text=self.t("settings_sec_pin"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["text_bright"],
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            sec, text=self.t("settings_pin_desc"),
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            justify="left", wraplength=720, anchor="w",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        status_row = ctk.CTkFrame(sec, fg_color="transparent")
+        status_row.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(
+            status_row, text=self.t("settings_pin_status_label"),
+            font=ctk.CTkFont(size=12), text_color=COLORS["text"],
+        ).pack(side="left")
+        self._settings_pin_status = ctk.CTkLabel(
+            status_row, text=self.t("pin_not_set"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLORS["orange"],
+        )
+        self._settings_pin_status.pack(side="left", padx=(8, 0))
+
+        self._settings_pin_hint = ctk.CTkLabel(
+            sec, text="", font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_dim"], justify="left",
+            wraplength=720, anchor="w",
+        )
+        self._settings_pin_hint.pack(anchor="w", padx=12, pady=(0, 6))
+
+        btn_row = ctk.CTkFrame(sec, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+        self._settings_pin_btn_set = ctk.CTkButton(
+            btn_row, text=self.t("settings_pin_set"),
+            font=ctk.CTkFont(size=12), width=130, height=30,
+            fg_color=COLORS["accent"], hover_color=COLORS["blue"],
+            text_color=COLORS["text_bright"], corner_radius=6,
+            command=self._pin_set_or_change,
+        )
+        self._settings_pin_btn_change = ctk.CTkButton(
+            btn_row, text=self.t("settings_pin_change"),
+            font=ctk.CTkFont(size=12), width=130, height=30,
+            fg_color=COLORS["card"], hover_color=COLORS["accent"],
+            text_color=COLORS["text_bright"], corner_radius=6,
+            border_width=1, border_color=COLORS["border"],
+            command=self._pin_set_or_change,
+        )
+        self._settings_pin_btn_clear = ctk.CTkButton(
+            btn_row, text=self.t("settings_pin_clear"),
+            font=ctk.CTkFont(size=12), width=130, height=30,
+            fg_color=COLORS.get("red") or "#f43f5e",
+            hover_color=COLORS.get("red_hover") or "#fb7185",
+            text_color=COLORS["text_bright"], corner_radius=6,
+            command=self._pin_clear,
+        )
+
+    def _refresh_settings_pin_ui(self):
+        """Update PIN status + which action buttons are visible."""
+        if not getattr(self, "_settings_pin_status", None):
+            return
+        has_pin = False
+        try:
+            from client_gui_lock import GuiLock, dashboard_pin_hint
+            has_pin = bool(GuiLock.instance().has_pin())
+            hint = dashboard_pin_hint(self.t) or ""
+        except Exception:
+            hint = ""
+
+        try:
+            if has_pin:
+                self._settings_pin_status.configure(
+                    text=self.t("settings_pin_status_on"),
+                    text_color=COLORS.get("green") or "#10b981",
+                )
+            else:
+                self._settings_pin_status.configure(
+                    text=self.t("settings_pin_status_off"),
+                    text_color=COLORS.get("orange") or "#f59e0b",
+                )
+        except Exception:
+            pass
+
+        try:
+            self._settings_pin_hint.configure(text=hint)
+            if hint:
+                self._settings_pin_hint.pack(anchor="w", padx=12, pady=(0, 6))
+            else:
+                self._settings_pin_hint.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self._settings_pin_btn_set.pack_forget()
+            self._settings_pin_btn_change.pack_forget()
+            self._settings_pin_btn_clear.pack_forget()
+            if has_pin:
+                self._settings_pin_btn_change.pack(side="left", padx=(0, 8))
+                self._settings_pin_btn_clear.pack(side="left")
+            else:
+                self._settings_pin_btn_set.pack(side="left")
+        except Exception:
+            pass
 
     def _settings_set_status(self, text: str, color: str):
         try:
@@ -6711,6 +6830,7 @@ class ModernGUI:
             ok, err = lock.set_pin(new)
             if ok:
                 messagebox.showinfo(self.t("pin_title"), self.t("pin_saved"))
+                self._refresh_settings_pin_ui()
             else:
                 messagebox.showerror(self.t("pin_title"), f"{self.t('pin_wrong')} ({err})")
         else:
@@ -6723,6 +6843,7 @@ class ModernGUI:
             ok, err = lock.set_pin(new)
             if ok:
                 messagebox.showinfo(self.t("pin_title"), self.t("pin_saved"))
+                self._refresh_settings_pin_ui()
             else:
                 messagebox.showerror(self.t("pin_title"), str(err))
 
@@ -6732,6 +6853,7 @@ class ModernGUI:
         lock = GuiLock.instance()
         if not lock.has_pin():
             messagebox.showinfo(self.t("pin_title"), self.t("pin_not_set"))
+            self._refresh_settings_pin_ui()
             return
         pin = prompt_pin_dialog(
             self.root, self.t("pin_title"), self.t("pin_unlock_prompt"),
@@ -6742,6 +6864,7 @@ class ModernGUI:
         ok, err = lock.clear_pin(pin)
         if ok:
             messagebox.showinfo(self.t("pin_title"), self.t("pin_cleared"))
+            self._refresh_settings_pin_ui()
         else:
             messagebox.showerror(self.t("pin_title"), self.t("pin_wrong"))
 

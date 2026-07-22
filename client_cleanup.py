@@ -259,8 +259,20 @@ class DataCleanupManager:
         out = {
             "firewall_trimmed": 0,
             "ip_pool_trimmed": 0,
+            "update_artifacts": {},
         }
         out["firewall_trimmed"] = self._trim_firewall_rules(max_rules)
+        try:
+            from client_utils import cleanup_update_artifacts
+            out["update_artifacts"] = cleanup_update_artifacts(
+                keep_installer=None,
+                remove_installers=True,
+                remove_launchers=True,
+                include_downloads=True,
+                only_if_not_updating=True,
+            )
+        except Exception as e:
+            log(f"[CLEANUP] Update artifact prune error: {e}")
         te = getattr(self.app, "threat_engine", None)
         if te and hasattr(te, "_cleanup_stale_contexts"):
             before = 0
@@ -285,7 +297,9 @@ class DataCleanupManager:
                                 out["ip_pool_trimmed"] += 1
             except Exception as e:
                 log(f"[CLEANUP] IP pool trim error: {e}")
-        if out["firewall_trimmed"] or out["ip_pool_trimmed"]:
+        if out["firewall_trimmed"] or out["ip_pool_trimmed"] or any(
+            (out.get("update_artifacts") or {}).values()
+        ):
             log(f"[CLEANUP] Auto limits enforced: {out}")
         return out
 

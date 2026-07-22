@@ -97,6 +97,94 @@ function Clear-UpdateLock {
     } catch {}
 }
 
+function Clear-UpdateArtifacts {
+    # After a successful install, delete the used installer and prune orphan
+    # cloud-client-installer*.exe / run-update-*.ps1 under ProgramData\...\update
+    # and matching Downloads copies. Keep update-and-install.ps1 itself.
+    param([string]$UsedInstaller = "")
+    $script:UaRemoved = 0
+    try {
+        if ($UsedInstaller -and (Test-Path -LiteralPath $UsedInstaller)) {
+            Remove-Item -LiteralPath $UsedInstaller -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $UsedInstaller)) {
+                $script:UaRemoved++
+                Write-UpLog "Removed used installer: $UsedInstaller"
+            } else {
+                Write-UpLog "WARN: could not delete used installer (locked?): $UsedInstaller"
+            }
+        }
+    } catch {
+        Write-UpLog "WARN: used-installer delete: $($_.Exception.Message)"
+    }
+
+    $staging = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient\update"
+    if (Test-Path -LiteralPath $staging) {
+        Get-ChildItem -LiteralPath $staging -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $n = $_.Name
+            $kill = $false
+            if ($n -match '(?i)^cloud-client-installer.*\.exe$') { $kill = $true }
+            elseif ($n -match '(?i)^(run-update-|run-nsis-|force-restart-).+\.ps1$') { $kill = $true }
+            if (-not $kill) { return }
+            try {
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $_.FullName)) {
+                    $script:UaRemoved++
+                    Write-UpLog "Pruned update artifact: $n"
+                }
+            } catch {}
+        }
+    }
+
+    # User Downloads copies from older interactive downloads
+    $dlRoots = New-Object System.Collections.Generic.List[string]
+    try {
+        if ($env:USERPROFILE -and ($env:USERPROFILE -notmatch '(?i)systemprofile')) {
+            $p = Join-Path $env:USERPROFILE "Downloads"
+            if (Test-Path -LiteralPath $p) { [void]$dlRoots.Add($p) }
+        }
+    } catch {}
+    try {
+        $pub = Join-Path $env:PUBLIC "Downloads"
+        if ($pub -and (Test-Path -LiteralPath $pub)) { [void]$dlRoots.Add($pub) }
+    } catch {}
+    # Common interactive profiles when helper runs as SYSTEM
+    try {
+        Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @("Public", "Default", "Default User", "All Users") } |
+            ForEach-Object {
+                $p = Join-Path $_.FullName "Downloads"
+                if (Test-Path -LiteralPath $p) { [void]$dlRoots.Add($p) }
+            }
+    } catch {}
+    foreach ($dl in ($dlRoots | Select-Object -Unique)) {
+        Get-ChildItem -LiteralPath $dl -File -Filter "cloud-client-installer*.exe" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                    if (-not (Test-Path -LiteralPath $_.FullName)) {
+                        $script:UaRemoved++
+                        Write-UpLog "Pruned Downloads installer: $($_.FullName)"
+                    }
+                } catch {}
+            }
+    }
+
+    # TEMP scratch dirs left by interrupted silent/self updates
+    try {
+        Get-ChildItem -LiteralPath $env:TEMP -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "honeypot_update_*" -or $_.Name -like "honeypot_self_update_*" } |
+            ForEach-Object {
+                try {
+                    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                    $script:UaRemoved++
+                    Write-UpLog "Pruned TEMP update dir: $($_.Name)"
+                } catch {}
+            }
+    } catch {}
+
+    Write-UpLog "Clear-UpdateArtifacts done (removed=$script:UaRemoved)"
+}
+
 function Write-StopFlags {
     $paths = @(
         (Join-Path $env:TEMP "honeypot_watchdog_token.txt"),
@@ -457,6 +545,14 @@ $size = (Get-Item -LiteralPath $exe).Length
 Write-UpLog "Installed exe OK ($size bytes): $exe"
 if ($size -lt 1000000) {
     Fail-Update 6 "ERROR: Installed exe suspiciously small - abort launch"
+}
+
+# Drop staged installer + orphan launchers/Downloads copies (disk bloat).
+# Do this only after a verified successful install so retries can reuse the EXE.
+try {
+    Clear-UpdateArtifacts -UsedInstaller $InstallerPath
+} catch {
+    Write-UpLog "WARN: Clear-UpdateArtifacts: $($_.Exception.Message)"
 }
 
 Write-UpLog "Creating scheduled tasks..."

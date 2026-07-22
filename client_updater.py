@@ -512,6 +512,25 @@ def check_updates_and_apply_silent() -> bool:
                 return False
             log(f"[SILENT UPDATE] Staged installer: {staged_installer}")
 
+            # Drop TEMP scratch now — helper uses ProgramData copy; os._exit skips finally.
+            try:
+                if temp_dir and os.path.isdir(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                if (
+                    downloaded_path
+                    and os.path.isfile(downloaded_path)
+                    and os.path.abspath(downloaded_path)
+                    != os.path.abspath(staged_installer)
+                ):
+                    from client_utils import _is_our_installer_filename
+                    if _is_our_installer_filename(os.path.basename(downloaded_path)):
+                        os.remove(downloaded_path)
+            except Exception:
+                pass
+
             # Detached elevated helper waits for THIS process to exit, then kills leftovers,
             # runs installer, recreates tasks. Never overwrite a live onefile EXE.
             from client_utils import launch_safe_update_install, release_update_lock
@@ -1279,6 +1298,14 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
                 "tag": f"v{tag}" if tag else "",
             }
 
+        # Helper uses ProgramData copy — drop TEMP scratch immediately.
+        try:
+            if temp_dir and os.path.isdir(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir = ""
+        except Exception:
+            pass
+
         # Soft GUI: if interactive session, show after; else daemon-only
         show_gui = False
         try:
@@ -1409,6 +1436,12 @@ def run_self_update_command(params: Optional[dict] = None, api_client=None) -> d
             "to_version": tag,
             "tag": f"v{tag}" if tag else "",
         }
+    finally:
+        try:
+            if temp_dir and os.path.isdir(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _lifecycle_fail(api_client, reason: str, from_version: str, tag: str) -> None:

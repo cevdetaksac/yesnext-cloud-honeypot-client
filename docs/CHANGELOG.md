@@ -1,3 +1,7 @@
+# v4.9.6
+- **Update disk bloat:** başarılı kurulum sonrası `ProgramData\YesNext\CloudHoneypotClient\update\` altındaki `cloud-client-installer*.exe` + `run-update-*.ps1` + Downloads kopyaları + `TEMP\honeypot_*update_*` temizlenir; indirme artık user Downloads’a yazmaz; staging’de yalnızca aktif installer tutulur; daemon auto-enforce prune.
+- **Ayarlar → Güvenlik PIN:** yerel PIN belirle / değiştir / kaldır bölümü (durum + dashboard ipucu); cloud SECTIONS dışında `GuiLock`.
+
 # v4.9.5
 - **`list_services` boş liste fix (4.9.4 regression):** PowerShell `ConvertTo-Json` çıktısı TR locale (`cp1254`) altında `UnicodeDecodeError` ile düşüyordu → `success:true` + `services:[]`. Birincil yol artık **pywin32 SCM** (`EnumServicesStatus` + `QueryServiceConfig`/`QueryServiceStatusEx`); PS yedek yolu UTF-8 zorlamalı.
 - **Uninstall PIN gate:** Control Panel / NSIS kaldırma önce GUI PIN (veya PIN yoksa onay); lifecycle `uninstall_*` eventleri; `--uninstall-gate`.

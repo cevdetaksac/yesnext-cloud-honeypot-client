@@ -45,6 +45,7 @@ class _ResilienceHarness(unittest.TestCase):
                 "version": "test",
                 "daemon_restarts": [],
                 "guardian_restarts": [],
+                "guardian_heal_attempts": [],
                 "last_recovery_ms": 0,
                 "last_recovery_leg": "",
                 "last_recovery_ok": False,
@@ -121,13 +122,17 @@ class TestStandDownFaultInjection(_ResilienceHarness):
 class TestGuardianSelfHealFaultInjection(_ResilienceHarness):
     """Patch the guardian service surface with individually-tracked mocks."""
 
-    def _patch_guardian(self, *, running, installed=True, ensure_ok=False):
+    def _patch_guardian(self, *, running, installed=True, ensure_ok=False, state=None):
         self._ensure_mock = mock.Mock(return_value=ensure_ok)
+        if state is None:
+            state = "RUNNING" if running else ("STOPPED" if installed else "MISSING")
         patches = [
             mock.patch("client_guardian_service.is_guardian_service_running",
                        return_value=running),
             mock.patch("client_guardian_service.is_guardian_service_installed",
                        return_value=installed),
+            mock.patch("client_guardian_service.query_guardian_service_state",
+                       return_value=state),
             mock.patch("client_guardian_service.ensure_guardian_service_running",
                        self._ensure_mock),
             mock.patch.object(resilience, "refresh_guardian_exit_code",
@@ -141,7 +146,7 @@ class TestGuardianSelfHealFaultInjection(_ResilienceHarness):
         base = time.time()
         with mock.patch("client_resilience.is_legitimate_stand_down",
                         return_value=False):
-            self._patch_guardian(running=False, ensure_ok=False)
+            self._patch_guardian(running=False, ensure_ok=False, state="STOPPED")
             with mock.patch.object(resilience, "_now", return_value=base):
                 # First heal runs ensure(); it fails → backoff arms.
                 first = resilience.ensure_guardian_with_backoff()
@@ -155,6 +160,10 @@ class TestGuardianSelfHealFaultInjection(_ResilienceHarness):
         self.assertFalse(reopened)
         # ensure() ran once in the first window and once after it reopened.
         self.assertEqual(self._ensure_mock.call_count, 2)
+        snap = resilience.snapshot()
+        # Failed heals must not inflate cloud-facing guardian_restarts_24h.
+        self.assertEqual(snap["guardian_restarts_24h"], 0)
+        self.assertGreaterEqual(snap["guardian_heal_attempts_24h"], 1)
 
     def test_stand_down_skips_guardian_heal(self):
         with mock.patch("client_resilience.is_legitimate_stand_down",

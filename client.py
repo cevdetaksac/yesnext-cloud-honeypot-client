@@ -23,6 +23,33 @@ Modules:
 Exit codes: 0 normal, 1 critical error, 2 another instance running, 3 health-check fail.
 """
 
+# Guardian fast-path — MUST run before heavy imports.
+# SCM kills the service if StartServiceCtrlDispatcher is not reached within ~30s.
+# Full client.py imports (tk/CTk/numpy/av) regularly exceed that budget and caused
+# Event 7009/7000 start timeouts + motor heal loops (guardian_restarts_24h 150+).
+import sys as _sys
+
+if __name__ == "__main__":
+    try:
+        from client_guardian_service import is_guardian_argv, run_guardian_mode
+        if is_guardian_argv():
+            run_guardian_mode()
+            _sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception as _guardian_boot_err:
+        # If argv is guardian but import/boot failed, do not fall through to GUI.
+        try:
+            from client_guardian_service import is_guardian_argv as _iga
+            if _iga():
+                try:
+                    print(f"GUARDIAN FASTPATH ERROR: {_guardian_boot_err}", file=_sys.stderr)
+                except Exception:
+                    pass
+                _sys.exit(1)
+        except Exception:
+            pass
+
 # Standard library imports
 import os, sys, socket, threading, time, json, subprocess, ctypes, argparse
 import tkinter as tk
@@ -2969,6 +2996,13 @@ class CloudHoneypotClient:
             start_power_presence_watcher()
         except Exception as e:
             log(f"[POWER] presence watcher failed: {e}")
+
+        # One-shot: legacy heal failures were counted as guardian_restarts_24h.
+        try:
+            from client_resilience import reset_inflated_guardian_restart_counters
+            reset_inflated_guardian_restart_counters()
+        except Exception:
+            pass
 
         try:
             from client_tamper import (

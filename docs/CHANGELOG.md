@@ -1,3 +1,7 @@
+# v4.9.10
+- **Guardian restart loop fix:** SCM Event 7009/7000 — `--mode=guardian` artık heavy import’tan önce fast-path (30s start timeout); `sc` delete+recreate kaldırıldı; START_PENDING beklenir; `guardian_restarts_24h` yalnız başarılı recover (failed heal → `guardian_heal_attempts_24h`); legacy şişmiş sayaç prune.
+- Power presence `PVOID` fix (önceki commit) + cloud soft-alert ile uyum: guardian_false tek başına alarm değil.
+
 # v4.9.9
 - **Priority hotfix:** `SetPriorityClass` 64-bit handle (ctypes `WinDLL` + restype/argtypes) — 4.9.8 lab’de winerr=6 ile NORMAL’de kalıyordu; artık `above_normal` uygulanır.
 

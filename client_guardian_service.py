@@ -24,6 +24,19 @@ SERVICE_DESC = (
     "Does not replace the motor process."
 )
 
+
+def is_guardian_argv(argv=None) -> bool:
+    """True when process was started as the Windows Guardian service host."""
+    import sys
+    av = list(argv if argv is not None else sys.argv[1:])
+    for i, a in enumerate(av):
+        if a == "--mode=guardian":
+            return True
+        if a == "--mode" and i + 1 < len(av) and av[i + 1] == "guardian":
+            return True
+    return False
+
+
 try:
     from client_helpers import log
 except Exception:  # pragma: no cover
@@ -46,6 +59,12 @@ def _exe_path() -> str:
 
 
 def is_guardian_service_running() -> bool:
+    state = query_guardian_service_state()
+    return state == "RUNNING"
+
+
+def query_guardian_service_state() -> str:
+    """Return RUNNING|START_PENDING|STOP_PENDING|STOPPED|UNKNOWN|MISSING."""
     try:
         r = subprocess.run(
             ["sc", "query", SERVICE_NAME],
@@ -53,44 +72,63 @@ def is_guardian_service_running() -> bool:
             creationflags=CREATE_NO_WINDOW,
         )
         if r.returncode != 0:
-            return False
-        return "RUNNING" in (r.stdout or "").upper()
+            return "MISSING"
+        text = (r.stdout or "").upper()
+        for tag in ("START_PENDING", "STOP_PENDING", "RUNNING", "STOPPED"):
+            if tag in text:
+                return tag
+        return "UNKNOWN"
     except Exception:
-        return False
+        return "UNKNOWN"
 
 
 def is_guardian_service_installed() -> bool:
-    try:
-        r = subprocess.run(
-            ["sc", "query", SERVICE_NAME],
-            capture_output=True, text=True, timeout=8,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
+    return query_guardian_service_state() != "MISSING"
 
 
 def install_guardian_service(exe_path: str = None) -> bool:
+    """Create Guardian service if missing. Never delete a healthy install."""
     exe = exe_path or _exe_path()
     if not os.path.isfile(exe):
         log(f"[GUARDIAN] install failed — exe not found: {exe}")
         return False
     binpath = f'"{exe}" --mode=guardian'
     try:
-        if is_guardian_service_installed():
-            subprocess.run(["sc", "stop", SERVICE_NAME],
-                           capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW)
-            time.sleep(1.0)
-            subprocess.run(["sc", "delete", SERVICE_NAME],
-                           capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW)
-            time.sleep(1.0)
+        state = query_guardian_service_state()
+        if state == "RUNNING":
+            return True
+        if state in ("START_PENDING", "STOP_PENDING"):
+            # Let SCM finish; do not delete/recreate (caused 7045 install storms).
+            return False
+        if state != "MISSING":
+            # Already registered — just start (and refresh failure actions).
+            try:
+                subprocess.run(
+                    ["sc", "config", SERVICE_NAME, f"binPath={binpath}", "start=auto"],
+                    capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW,
+                )
+            except Exception:
+                pass
+            subprocess.run(
+                ["sc", "failure", SERVICE_NAME, "reset=86400",
+                 "actions=restart/5000/restart/10000/restart/30000"],
+                capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW,
+            )
+            subprocess.run(
+                ["sc", "start", SERVICE_NAME],
+                capture_output=True, timeout=20, creationflags=CREATE_NO_WINDOW,
+            )
+            time.sleep(2.0)
+            return is_guardian_service_running()
+
         r = subprocess.run(
             ["sc", "create", SERVICE_NAME, f"binPath={binpath}", "start=auto",
              f"DisplayName={SERVICE_DISPLAY}"],
             capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
         )
-        if r.returncode != 0 and "1073" not in (r.stderr or ""):
+        if r.returncode != 0 and "1073" not in (r.stderr or "") and "EXISTS" not in (
+            (r.stderr or "") + (r.stdout or "")
+        ).upper():
             log(f"[GUARDIAN] sc create failed: {(r.stderr or r.stdout or '').strip()}")
             return False
         subprocess.run(["sc", "description", SERVICE_NAME, SERVICE_DESC],
@@ -100,8 +138,10 @@ def install_guardian_service(exe_path: str = None) -> bool:
                        capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW)
         subprocess.run(["sc", "start", SERVICE_NAME],
                          capture_output=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-        log("[GUARDIAN] service installed + started")
-        return True
+        time.sleep(2.0)
+        ok = is_guardian_service_running()
+        log(f"[GUARDIAN] service installed + start ok={ok}")
+        return ok
     except Exception as e:
         log(f"[GUARDIAN] install error: {e}")
         return False
@@ -122,15 +162,29 @@ def uninstall_guardian_service() -> bool:
 
 
 def ensure_guardian_service_running(exe_path: str = None) -> bool:
-    if is_guardian_service_running():
+    state = query_guardian_service_state()
+    if state == "RUNNING":
         return True
-    if not is_guardian_service_installed():
+    if state in ("START_PENDING", "STOP_PENDING"):
+        # Wait briefly for transition; do not stack another start.
+        for _ in range(6):
+            time.sleep(0.5)
+            state = query_guardian_service_state()
+            if state == "RUNNING":
+                return True
+            if state not in ("START_PENDING", "STOP_PENDING"):
+                break
+        return state == "RUNNING"
+    if state == "MISSING":
         return install_guardian_service(exe_path)
     try:
         subprocess.run(["sc", "start", SERVICE_NAME],
                        capture_output=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-        time.sleep(1.5)
-        return is_guardian_service_running()
+        for _ in range(8):
+            time.sleep(0.5)
+            if is_guardian_service_running():
+                return True
+        return False
     except Exception:
         return False
 

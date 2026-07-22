@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.9"  # priority SetPriorityClass 64-bit handle fix (+4.9.8 features)
+VERSION = "4.9.10"  # guardian fast-path + heal loop / counter fix
 
 
 CLIENT_VERSION = VERSION  # Main version constant

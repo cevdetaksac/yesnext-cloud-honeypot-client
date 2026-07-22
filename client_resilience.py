@@ -43,7 +43,8 @@ _lock = threading.RLock()
 _state: dict = {
     "version": VERSION,
     "daemon_restarts": [],       # monotonic wall epoch timestamps
-    "guardian_restarts": [],
+    "guardian_restarts": [],     # successful guardian recovers only (cloud-facing)
+    "guardian_heal_attempts": [],  # all start/heal attempts (local backoff only)
     "last_recovery_ms": 0,
     "last_recovery_leg": "",
     "last_recovery_ok": False,
@@ -181,10 +182,21 @@ def _backoff_for_count(count: int) -> int:
 
 def should_attempt_recovery(leg: str) -> Tuple[bool, int]:
     """Return (allowed, backoff_sec). Never abandons recovery permanently."""
-    key = "daemon_restarts" if leg == "daemon" else "guardian_restarts"
+    if leg == "guardian":
+        key = "guardian_heal_attempts"
+    else:
+        key = "daemon_restarts"
     with _lock:
         now = _now()
         stamps = _prune_list(list(_state.get(key) or []), now)
+        # Migrate legacy guardian_restarts-as-attempts into heal_attempts once.
+        if leg == "guardian" and not stamps:
+            legacy = _prune_list(list(_state.get("guardian_restarts") or []), now)
+            if legacy:
+                stamps = legacy
+                _state["guardian_heal_attempts"] = legacy
+                # Cloud-facing counter must not inherit failed-heal spam.
+                _state["guardian_restarts"] = []
         _state[key] = stamps
         storm = _storm_active(stamps, now)
         _state["restart_storm"] = storm or bool(_state.get("restart_storm"))
@@ -213,23 +225,35 @@ def record_recovery_attempt(
     if stand_down:
         note_stand_down(leg)
         return
-    key = "daemon_restarts" if leg == "daemon" else "guardian_restarts"
     with _lock:
         now = _now()
-        stamps = _prune_list(list(_state.get(key) or []), now)
-        stamps.append(now)
-        _state[key] = stamps
+        if leg == "guardian":
+            attempts = _prune_list(list(_state.get("guardian_heal_attempts") or []), now)
+            attempts.append(now)
+            _state["guardian_heal_attempts"] = attempts
+            # Cloud `guardian_restarts_24h` counts successful recovers only.
+            # Failed start timeouts were inflating 150–250/day false alarms.
+            if ok:
+                successes = _prune_list(list(_state.get("guardian_restarts") or []), now)
+                successes.append(now)
+                _state["guardian_restarts"] = successes
+            storm_src = attempts
+        else:
+            stamps = _prune_list(list(_state.get("daemon_restarts") or []), now)
+            stamps.append(now)
+            _state["daemon_restarts"] = stamps
+            storm_src = stamps
         _state["last_recovery_ms"] = int(duration_ms)
         _state["last_recovery_leg"] = str(leg)
         _state["last_recovery_ok"] = bool(ok)
-        _state["restart_storm"] = _storm_active(stamps, now)
+        _state["restart_storm"] = _storm_active(storm_src, now)
         if _state["stand_down_reason"]:
             _state["stand_down_reason"] = ""
         _save_state()
         if _state["restart_storm"]:
             log(
                 f"[RESILIENCE] restart storm leg={leg} "
-                f"count_24h={len(stamps)} window={STORM_WINDOW_SEC}s"
+                f"attempts={len(storm_src)} window={STORM_WINDOW_SEC}s"
             )
 
 
@@ -243,13 +267,15 @@ def snapshot(
         now = _now()
         daemon = _prune_list(list(_state.get("daemon_restarts") or []), now)
         guardian = _prune_list(list(_state.get("guardian_restarts") or []), now)
+        heal = _prune_list(list(_state.get("guardian_heal_attempts") or []), now)
         _state["daemon_restarts"] = daemon
         _state["guardian_restarts"] = guardian
+        _state["guardian_heal_attempts"] = heal
         stand_down = bool(_state.get("stand_down_reason"))
         # A legitimate update/PIN/uninstall stand-down is not a restart storm;
         # historical failure stamps must not raise an observe alarm during it.
         storm = (not stand_down) and (
-            _storm_active(daemon, now) or _storm_active(guardian, now)
+            _storm_active(daemon, now) or _storm_active(heal, now)
         )
         _state["restart_storm"] = storm
         recent_daemon = [t for t in daemon if now - t <= STORM_WINDOW_SEC]
@@ -269,6 +295,7 @@ def snapshot(
             "guardian_exit_code": exit_code,
             "daemon_restarts_24h": len(daemon),
             "guardian_restarts_24h": len(guardian),
+            "guardian_heal_attempts_24h": len(heal),
             "last_recovery_ms": int(_state.get("last_recovery_ms") or 0),
             "last_recovery_leg": str(_state.get("last_recovery_leg") or ""),
             "last_recovery_ok": bool(_state.get("last_recovery_ok")),
@@ -317,15 +344,21 @@ def ensure_guardian_with_backoff(exe_path: str = None) -> bool:
         ensure_guardian_service_running,
         is_guardian_service_installed,
         is_guardian_service_running,
+        query_guardian_service_state,
     )
 
     if is_legitimate_stand_down():
         note_stand_down("update_or_operator_stop")
         return True
     clear_stand_down()
-    if is_guardian_service_running():
+    state = query_guardian_service_state()
+    if state == "RUNNING" or is_guardian_service_running():
         refresh_guardian_exit_code()
         return True
+    if state in ("START_PENDING", "STOP_PENDING"):
+        # SCM is already transitioning — do not stack starts or inflate counters.
+        log(f"[RESILIENCE] guardian state={state} — wait")
+        return False
 
     allowed, wait = should_attempt_recovery("guardian")
     if not allowed:
@@ -336,9 +369,30 @@ def ensure_guardian_with_backoff(exe_path: str = None) -> bool:
     installed_before = is_guardian_service_installed()
     ok = ensure_guardian_service_running(exe_path)
     ms = int((time.monotonic() - t0) * 1000)
-    # Count recoveries for start/heal attempts (install-or-start).
     record_recovery_attempt("guardian", ok=ok, duration_ms=ms)
     refresh_guardian_exit_code()
     if installed_before and not ok:
         log("[RESILIENCE] guardian installed but not running — start failed")
     return bool(ok)
+
+
+def reset_inflated_guardian_restart_counters() -> int:
+    """One-shot cleanup: move legacy failed-heal spam out of cloud counter."""
+    with _lock:
+        now = _now()
+        legacy = _prune_list(list(_state.get("guardian_restarts") or []), now)
+        heals = _prune_list(list(_state.get("guardian_heal_attempts") or []), now)
+        if not legacy:
+            return 0
+        # Keep at most recent successful marker if last_recovery_ok.
+        moved = len(legacy)
+        if not heals:
+            _state["guardian_heal_attempts"] = legacy
+        if _state.get("last_recovery_ok") and _state.get("last_recovery_leg") == "guardian":
+            _state["guardian_restarts"] = [legacy[-1]]
+            moved = max(0, moved - 1)
+        else:
+            _state["guardian_restarts"] = []
+        _save_state()
+        log(f"[RESILIENCE] pruned inflated guardian_restarts moved={moved}")
+        return moved

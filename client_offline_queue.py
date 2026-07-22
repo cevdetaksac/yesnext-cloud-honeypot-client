@@ -30,6 +30,15 @@ MAX_RECORDS = 500
 _lock = threading.Lock()
 
 
+def offline_queue_enabled() -> bool:
+    """Default off until cloud normative api/ promote + pilot (contract gate)."""
+    try:
+        from client_utils import get_from_config
+        return bool(get_from_config("security.offline_urgent_queue", False))
+    except Exception:
+        return False
+
+
 def _key(token: str) -> bytes:
     return hashlib.sha256(f"{token}|offline-queue-v1".encode("utf-8")).digest()
 
@@ -168,3 +177,61 @@ def acknowledge(
             return removed
         except Exception:
             return 0
+
+
+def drain_to_cloud(
+    api_client,
+    token: str,
+    *,
+    path: str = QUEUE_FILE,
+    limit: int = 50,
+) -> dict:
+    """POST /api/alerts/urgent/batch and acknowledge acked+duplicate ids.
+
+    Observe/default-off only. Never raises into callers; returns a status dict.
+    """
+    out = {
+        "attempted": 0,
+        "acked": 0,
+        "duplicate": 0,
+        "rejected": 0,
+        "error": "",
+    }
+    if not offline_queue_enabled() or not api_client or not token:
+        out["error"] = "disabled_or_unconfigured"
+        return out
+    events = load(token, path=path, limit=limit)
+    if not events:
+        return out
+    out["attempted"] = len(events)
+    try:
+        body = {
+            "events": [
+                {
+                    "event_id": item.get("event_id"),
+                    "queued_at": item.get("queued_at"),
+                    "payload": item.get("payload") or {},
+                }
+                for item in events
+                if item.get("event_id")
+            ]
+        }
+        resp = api_client.api_request(
+            "POST", "alerts/urgent/batch", data=body, timeout=20
+        )
+        if not isinstance(resp, dict):
+            out["error"] = "bad_response"
+            return out
+        acked = [str(x) for x in (resp.get("acked") or []) if x]
+        duplicate = [str(x) for x in (resp.get("duplicate") or []) if x]
+        rejected = resp.get("rejected") or []
+        out["acked"] = len(acked)
+        out["duplicate"] = len(duplicate)
+        out["rejected"] = len(rejected) if isinstance(rejected, list) else 0
+        done = acked + duplicate
+        if done:
+            acknowledge(done, path=path)
+        return out
+    except Exception as exc:
+        out["error"] = str(exc)[:200]
+        return out

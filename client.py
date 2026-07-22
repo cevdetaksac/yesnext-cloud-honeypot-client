@@ -1236,6 +1236,13 @@ class CloudHoneypotClient:
                 system_context=system_context
             )
             self._last_heartbeat_ok = ok
+            if ok:
+                try:
+                    from client_offline_queue import drain_to_cloud, offline_queue_enabled
+                    if offline_queue_enabled():
+                        drain_to_cloud(self.api_client, token)
+                except Exception:
+                    pass
             # Heartbeat may carry account_linked — refresh top-bar badge if changed
             try:
                 from client_utils import is_account_linked

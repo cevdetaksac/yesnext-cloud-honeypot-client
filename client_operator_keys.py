@@ -31,6 +31,11 @@ def inspect_keyset(document: Mapping) -> dict:
     if not isinstance(document, Mapping):
         result["errors"].append("not_mapping")
         return result
+    # Cloud stub may wrap under "keys" or include verify_enabled:false at root.
+    if document.get("verify_enabled") is True:
+        # Client never enables verify until algorithm vectors are promoted.
+        result["errors"].append("verify_enabled_not_allowed")
+        result["verify_enabled"] = False
     lowered = {str(key).lower() for key in document.keys()}
     if any(marker in lowered for marker in _PRIVATE_MARKERS):
         result["private_material_rejected"] = True
@@ -75,3 +80,45 @@ def inspect_keyset(document: Mapping) -> dict:
     result["rotation_overlap"] = active >= 2
     result["valid"] = not result["errors"] and active >= 1
     return result
+
+
+def observe_enabled() -> bool:
+    try:
+        from client_utils import get_from_config
+        return bool(get_from_config("security.operator_keys_observe", False))
+    except Exception:
+        return False
+
+
+def fetch_keyset(api_client, token: str) -> dict:
+    """Poll GET /api/agent/operator-keys (observe stub). Never verifies."""
+    status = {
+        "mode": "observe",
+        "verify_enabled": False,
+        "fetched": False,
+        "valid": False,
+        "active_keys": 0,
+        "revoked_keys": 0,
+        "rotation_overlap": False,
+        "private_material_rejected": False,
+        "errors": ["disabled"],
+    }
+    if not observe_enabled():
+        return status
+    if not api_client or not token:
+        status["errors"] = ["no_token_or_client"]
+        return status
+    try:
+        resp = api_client.api_request(
+            "GET", "agent/operator-keys", timeout=15
+        )
+        if not isinstance(resp, dict):
+            status["errors"] = ["bad_response"]
+            return status
+        inspected = inspect_keyset(resp)
+        inspected["fetched"] = True
+        inspected["verify_enabled"] = False
+        return inspected
+    except Exception as exc:
+        status["errors"] = [f"fetch_error:{exc}"[:120]]
+        return status

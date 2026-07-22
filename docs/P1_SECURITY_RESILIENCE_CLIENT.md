@@ -15,15 +15,15 @@
 | DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` + health `canary_coverage` | Counts only; Desktop forbidden; on `health/report` |
 | DEC-205/206/208/209 | `BaseHoneypot.get_health` → snapshot `deception_health[]` | Existing handler/rate/backlog budgets; static profile honestly reported |
 | NET-501/502 | `plan_network_restore`, `load_baseline_version`, `dry_run`, `rollback_version` | Signed baseline required; destructive restore remains confirm-gated |
-| OOB-501 | `client_offline_queue` | DPAPI + HMAC + bounded/idempotent queue; no ingest wiring before contract |
+| OOB-501 | `client_offline_queue` + alert spool/drain | DPAPI + HMAC queue; `security.offline_urgent_queue` default **off**; drain via `alerts/urgent/batch` |
 | ID-402/403 | `PasswordBurstCorrelator` | Aggregate health only; no password/raw event retention; auto lockout false |
-| ZT-602/603 | `client_operator_keys.inspect_keyset` | Public metadata validation only; signature verify disabled |
+| ZT-602/603 | `client_operator_keys.fetch_keyset` | Polls observe stub; `security.operator_keys_observe` default off; verify always false |
 | ZT-605b | Test matrix below | No TLS bypass or covert fallback |
 | DEV-601 | `client_device_identity.probe_tpm` | Read-only capability; no key generation/enrollment/hardware lock |
 
 ## Contract gates still required
 
-Schemas for the observe blocks below are **promoted in contract 1.4.5**
+Schemas for the observe blocks below are **promoted in contract 1.4.5+**
 (additive; missing = legacy). These remain deliberately **not** production
 enforcement:
 
@@ -31,9 +31,9 @@ enforcement:
 2. ACL auto-repair and SACL mutation;
 3. ETW detection batch ingest beyond health aggregates + 4723/4724 burst
    **alert** payload (counts already on health);
-4. offline urgent ingest + ACK (see `cloud/offline-urgent-queue-design.md`);
-5. operator public-key endpoint + asymmetric verify
-   (`cloud/operator-keyset-design.md`);
+4. Enable `security.offline_urgent_queue` only after normative `api/` promote
+   + green ACK acceptance (wiring exists, flag default off);
+5. Enable operator verify only after algorithm + test vectors (poll stub OK);
 6. TPM enrollment/attestation/rotation.
 
 ## ZT-605b transport threat matrix

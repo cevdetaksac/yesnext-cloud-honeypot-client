@@ -71,6 +71,31 @@ class TestOfflineQueue(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse(os.path.exists(self.path))
 
+    def test_drain_acks_duplicate_and_acked(self):
+        queue.enqueue("token", {"event_id": "e1", "threat_type": "x"}, path=self.path)
+        queue.enqueue("token", {"event_id": "e2", "threat_type": "y"}, path=self.path)
+        seen = {}
+
+        class _Api:
+            def api_request(self, method, path, data=None, **_k):
+                seen["path"] = path
+                seen["count"] = len(data["events"])
+                return {"acked": ["e1"], "duplicate": ["e2"], "rejected": []}
+
+        with mock.patch.object(queue, "offline_queue_enabled", return_value=True):
+            out = queue.drain_to_cloud(_Api(), "token", path=self.path)
+        self.assertEqual(seen["path"], "alerts/urgent/batch")
+        self.assertEqual(seen["count"], 2)
+        self.assertEqual(out["acked"], 1)
+        self.assertEqual(out["duplicate"], 1)
+        self.assertEqual(queue.load("token", path=self.path), [])
+
+    def test_drain_disabled_by_default(self):
+        queue.enqueue("token", {"event_id": "e1"}, path=self.path)
+        out = queue.drain_to_cloud(object(), "token", path=self.path)
+        self.assertEqual(out["error"], "disabled_or_unconfigured")
+        self.assertEqual(len(queue.load("token", path=self.path)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

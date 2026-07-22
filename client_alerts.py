@@ -381,6 +381,11 @@ class AlertPipeline:
                 "raw_events": alert.get("raw_events", []) or [],
                 "system_context": alert.get("system_context", {}) or {},
             }
+            # Soft-idempotency keys (cloud 1.4.5 scaffold); safe when ignored.
+            payload["event_id"] = str(
+                alert.get("event_id") or payload["alert_id"]
+            )
+            payload["idempotency_key"] = payload["event_id"]
 
             # Retry queue: up to 3 attempts, 30s apart; handle actions_requested
             from client_helpers import submit_background
@@ -391,12 +396,24 @@ class AlertPipeline:
                         "POST", "alerts/urgent", data=payload, timeout=10
                     )
                 except Exception:
-                    pass
+                    self._maybe_spool_offline(token, payload)
             self._send_webhook(alert)
 
         except Exception as e:
             self._stats["errors"] += 1
             log(f"[ALERTS] Urgent send error: {e}")
+
+    def _maybe_spool_offline(self, token: str, payload: dict) -> None:
+        """OOB-501: enqueue only when flag on and transport failed."""
+        try:
+            from client_offline_queue import enqueue, offline_queue_enabled
+            if not offline_queue_enabled():
+                return
+            event_id = enqueue(token, payload)
+            if event_id:
+                log(f"[ALERTS] offline queued event_id={event_id[:12]}…")
+        except Exception as exc:
+            log(f"[ALERTS] offline queue skip: {exc}")
 
     def _send_urgent_with_retry(self, payload: dict):
         """POST alerts/urgent with retries; execute actions_requested from response."""
@@ -422,6 +439,11 @@ class AlertPipeline:
                 log(f"[ALERTS] Urgent retry {attempt}/{URGENT_MAX_RETRIES} in {URGENT_RETRY_DELAY}s — {last_err}")
                 time.sleep(URGENT_RETRY_DELAY)
         log(f"[ALERTS] ❌ Urgent alert failed after {URGENT_MAX_RETRIES} attempts: {last_err}")
+        try:
+            token = self.token_getter() if callable(self.token_getter) else ""
+        except Exception:
+            token = ""
+        self._maybe_spool_offline(token or "", payload)
 
     def _handle_actions_requested(self, response: dict):
         """Execute server-requested follow-up actions from urgent response."""

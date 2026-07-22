@@ -1263,6 +1263,15 @@ class SystemHealthMonitor:
                 payload["snapshot"]["deception_health"] = sm.get_deception_health()
         except Exception:
             pass
+        # ZT-602/603: poll observe stub; verify always false.
+        try:
+            from client_operator_keys import fetch_keyset, observe_enabled as keys_observe
+            if keys_observe():
+                payload["snapshot"]["operator_keys"] = fetch_keyset(
+                    self.api_client, token
+                )
+        except Exception:
+            pass
 
         runtime = self._build_agent_runtime()
         if runtime:

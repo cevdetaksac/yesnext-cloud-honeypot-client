@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.2"  # OOB-501 contract 1.4.7 pilot-ready + Threat Center UX
+VERSION = "4.9.3"  # OOB health counters + GUI card/IP Lists layout
 
 
 CLIENT_VERSION = VERSION  # Main version constant

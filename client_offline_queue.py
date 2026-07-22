@@ -27,6 +27,7 @@ from client_constants import MACHINE_DATA_DIR
 from client_security_utils import redact_sensitive
 
 QUEUE_FILE = os.path.join(MACHINE_DATA_DIR, "offline_urgent_queue_v1.jsonl")
+STATS_FILE = os.path.join(MACHINE_DATA_DIR, "offline_urgent_queue_stats_v1.json")
 MAX_RECORDS = 500
 MAX_BATCH = 500
 MAX_PAYLOAD_BYTES = 200 * 1024
@@ -38,6 +39,7 @@ _stats = {
     "expired_dropped": 0,
     "too_large_rejected": 0,
 }
+_stats_loaded = False
 
 
 def offline_queue_enabled() -> bool:
@@ -49,10 +51,83 @@ def offline_queue_enabled() -> bool:
         return False
 
 
-def queue_stats() -> dict:
-    """Local drop counters (additive observe)."""
+def _ensure_stats_loaded(*, stats_path: str = STATS_FILE) -> None:
+    global _stats_loaded
+    if _stats_loaded:
+        return
+    with _lock:
+        if _stats_loaded:
+            return
+        try:
+            if os.path.isfile(stats_path):
+                with open(stats_path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict):
+                    for key in _stats:
+                        try:
+                            _stats[key] = int(data.get(key) or 0)
+                        except (TypeError, ValueError):
+                            pass
+        except Exception:
+            pass
+        _stats_loaded = True
+
+
+def _persist_stats_unlocked(*, stats_path: str = STATS_FILE) -> None:
+    try:
+        os.makedirs(os.path.dirname(stats_path) or ".", exist_ok=True)
+        tmp = stats_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(_stats, handle, separators=(",", ":"))
+        os.replace(tmp, stats_path)
+    except Exception:
+        pass
+
+
+def _bump_stat(name: str, delta: int = 1, *, stats_path: str = STATS_FILE) -> None:
+    """Increment a counter; caller must hold ``_lock`` for in-critical-section bumps."""
+    _stats[name] = int(_stats.get(name) or 0) + int(delta)
+    _persist_stats_unlocked(stats_path=stats_path)
+
+
+def queue_stats(*, stats_path: str = STATS_FILE) -> dict:
+    """Durable drop counters (additive observe; survives restart)."""
+    _ensure_stats_loaded(stats_path=stats_path)
     with _lock:
         return dict(_stats)
+
+
+def pending_count(token: str = "", *, path: str = QUEUE_FILE) -> int:
+    """Approximate pending rows (decrypt path when token provided)."""
+    if token:
+        try:
+            return len(load(token, path=path, limit=MAX_RECORDS, prune_expired=True))
+        except Exception:
+            return 0
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except Exception:
+        return 0
+
+
+def health_observe_block(token: str = "", *, path: str = QUEUE_FILE) -> dict:
+    """Additive health/report block for OOB-501 acceptance visibility."""
+    stats = queue_stats()
+    return {
+        "mode": "observe",
+        "enabled": offline_queue_enabled(),
+        "pending": pending_count(token, path=path),
+        "max_records": MAX_RECORDS,
+        "max_batch": MAX_BATCH,
+        "max_payload_bytes": MAX_PAYLOAD_BYTES,
+        "ttl_sec": LOCAL_TTL_SEC,
+        "oldest_dropped": int(stats.get("oldest_dropped") or 0),
+        "expired_dropped": int(stats.get("expired_dropped") or 0),
+        "too_large_rejected": int(stats.get("too_large_rejected") or 0),
+    }
 
 
 def _key(token: str) -> bytes:
@@ -122,10 +197,11 @@ def enqueue(
 ) -> Optional[str]:
     if not token or not isinstance(event, dict):
         return None
+    _ensure_stats_loaded()
     safe = redact_sensitive(event)
     if _payload_too_large(safe):
         with _lock:
-            _stats["too_large_rejected"] += 1
+            _bump_stat("too_large_rejected")
         return None
     event_id = str(safe.get("event_id") or _record_id(safe))
     envelope = {
@@ -161,7 +237,7 @@ def enqueue(
             cap = max(1, int(max_records))
             if len(existing) > cap:
                 dropped = len(existing) - cap
-                _stats["oldest_dropped"] += dropped
+                _bump_stat("oldest_dropped", dropped)
                 existing = existing[-cap:]
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
@@ -209,8 +285,9 @@ def load(
         except Exception:
             continue
     if expired_ids:
+        _ensure_stats_loaded()
         with _lock:
-            _stats["expired_dropped"] += len(expired_ids)
+            _bump_stat("expired_dropped", len(expired_ids))
         acknowledge(expired_ids, path=path)
     return result[: max(1, int(limit))]
 

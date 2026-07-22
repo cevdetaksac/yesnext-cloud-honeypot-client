@@ -297,8 +297,9 @@ Kabul:
 - [ ] **NET-503 — Restore safety:** RDP/management NIC, VPN, DHCP/statik IP ve
   domain network profili test matrisi.
 - [~] **OOB-501 — Offline signed queue:** contract **1.4.7** `api/10` live;
-  client spool/drain aligned (TTL/caps/reject policy; heartbeat + control WS);
-  `security.offline_urgent_queue` still **default off** — pilot drain next.
+  client spool/drain + durable `oldest_dropped` health block + harness green;
+  `security.offline_urgent_queue` still **default off** — **one-host live
+  canary pilot** remains the open acceptance gate.
 - [ ] **OOB-502 — Secondary HTTPS path:** müşteri onaylı ikinci FQDN/endpoint,
   sistem proxy ve certificate pin/rotation stratejisi.
 - [A] **OOB-503 — Managed side channel:** müşterinin sağladığı management VPN,

@@ -1273,6 +1273,13 @@ class SystemHealthMonitor:
         except Exception:
             pass
 
+        # OOB-501: offline urgent queue depth + durable drop counters (api/10).
+        try:
+            from client_offline_queue import health_observe_block
+            payload["snapshot"]["offline_urgent_queue"] = health_observe_block(token)
+        except Exception:
+            pass
+
         runtime = self._build_agent_runtime()
         if runtime:
             payload["snapshot"]["agent_runtime"] = runtime

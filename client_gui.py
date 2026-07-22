@@ -133,7 +133,8 @@ class ModernGUI:
         self._content_area = ctk.CTkFrame(body, fg_color=COLORS["bg"], corner_radius=0)
         self._content_area.pack(side="left", fill="both", expand=True, padx=(0, 0), pady=0)
 
-        self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
+        # Most pages scroll; IP Lists uses a plain frame so only the table scrolls.
+        self._pages: Dict[str, Any] = {}
         self._nav_buttons: Dict[str, dict] = {}
         self._pages_built = {
             "status": False, "threat": False, "iplist": False, "services": False,
@@ -155,7 +156,10 @@ class ModernGUI:
             self._nav_buttons[page_id] = self._create_sidebar_nav_item(
                 nav_frame, page_id, icon, label,
             )
-            page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
+            if page_id == "iplist":
+                page = ctk.CTkFrame(self._content_area, fg_color="transparent")
+            else:
+                page = ctk.CTkScrollableFrame(self._content_area, fg_color="transparent")
             self._pages[page_id] = page
             # Lightweight placeholder — real widgets built lazily
             ph = ctk.CTkLabel(
@@ -381,8 +385,10 @@ class ModernGUI:
                 self._lazy_load_status_data()
         elif page_id == "iplist":
             try:
+                self.root.after(30, self._fit_ip_table_to_viewport)
                 self.root.after(50, lambda: self._refresh_ip_table(force_firewall=True))
             except Exception:
+                self._fit_ip_table_to_viewport()
                 self._refresh_ip_table(force_firewall=True)
         elif page_id == "threat" and not self._page_data_loaded.get("threat"):
             try:
@@ -3363,9 +3369,14 @@ class ModernGUI:
     # ═══════════════════════════════════════════════════════════════
 
     def _build_ip_activity_table(self, parent):
-        """IP listeleri — Aktivite | Engellenen | Whitelist sekmeleri."""
+        """IP listeleri — Aktivite | Engellenen | Whitelist sekmeleri.
+
+        Parent page is a non-scrollable frame so only the table body scrolls
+        (avoids nested / double scrollbars).
+        """
         sec = ctk.CTkFrame(parent, fg_color=COLORS["card"], corner_radius=12)
-        sec.pack(fill="x", pady=(0, 12))
+        sec.pack(fill="both", expand=True)
+        self._ip_table_sec = sec
 
         self._ip_table_tab = "activity"
         self._ip_table_rows: list = []
@@ -3477,11 +3488,11 @@ class ModernGUI:
             text_color=COLORS["text_bright"], anchor="w",
         ).pack(side="left", padx=4, pady=4, fill="x", expand=True)
 
-        # Tablo içeriği — scrollable
+        # Tablo içeriği — tek scrollbar; yükseklik viewport'a uyumlanır
         self._ip_table_frame = ctk.CTkScrollableFrame(
-            sec, fg_color="transparent", height=180,
+            sec, fg_color="transparent", height=240,
         )
-        self._ip_table_frame.pack(fill="x", padx=16, pady=(0, 12))
+        self._ip_table_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
         # Boş mesaj
         self._ip_table_empty = ctk.CTkLabel(
@@ -3491,6 +3502,45 @@ class ModernGUI:
             text_color=COLORS["text_dim"],
         )
         self._ip_table_empty.pack(anchor="w", padx=4, pady=8)
+
+        def _on_ip_page_configure(_event=None):
+            self._fit_ip_table_to_viewport()
+
+        try:
+            parent.bind("<Configure>", _on_ip_page_configure, add="+")
+        except Exception:
+            pass
+        if self.root:
+            try:
+                self.root.after(80, self._fit_ip_table_to_viewport)
+            except Exception:
+                pass
+
+    def _fit_ip_table_to_viewport(self):
+        """IP Lists table fills remaining page height — one scrollbar only."""
+        try:
+            page = self._pages.get("iplist")
+            sec = getattr(self, "_ip_table_sec", None)
+            table = getattr(self, "_ip_table_frame", None)
+            if page is None or sec is None or table is None:
+                return
+            page.update_idletasks()
+            page_h = int(page.winfo_height() or 0)
+            if page_h < 100:
+                return
+            used = 0
+            for child in sec.winfo_children():
+                if child is table:
+                    continue
+                try:
+                    used += max(int(child.winfo_reqheight()), int(child.winfo_height()))
+                except Exception:
+                    continue
+            # Card padding + bottom margin
+            avail = page_h - used - 36
+            table.configure(height=max(140, avail))
+        except Exception:
+            pass
 
     def _update_ip_tab_styles(self):
         """Aktif sekme vurgusu."""
@@ -4166,7 +4216,7 @@ class ModernGUI:
 
     def _create_stat_card(self, parent, emoji: str, label: str, value: str,
                          color: str, on_click=None) -> ctk.CTkFrame:
-        """Tek bir istatistik kartı oluşturur. Opsiyonel on_click ile tıklanabilir."""
+        """Tek bir istatistik kartı — ikon + değer aynı satırda."""
         card = ctk.CTkFrame(parent, fg_color=COLORS["bg"], corner_radius=10,
                             border_width=1, border_color=COLORS["border"])
 
@@ -4181,32 +4231,37 @@ class ModernGUI:
             card.bind("<Enter>", _on_enter)
             card.bind("<Leave>", _on_leave)
 
-        # Emoji — Segoe UI Emoji (Windows'ta tofu/boş kutu önler)
-        emoji_lbl = ctk.CTkLabel(
-            card, text=emoji, font=self._emoji_font(20),
-        )
-        emoji_lbl.pack(anchor="w", padx=12, pady=(10, 0))
+        # Üst satır: ikon | büyük değer (yan yana — wrap yok)
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 0))
 
-        # Değer (büyük rakam)
+        emoji_lbl = ctk.CTkLabel(
+            top, text=emoji, font=self._emoji_font(20),
+            width=28, anchor="w",
+        )
+        emoji_lbl.pack(side="left", padx=(0, 8))
+
         value_lbl = ctk.CTkLabel(
-            card, text=value,
+            top, text=value,
             font=ctk.CTkFont(size=22, weight="bold"),
             text_color=color,
+            anchor="w",
         )
-        value_lbl.pack(anchor="w", padx=12, pady=(2, 0))
+        value_lbl.pack(side="left", fill="x", expand=True)
 
         # Açıklama
         label_lbl = ctk.CTkLabel(
             card, text=label,
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_dim"],
+            anchor="w",
         )
-        label_lbl.pack(anchor="w", padx=12, pady=(0, 2))
+        label_lbl.pack(anchor="w", padx=12, pady=(2, 0), fill="x")
 
         # Tıkla göstergesi
         if on_click:
             hint_row = ctk.CTkFrame(card, fg_color="transparent")
-            hint_row.pack(anchor="w", padx=12, pady=(0, 6))
+            hint_row.pack(anchor="w", padx=12, pady=(0, 6), fill="x")
             hint_icon = ctk.CTkLabel(
                 hint_row, text="🔍",
                 font=self._emoji_font(9),
@@ -4220,7 +4275,10 @@ class ModernGUI:
             )
             hint_lbl.pack(side="left")
             # Click bind — card ve tüm child widget'lara
-            for widget in [card, emoji_lbl, value_lbl, label_lbl, hint_row, hint_icon, hint_lbl]:
+            for widget in [
+                card, top, emoji_lbl, value_lbl, label_lbl,
+                hint_row, hint_icon, hint_lbl,
+            ]:
                 widget.bind("<Button-1>", lambda e, cb=on_click: cb())
         else:
             # Alt padding

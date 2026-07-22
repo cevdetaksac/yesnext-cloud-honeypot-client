@@ -1,3 +1,7 @@
+# v4.9.3
+- **OOB-501 acceptance visibility:** durable `oldest_dropped` / expire / too-large counters; `health/report` → `offline_urgent_queue{}`; pilot harness (`tests/test_offline_queue_pilot.py`). Flag hâlâ default off.
+- **GUI:** istatistik kartlarında ikon+değer aynı satır; IP Listeleri tek scrollbar (sayfa yüksekliğine oturan tablo).
+
 # v4.9.2
 - **OOB-501 ↔ contract 1.4.7:** `api/10-offline-urgent-queue` hizası — yerel TTL 7 gün prune, payload ≤200 KB reddi, batch ≤500, `rejected` için schema/too_large/expired drop + transient retry; drain artık başarılı heartbeat **ve** control WS reconnect sonrası. Flag `security.offline_urgent_queue` hâlâ **default off** (pilot drain hazır).
 - **Threat Center UX:** Autoblock eşiği threat score (0–100); Engellenen IP kartı IP Listeleri → Engellenen sekmesine gider; Skor kolonu.

@@ -19,9 +19,11 @@ class TestOfflineQueue(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "queue.jsonl")
+        self.stats_path = os.path.join(self.tmp.name, "stats.json")
         self.crypto = [
             mock.patch.object(queue, "_seal", side_effect=lambda raw: b"DP" + raw),
             mock.patch.object(queue, "_open", side_effect=lambda raw: raw[2:]),
+            mock.patch.object(queue, "STATS_FILE", self.stats_path),
         ]
         for patcher in self.crypto:
             patcher.start()
@@ -32,6 +34,7 @@ class TestOfflineQueue(unittest.TestCase):
                 "expired_dropped": 0,
                 "too_large_rejected": 0,
             })
+            queue._stats_loaded = True
 
     def test_round_trip_redacts_and_acknowledges(self):
         event_id = queue.enqueue(
@@ -73,6 +76,15 @@ class TestOfflineQueue(unittest.TestCase):
         loaded = queue.load("token", path=self.path, limit=50)
         self.assertEqual(len(loaded), 3)
         self.assertEqual([item["event_id"] for item in loaded], ["e2", "e3", "e4"])
+        self.assertGreaterEqual(queue.queue_stats()["oldest_dropped"], 2)
+        # Durable counter survives "restart" (reload from stats file).
+        with queue._lock:
+            queue._stats.update({
+                "oldest_dropped": 0,
+                "expired_dropped": 0,
+                "too_large_rejected": 0,
+            })
+            queue._stats_loaded = False
         self.assertGreaterEqual(queue.queue_stats()["oldest_dropped"], 2)
 
     def test_dpapi_unavailable_fails_closed_no_plaintext(self):

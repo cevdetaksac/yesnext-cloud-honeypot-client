@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 9
-!define VERSIONBUILD 4
+!define VERSIONBUILD 5
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -50,6 +50,42 @@ ShowInstDetails nevershow
 
 ; Variables
 Var LogFile
+Var UninstallGateCode
+
+; ===================================================================
+; UNINSTALL PIN GATE (Control Panel anti-tamper)
+; ===================================================================
+Function un.RunUninstallGate
+    DetailPrint "[PIN] Uninstall authorization gate..."
+    StrCpy $UninstallGateCode "2"
+    IfFileExists "$INSTDIR\honeypot-client.exe" 0 unGateMissing
+        IfSilent unGateSilent unGateInteractive
+        unGateSilent:
+            nsExec::ExecToLog '"$INSTDIR\honeypot-client.exe" --uninstall-gate --silent'
+            Pop $UninstallGateCode
+            Goto unGateAfterExec
+        unGateInteractive:
+            nsExec::ExecToLog '"$INSTDIR\honeypot-client.exe" --uninstall-gate'
+            Pop $UninstallGateCode
+        unGateAfterExec:
+        DetailPrint "[PIN] uninstall-gate exit=$UninstallGateCode"
+        Goto unGateDone
+    unGateMissing:
+        DetailPrint "[PIN] honeypot-client.exe missing — allowing cleanup"
+        StrCpy $UninstallGateCode "0"
+    unGateDone:
+FunctionEnd
+
+Function un.onInit
+    ; Block casual Apps & Features removal when PIN is set (or user cancels).
+    Call un.RunUninstallGate
+    ${If} $UninstallGateCode != "0"
+        IfSilent unGateAbortQuiet
+            MessageBox MB_ICONSTOP|MB_OK "Cloud Honeypot kaldırma iptal edildi.$\r$\n$\r$\nPIN gerekli veya doğrulama başarısız.$\r$\nPIN unuttuysanız dashboard → GUI PIN sıfırlama kullanın."
+        unGateAbortQuiet:
+        Abort
+    ${EndIf}
+FunctionEnd
 
 ; ===================================================================
 ; UTILITY FUNCTIONS

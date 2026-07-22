@@ -1,3 +1,7 @@
+# v4.9.5
+- **`list_services` boş liste fix (4.9.4 regression):** PowerShell `ConvertTo-Json` çıktısı TR locale (`cp1254`) altında `UnicodeDecodeError` ile düşüyordu → `success:true` + `services:[]`. Birincil yol artık **pywin32 SCM** (`EnumServicesStatus` + `QueryServiceConfig`/`QueryServiceStatusEx`); PS yedek yolu UTF-8 zorlamalı.
+- **Uninstall PIN gate:** Control Panel / NSIS kaldırma önce GUI PIN (veya PIN yoksa onay); lifecycle `uninstall_*` eventleri; `--uninstall-gate`.
+
 # v4.9.4
 - **Contract 1.4.8 Server Management:** `list_services` + `name`/`service_name` on start/stop/restart; protected services refuse; `list_local_users.groups`; rich `list_processes`/`list_sessions` + post-mutate health refresh. Hesap silme yok → disable.
 - **Remote Desktop:** oturum boyunca encode boyutu kilitli; adaptive yalnız fps/quality; minimum **800×600** tabanı — dashboard’da çözünürlük zıplaması giderildi.

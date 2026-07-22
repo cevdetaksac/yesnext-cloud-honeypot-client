@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.4"  # Server Management 1.4.8 + RD encode size lock
+VERSION = "4.9.5"  # list_services Win32 SCM (fix empty list under TR locale)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

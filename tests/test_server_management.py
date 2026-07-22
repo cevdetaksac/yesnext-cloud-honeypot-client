@@ -10,7 +10,11 @@ from client_remote_commands import (
     PROTECTED_SERVICES,
     RemoteCommandExecutor,
 )
-from client_server_management import normalize_service_name
+from client_server_management import (
+    list_windows_services,
+    normalize_service_name,
+    _list_services_powershell,
+)
 
 
 class TestServerManagementSurface(unittest.TestCase):
@@ -79,6 +83,34 @@ class TestServerManagementSurface(unittest.TestCase):
         self.assertIn("display_name", out["data"]["services"][0])
         self.assertIn("status", out["data"]["services"][0])
         self.assertIn("start_type", out["data"]["services"][0])
+
+    def test_list_windows_services_nonempty_on_host(self):
+        """Regression 4.9.4: locale decode crash → success + services:[]."""
+        services = list_windows_services(include_stopped=True)
+        self.assertGreater(len(services), 0, "expected Win32 SCM services")
+        row = services[0]
+        for key in ("name", "display_name", "status", "start_type"):
+            self.assertIn(key, row)
+            self.assertTrue(str(row[key]).strip())
+
+    def test_powershell_utf8_handles_non_ascii_display_names(self):
+        """PS path must not die on Turkish display names (cp1254)."""
+        payload = (
+            '[{"Name":"SvcA","DisplayName":"Uygulama Bilgileri",'
+            '"State":"Running","StartMode":"Manual","ProcessId":42,'
+            '"ServiceType":"Own Process"}]'
+        )
+        fake = mock.Mock(returncode=0, stdout=payload, stderr="")
+        with mock.patch(
+            "client_server_management._run_ps_utf8",
+            return_value=fake,
+        ):
+            out = _list_services_powershell(
+                include_drivers=False, include_stopped=True
+            )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["display_name"], "Uygulama Bilgileri")
+        self.assertEqual(out[0]["pid"], 42)
 
 
 if __name__ == "__main__":

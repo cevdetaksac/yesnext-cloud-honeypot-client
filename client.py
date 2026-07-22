@@ -3332,6 +3332,12 @@ if __name__ == "__main__":
     parser.add_argument("--watchdog", action="store_true", help="Run watchdog mode - ensure app is running")
     parser.add_argument("--watchdog-pid", type=int, default=None, help="Watchdog process ID")
     parser.add_argument("--healthcheck", action="store_true", help="Perform health check and exit")
+    parser.add_argument(
+        "--uninstall-gate",
+        action="store_true",
+        help="PIN/lifecycle gate for Control Panel uninstall (NSIS); exit 0=allow",
+    )
+    parser.add_argument("--pin", default="", help=argparse.SUPPRESS)
     parser.add_argument("--silent-update-check", action="store_true", help="Silent update check mode - check for updates and install automatically")
     parser.add_argument("--create-tasks", action="store_true", help="Create Task Scheduler tasks and exit (for installer)")
     parser.add_argument("--show-gui", action="store_true", help="Force show GUI window (used by installer launch)")
@@ -3510,6 +3516,17 @@ if __name__ == "__main__":
     if args.healthcheck:
         perform_health_check()
         sys.exit(0)
+
+    # Uninstall PIN gate (Control Panel / Uninstall.exe) — no GUI motor
+    if getattr(args, "uninstall_gate", False):
+        from client_uninstall_gate import main as uninstall_gate_main
+        extra = []
+        if getattr(args, "silent", False):
+            extra.append("--silent")
+        pin = (getattr(args, "pin", None) or "").strip()
+        if pin:
+            extra.extend(["--pin", pin])
+        sys.exit(uninstall_gate_main(extra))
 
     # Determine operation mode
     operation_mode = get_operation_mode(args)

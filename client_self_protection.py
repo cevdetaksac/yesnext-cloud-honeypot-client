@@ -477,8 +477,22 @@ class ProcessProtection:
             pass
 
     def _send_last_breath_alert(self, alert_type: str, details: dict):
-        """Son nefeste API'ye bildirim gönder (timeout: 3sn)."""
+        """Son nefeste bildirim — PROCESS_STOPPED/GRACEFUL yalnız lifecycle (hygiene §8)."""
         try:
+            # Soft stops: lifecycle only — never ThreatAlert / urgent
+            if alert_type in ("CLIENT_PROCESS_STOPPED", "CLIENT_GRACEFUL_STOP"):
+                try:
+                    from client_lifecycle import report_now
+                    report_now(
+                        alert_type.lower(),
+                        str((details or {}).get("message") or alert_type)[:200],
+                        details or {},
+                        severity="info" if "GRACEFUL" in alert_type else "warning",
+                    )
+                except Exception:
+                    pass
+                return
+
             import requests
 
             token = self.token_getter()

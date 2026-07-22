@@ -1,3 +1,14 @@
+# v4.9.11
+- **Alert sinyal hijyeni** ([CLIENT_ALERT_SIGNAL_HYGIENE.md](CLIENT_ALERT_SIGNAL_HYGIENE.md), cloud hedef ≥4.9.9):
+  - `vssadmin list shadows` → `ransomware_process` yok; AlertPipeline urgent drop; yalnız delete/wbadmin delete critical
+  - Küçük VSS delta (≤2 silinen, kalan ≥3) → `warning`; mass/0 kalan veya delete cmd → `critical`
+  - Canary: self-touch suppress; soft MODIFIED debounce ≥30 dk (tüm path); soft → urgent yok; multi/suspect → critical
+  - Offline: Wi‑Fi flap için net_cut ≥15s persist; aynı trigger+pid dedupe ≥5 dk; suspect=`warning` (bomb yok)
+  - Trusted/local logon → `info` score ≤10 (pipeline inflate yok); “Lateral Movement” başlığı kaldırıldı
+  - **§8 Lifecycle:** aynı `event_type`+saniye dedupe (cross-process); `report_now` çift POST yok; `gui_quit` 60s rate-limit; `CLIENT_PROCESS_STOPPED`/`GRACEFUL` → lifecycle only (urgent değil)
+  - **§10** `intel_watch`/`intel_banner` urgent’e yükselmez
+  - Resilience: guardian_false / update stand-down urgent yok (observe only)
+
 # v4.9.10
 - **Guardian restart loop fix:** SCM Event 7009/7000 — `--mode=guardian` artık heavy import’tan önce fast-path (30s start timeout); `sc` delete+recreate kaldırıldı; START_PENDING beklenir; `guardian_restarts_24h` yalnız başarılı recover (failed heal → `guardian_heal_attempts_24h`); legacy şişmiş sayaç prune.
 - Power presence `PVOID` fix (önceki commit) + cloud soft-alert ile uyum: guardian_false tek başına alarm değil.

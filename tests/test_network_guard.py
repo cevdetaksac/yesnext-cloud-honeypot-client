@@ -309,7 +309,7 @@ class TestTriggerFlow(unittest.TestCase):
                        baseline={"adapters": []}, strong=False)
         guard._trigger("fs_storm", 90, netdiff, self._suspects(),
                        baseline={"adapters": []}, strong=False)
-        self.assertEqual(len(sent), 1)  # second call debounced within 60s
+        self.assertEqual(len(sent), 1)  # same trigger+pid dedupe ≥5 min
 
 
 class TestRestoreRollback(unittest.TestCase):

@@ -33,6 +33,90 @@ _LOG_RETENTION_DAYS = 7
 _MAX_QUEUE_LINES = 200
 _lock = threading.Lock()
 _last_cleanup_day = None
+# Same event_type within the same UTC second → single emit/POST (hygiene §8)
+_last_emit_key: Optional[str] = None
+_last_emit_mono: float = 0.0
+_GUI_QUIT_MIN_INTERVAL_SEC = 60.0
+_last_gui_quit_mono: float = 0.0
+
+
+def _dedupe_key(event_type: str, ts: Optional[str] = None) -> str:
+    """event_type + UTC second bucket."""
+    bucket = (ts or _utc_iso())[:19]  # YYYY-MM-DDTHH:MM:SS
+    return f"{event_type}|{bucket}"
+
+
+def _should_skip_duplicate(event_type: str, ts: str) -> bool:
+    """True if identical event_type already emitted this UTC second (cross-process)."""
+    global _last_emit_key, _last_emit_mono
+    key = _dedupe_key(event_type, ts)
+    now = time.time()
+    path = os.path.join(_MACHINE_DIR, "lifecycle_emit_dedupe.json")
+    with _lock:
+        if key == _last_emit_key and (now - _last_emit_mono) < 1.5:
+            return True
+        # Cross-process: same event_type in same UTC second
+        try:
+            _ensure_dir()
+            prev = {}
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    prev = json.load(f) or {}
+            if str(prev.get("key") or "") == key and (now - float(prev.get("mono") or 0)) < 2.0:
+                _last_emit_key = key
+                _last_emit_mono = now
+                return True
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"key": key, "mono": now}, f)
+        except Exception:
+            pass
+        _last_emit_key = key
+        _last_emit_mono = now
+    return False
+
+
+def _should_rate_limit_gui_quit() -> bool:
+    global _last_gui_quit_mono
+    now = time.time()
+    with _lock:
+        if now - _last_gui_quit_mono < _GUI_QUIT_MIN_INTERVAL_SEC:
+            return True
+        _last_gui_quit_mono = now
+    return False
+
+
+def _drop_matching_queue_event(event: dict) -> None:
+    """Remove queued copies of this event after a successful immediate POST."""
+    if not os.path.isfile(LIFECYCLE_QUEUE):
+        return
+    et = str(event.get("event_type") or "")
+    ts = str(event.get("ts") or "")
+    pid = event.get("pid")
+    kept = []
+    try:
+        with open(LIFECYCLE_QUEUE, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        return
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except Exception:
+            kept.append(ln)
+            continue
+        if (
+            str(row.get("event_type") or "") == et
+            and str(row.get("ts") or "") == ts
+            and row.get("pid") == pid
+        ):
+            continue
+        kept.append(ln)
+    try:
+        with open(LIFECYCLE_QUEUE, "w", encoding="utf-8") as f:
+            for ln in kept:
+                f.write(ln + "\n")
+    except OSError:
+        pass
 
 
 def _ensure_dir() -> None:
@@ -99,12 +183,34 @@ def emit(
     severity: str = "info",
     queue_for_api: bool = True,
     log_func: Optional[Callable[[str], None]] = None,
-) -> dict:
-    """Record a lifecycle event locally (+ queue for API flush)."""
+) -> Optional[dict]:
+    """Record a lifecycle event locally (+ queue for API flush).
+
+    Returns None when suppressed (same event_type within the same UTC second,
+    or gui_quit rate-limit).
+    """
+    et = str(event_type or "unknown")
+    if et == "gui_quit" and _should_rate_limit_gui_quit():
+        if log_func:
+            try:
+                log_func("[LIFECYCLE] gui_quit rate-limited")
+            except Exception:
+                pass
+        return None
+
     _ensure_dir()
+    ts = _utc_iso()
+    if _should_skip_duplicate(et, ts):
+        if log_func:
+            try:
+                log_func(f"[LIFECYCLE] dedupe skip {et} @{ts}")
+            except Exception:
+                pass
+        return None
+
     event = {
-        "ts": _utc_iso(),
-        "event_type": str(event_type or "unknown"),
+        "ts": ts,
+        "event_type": et,
         "reason": str(reason or ""),
         "severity": str(severity or "info"),
         "hostname": _hostname(),
@@ -224,11 +330,16 @@ def report_now(
     token: Optional[str] = None,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
-    """Emit locally and try immediate API post (still queues on failure)."""
+    """Emit locally and try immediate API post (still queues on failure).
+
+    On successful POST, drop the queued copy — do NOT flush-repost (hygiene §8).
+    """
     event = emit(
         event_type, reason, details,
         severity=severity, queue_for_api=True, log_func=log_func,
     )
+    if event is None:
+        return False
     token = (token or load_token() or "").strip()
     if not token:
         return False
@@ -239,8 +350,8 @@ def report_now(
             api_client = HoneypotAPIClient(API_URL, log_func=log_func or (lambda m: None))
         if hasattr(api_client, "report_lifecycle_event"):
             if api_client.report_lifecycle_event(token, event):
-                # Drop matching last queue line best-effort
-                flush_queue_to_api(api_client, token, log_func=log_func)
+                with _lock:
+                    _drop_matching_queue_event(event)
                 return True
     except Exception as e:
         if log_func:

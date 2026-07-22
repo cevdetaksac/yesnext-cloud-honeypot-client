@@ -482,6 +482,12 @@ class NetworkGuard:
         self._lock = threading.RLock()
         self._last_trigger_ts: Optional[str] = None
         self._last_baseline: Optional[dict] = None
+        # Wi-Fi flap hygiene: internet_lost must persist before net_cut scores
+        self._internet_lost_since: Optional[float] = None
+        # Per trigger+pid dedupe (≥5 min) — CLIENT_ALERT_SIGNAL_HYGIENE.md §4
+        self._trigger_dedupe: Dict[str, float] = {}
+        self._TRIGGER_DEDUPE_SEC = 300
+        self._NET_CUT_PERSIST_SEC = 15
 
     # -- lifecycle --
 
@@ -536,6 +542,20 @@ class NetworkGuard:
         # dropped — and even then adapter churn is informational, not a trigger.
         conn["_adapters"] = collect_adapters() if self._maybe_net_change(baseline, conn) else None
         netdiff = diff_connectivity(baseline, conn)
+
+        # Short Wi-Fi flaps: require sustained internet_lost before net_cut scores
+        now = time.time()
+        if netdiff.get("internet_lost"):
+            if self._internet_lost_since is None:
+                self._internet_lost_since = now
+            net_cut = (now - self._internet_lost_since) >= float(
+                self.cfg.get("net_cut_persist_sec", self._NET_CUT_PERSIST_SEC)
+            )
+        else:
+            self._internet_lost_since = None
+            net_cut = False
+        netdiff = dict(netdiff)
+        netdiff["net_cut"] = bool(net_cut)
 
         storm_suspects = self._fs_storm_suspects(interval)
         fs_storm = bool(storm_suspects)
@@ -622,16 +642,35 @@ class NetworkGuard:
     def _trigger(self, trigger: str, score: int, netdiff: dict,
                  suspects: List[dict], baseline: Optional[dict],
                  strong: bool = False):
-        # Debounce identical triggers (avoid alarm floods on sustained I/O).
+        # Debounce identical trigger+pid (≥5 min) — avoid Wi-Fi/update storms
         now = time.time()
-        if now - getattr(self, "_last_trigger_mono", 0) < 60:
+        pid = None
+        if suspects:
+            try:
+                pid = int(suspects[0].get("pid") or 0) or None
+            except (TypeError, ValueError):
+                pid = None
+        dedupe_key = f"{trigger}:{pid or 0}"
+        dedupe_sec = float(
+            self.cfg.get("trigger_dedupe_sec", self._TRIGGER_DEDUPE_SEC)
+        )
+        last = self._trigger_dedupe.get(dedupe_key, 0.0)
+        if now - last < dedupe_sec:
             return
+        # Legacy global debounce (tests / burst) — keep mild floor
+        if now - getattr(self, "_last_trigger_mono", 0) < 5:
+            return
+        self._trigger_dedupe[dedupe_key] = now
         self._last_trigger_mono = now
         self._last_trigger_ts = datetime.now(timezone.utc).isoformat()
 
         # Hard invariant: detection is alert-only. Even high-confidence signals
         # need an explicit, server-confirmed suspend_process command.
+        # ransomware_offline_bomb only when operator confirm policy enables contain.
         auto_contain = False
+        if strong and bool(self.cfg.get("auto_contain", False)):
+            # Reserved: still hard-off via load_config; never flap-bomb.
+            auto_contain = False
         log(f"[NET-GUARD] {'CONTAIN' if auto_contain else 'ALERT-ONLY'} "
             f"{trigger} score={score} suspects={len(suspects)} strong={strong}")
 

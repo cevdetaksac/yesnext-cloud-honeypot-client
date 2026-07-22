@@ -124,9 +124,10 @@ FS_RENAMES_PER_MINUTE = 20
 FS_MODIFICATIONS_PER_MINUTE = 50
 FS_NEW_EXTENSION_RATIO = 0.3
 
-# Processes that are suspicious when spawned
+# Processes that are suspicious when spawned.
+# NOTE: vssadmin.exe is intentionally omitted — inventory `list shadows` is
+# benign (agent VSS poll). Delete/wipe is caught via SUSPICIOUS_CMD_PATTERNS.
 SUSPICIOUS_PROCESSES: Dict[str, str] = {
-    "vssadmin.exe": "Shadow copy manipulation",
     "bcdedit.exe": "Boot config manipulation",
     "wbadmin.exe": "Backup deletion",
     "cipher.exe": "File encryption / disk wipe",
@@ -134,6 +135,20 @@ SUSPICIOUS_PROCESSES: Dict[str, str] = {
     "bitsadmin.exe": "BITS transfer (download abuse)",
     "mshta.exe": "HTML Application execution",
 }
+
+# Benign VSS inventory (agent poll / admin browse) — never ransomware_process
+_VSS_LIST_SHADOWS_RE = re.compile(
+    r"vssadmin(?:\.exe)?(?:\s+.+)?:\s*list\s+shadows|"
+    r"vssadmin(?:\.exe)?\s+list\s+shadows",
+    re.I,
+)
+_VSS_DELETE_CMD_RE = re.compile(
+    r"vssadmin(?:\.exe)?\s+delete\s+shadows|"
+    r"wmic\s+shadowcopy\s+delete|"
+    r"wbadmin\s+delete|"
+    r"Win32_ShadowCopy.*Delete\(",
+    re.I,
+)
 
 # Command-line patterns that indicate ransomware activity
 SUSPICIOUS_CMD_PATTERNS = [
@@ -144,6 +159,7 @@ SUSPICIOUS_CMD_PATTERNS = [
     (re.compile(r"bcdedit\s+/set\s+.*recoveryenabled\s+no", re.I), "Recovery disabled", 90),
     (re.compile(r"wbadmin\s+delete\s+catalog", re.I), "Backup catalog delete", 95),
     (re.compile(r"wbadmin\s+delete\s+systemstatebackup", re.I), "System state backup delete", 95),
+    (re.compile(r"wbadmin\s+delete\s+backup", re.I), "Backup delete", 95),
     (re.compile(r"cipher\s+/w:", re.I), "Disk wipe via cipher", 80),
     (re.compile(r"fsutil\s+usn\s+deletejournal", re.I), "USN journal wipe", 90),
     (re.compile(r"wevtutil\s+cl\s+", re.I), "Event log clear", 70),
@@ -156,6 +172,47 @@ SUSPICIOUS_CMD_PATTERNS = [
 
 # VSS check interval
 VSS_CHECK_INTERVAL = 120  # seconds
+
+# Canary hygiene (CLIENT_ALERT_SIGNAL_HYGIENE.md)
+CANARY_SELF_TOUCH_GRACE_SEC = 90
+CANARY_SYNC_DEBOUNCE_SEC = 1800  # ≥30 min for OneDrive / backup paths
+CANARY_SOFT_DEBOUNCE_SEC = 1800  # ≥30 min soft single-file MODIFIED (any path)
+CANARY_SOFT_CLUSTER_WINDOW_SEC = 120
+
+
+def is_vss_inventory_cmdline(cmdline: str) -> bool:
+    """True for `vssadmin list shadows` (agent inventory / admin browse)."""
+    cl = (cmdline or "").strip()
+    if not cl:
+        # Empty cmdline on vssadmin.exe — treat as inventory, not delete.
+        return True
+    low = cl.lower()
+    if "vssadmin" not in low:
+        return False
+    if is_vss_delete_cmdline(cl):
+        return False
+    if _VSS_LIST_SHADOWS_RE.search(cl):
+        return True
+    # Any non-delete vssadmin invocation (list, query, /?) is inventory noise.
+    return "delete" not in low
+
+
+def is_vss_delete_cmdline(cmdline: str) -> bool:
+    return bool(_VSS_DELETE_CMD_RE.search(cmdline or ""))
+
+
+def classify_shadow_copy_severity(
+    deleted_count: int,
+    remaining: int,
+    *,
+    delete_cmd_seen: bool = False,
+) -> tuple:
+    """Return (severity, threat_score) for shadow_copy_deleted hygiene."""
+    if delete_cmd_seen or deleted_count >= 3 or remaining <= 0:
+        return "critical", 100
+    if deleted_count <= 2 and remaining >= 3:
+        return "warning", 35
+    return "warning", 45
 
 
 # ── Dataclasses ───────────────────────────────────────────────────
@@ -208,9 +265,16 @@ class RansomwareShield:
 
         # VSS baseline
         self._vss_count: Optional[int] = None
+        # Set when a delete-shadows cmdline is observed (forces critical VSS delta)
+        self._vss_delete_cmd_until: float = 0.0
 
         # Process monitoring
         self._seen_pids: Set[int] = set()
+
+        # Canary hygiene: self-touch grace + sync-path debounce + soft cluster
+        self._canary_self_touch_until: Dict[str, float] = {}
+        self._canary_path_alert_at: Dict[str, float] = {}
+        self._canary_recent_hits: deque = deque(maxlen=32)
 
         # Stats
         self._stats = {
@@ -428,9 +492,11 @@ class RansomwareShield:
                                 content = secrets.token_bytes(target_size)
                                 with open(filepath, "wb") as f:
                                     f.write(content)
+                                self._note_canary_self_touch(filepath)
                             self._set_hidden_attribute(filepath)
                             file_hash = self._file_hash(filepath)
                             if file_hash:
+                                self._note_canary_self_touch(filepath)
                                 self._canaries.append(CanaryState(
                                     path=filepath,
                                     sha256=file_hash,
@@ -490,9 +556,11 @@ class RansomwareShield:
                         if not os.path.exists(filepath):
                             with open(filepath, "wb") as f:
                                 f.write(secrets.token_bytes(4096))
+                            self._note_canary_self_touch(filepath)
                         self._set_hidden_attribute(filepath)
                         file_hash = self._file_hash(filepath)
                         if file_hash:
+                            self._note_canary_self_touch(filepath)
                             self._canaries.append(CanaryState(
                                 path=filepath,
                                 sha256=file_hash,
@@ -673,6 +741,27 @@ class RansomwareShield:
                     except OSError:
                         pass
 
+    def _note_canary_self_touch(self, path: str, grace_sec: float = CANARY_SELF_TOUCH_GRACE_SEC):
+        """Agent wrote/refreshed this canary — suppress alerts briefly."""
+        key = os.path.normcase(os.path.abspath(path)) if path else ""
+        if key:
+            self._canary_self_touch_until[key] = time.time() + float(grace_sec)
+
+    def _is_canary_self_touch(self, path: str) -> bool:
+        key = os.path.normcase(os.path.abspath(path)) if path else ""
+        until = self._canary_self_touch_until.get(key, 0.0)
+        return bool(key) and time.time() < until
+
+    def _is_sync_canary_path(self, path: str) -> bool:
+        p = (path or "").lower().replace("/", "\\")
+        if self._is_onedrive_path(path):
+            return True
+        markers = (
+            "\\backup\\", "\\backups\\", "\\dropbox\\", "\\google drive\\",
+            "\\box\\", "\\icloud\\",
+        )
+        return any(m in p for m in markers)
+
     def _canary_watch_loop(self):
         """Periodically check canary file integrity (default 30s)."""
         while self._running:
@@ -685,15 +774,34 @@ class RansomwareShield:
                             continue
 
                         current_hash = self._file_hash(canary.path)
-                        if current_hash and current_hash != canary.sha256:
-                            # MODIFIED — ransomware indicator!
-                            self._on_canary_triggered(canary, "MODIFIED")
-                            canary.sha256 = current_hash  # Update to avoid repeat alerts
+                        current_size = None
+                        try:
+                            current_size = os.path.getsize(canary.path)
+                        except OSError:
+                            current_size = None
 
-                        current_size = os.path.getsize(canary.path)
-                        if current_size != canary.size:
-                            self._on_canary_triggered(canary, "SIZE_CHANGED")
-                            canary.size = current_size
+                        hash_changed = bool(
+                            current_hash and current_hash != canary.sha256
+                        )
+                        size_changed = (
+                            current_size is not None and current_size != canary.size
+                        )
+
+                        if hash_changed or size_changed:
+                            if self._is_canary_self_touch(canary.path):
+                                # Agent own write / hash refresh — silent resync
+                                if current_hash:
+                                    canary.sha256 = current_hash
+                                if current_size is not None:
+                                    canary.size = current_size
+                                continue
+
+                            change = "MODIFIED" if hash_changed else "SIZE_CHANGED"
+                            self._on_canary_triggered(canary, change)
+                            if current_hash:
+                                canary.sha256 = current_hash
+                            if current_size is not None:
+                                canary.size = current_size
             except Exception as e:
                 log(f"[RANSOMWARE-SHIELD] Canary check error: {e}")
 
@@ -705,7 +813,40 @@ class RansomwareShield:
             time.sleep(interval)
 
     def _on_canary_triggered(self, canary: CanaryState, change_type: str):
-        """Canary file was tampered with — CRITICAL alert."""
+        """Canary file was tampered with — severity depends on confidence."""
+        if self._is_canary_self_touch(canary.path):
+            log(
+                f"[RANSOMWARE-SHIELD] canary self-touch suppressed: "
+                f"{os.path.basename(canary.path)}"
+            )
+            return
+
+        now = time.time()
+        path_key = os.path.normcase(os.path.abspath(canary.path))
+        if self._is_sync_canary_path(canary.path):
+            last = self._canary_path_alert_at.get(path_key, 0.0)
+            if now - last < CANARY_SYNC_DEBOUNCE_SEC:
+                log(
+                    f"[RANSOMWARE-SHIELD] canary sync debounce: "
+                    f"{os.path.basename(canary.path)}"
+                )
+                try:
+                    h = self._file_hash(canary.path)
+                    if h:
+                        canary.sha256 = h
+                    canary.size = os.path.getsize(canary.path)
+                except OSError:
+                    pass
+                return
+
+        self._canary_recent_hits.append((now, path_key))
+        recent_paths = {
+            p for (ts, p) in self._canary_recent_hits
+            if now - ts <= CANARY_SOFT_CLUSTER_WINDOW_SEC
+        }
+        multi_canary = len(recent_paths) >= 2
+        vss_ok = self._vss_count is None or int(self._vss_count) >= 1
+
         self._stats["canary_alerts"] += 1
         self._stats["total_detections"] += 1
 
@@ -721,8 +862,6 @@ class RansomwareShield:
         }
         self._detections.append(detection)
 
-        # Arm quarantine and attribute the writer before publishing the urgent
-        # alert. The scan is bounded to <=4s; empty suspects are still valid.
         containment = {
             "trigger": f"canary {change_type}: {canary.path}",
             "suspects": [],
@@ -735,16 +874,68 @@ class RansomwareShield:
                 focus_path=canary.path,
             )
         except Exception as e:
-            # Alert delivery must survive a containment implementation failure.
             log(f"[RANSOMWARE-SHIELD] containment error before urgent: {e}")
+
+        suspects = list(containment.get("suspects") or [])
+        has_suspect = bool(suspects)
+        # Single-file MODIFIED + healthy VSS + no writer → warning (sync/AV noise)
+        soft = (
+            change_type in ("MODIFIED", "SIZE_CHANGED")
+            and not multi_canary
+            and not has_suspect
+            and vss_ok
+        )
+        if soft:
+            severity = "warning"
+            threat_score = 40
+            recommended = "review_canary"
+            try:
+                from client_constants import CANARY_SOFT_DEBOUNCE_SEC as _soft_sec
+            except Exception:
+                _soft_sec = CANARY_SOFT_DEBOUNCE_SEC
+            last_soft = self._canary_path_alert_at.get(path_key, 0.0)
+            if now - last_soft < float(_soft_sec):
+                log(
+                    f"[RANSOMWARE-SHIELD] canary soft debounce "
+                    f"({int(_soft_sec)}s): {filename}"
+                )
+                try:
+                    with self._quarantine_lock:
+                        if self._quarantine.get("active") and not self._quarantine.get(
+                            "entries"
+                        ):
+                            self._quarantine["active"] = False
+                            self._quarantine["trigger"] = ""
+                            self._quarantine["locked_at"] = ""
+                except Exception:
+                    pass
+                return
+            try:
+                with self._quarantine_lock:
+                    if self._quarantine.get("active") and not self._quarantine.get(
+                        "entries"
+                    ):
+                        self._quarantine["active"] = False
+                        self._quarantine["trigger"] = ""
+                        self._quarantine["locked_at"] = ""
+            except Exception:
+                pass
+        else:
+            severity = "critical"
+            threat_score = 100
+            recommended = "isolate_host"
+
+        detection["threat_score"] = threat_score
         ransomware_context = {
             "trigger": containment.get("trigger") or (
                 f"canary {change_type}: {canary.path}"
             ),
             "file": canary.path,
             "change_type": change_type,
-            "suspects": list(containment.get("suspects") or []),
+            "suspects": suspects,
             "quarantine": dict(containment.get("quarantine") or {}),
+            "soft": soft,
+            "multi_canary": multi_canary,
         }
         raw_events = [{
             "event_type": "canary_file_tampered",
@@ -765,30 +956,41 @@ class RansomwareShield:
                 "command_line": suspect.get("cmdline") or "",
                 "sha256": suspect.get("sha256") or "",
             }
-            for suspect in ransomware_context["suspects"]
+            for suspect in suspects
             if isinstance(suspect, dict)
         )
 
-        # Single urgent path (on_alert is wired to AlertPipeline.handle_alert).
-        # Do NOT also call a thin on_alert first — that races and can deliver an
-        # empty popup payload without system_context.ransomware.
+        self._canary_path_alert_at[path_key] = now
+
         urgent = {
             "event_type": "canary_file_tampered",
-            "severity": "critical",
+            "severity": severity,
             "threat_type": "ransomware_canary_triggered",
-            "title": f"Ransomware Tespiti — Canary dosya {change_type}!",
-            "description": (
-                f"Tuzak dosya '{filename}' degistirildi/silindi. "
-                f"Bu, aktif bir ransomware saldirisinin guclu gostergesidir.\n\n"
-                f"Dosya: {canary.path}\n"
-                f"Degisiklik: {change_type}\n\n"
-                f"Acil mudahale onerilir!"
+            "title": (
+                f"Canary dosya {change_type} (inceleme)"
+                if soft
+                else f"Ransomware Tespiti — Canary dosya {change_type}!"
             ),
-            "threat_score": 100,
+            "description": (
+                (
+                    f"Tek canary {change_type} — VSS saglam, supheli surec yok. "
+                    f"Sync/AV/self-touch olasi. Dosya: {canary.path}"
+                )
+                if soft
+                else (
+                    f"Tuzak dosya '{filename}' degistirildi/silindi. "
+                    f"Bu, aktif bir ransomware saldirisinin guclu gostergesidir.\n\n"
+                    f"Dosya: {canary.path}\n"
+                    f"Degisiklik: {change_type}\n\n"
+                    f"Acil mudahale onerilir!"
+                )
+            ),
+            "threat_score": threat_score,
             "target_service": "SYSTEM",
-            "recommended_action": "isolate_host",
+            "recommended_action": recommended,
             "auto_response_taken": (
-                ["emergency_alert"] + list(containment.get("actions") or [])
+                (["alert_only"] if soft else ["emergency_alert"])
+                + list(containment.get("actions") or [])
             ),
             "raw_events": raw_events,
             "system_context": {"ransomware": ransomware_context},
@@ -796,22 +998,31 @@ class RansomwareShield:
                 "file": filename,
                 "change_type": change_type,
                 "full_path": canary.path,
+                "soft": soft,
             },
-            # Dashboard/API yes — local tray/toast no (do not scare end users)
             "suppress_local_notify": True,
+            "force_urgent": not soft,
         }
         try:
-            if self.alert_pipeline:
+            if soft:
+                # Soft: never hit /api/alerts/urgent (30 dk loop spam)
+                if self.on_alert:
+                    self.on_alert(urgent)
+                elif self.alert_pipeline and hasattr(
+                    self.alert_pipeline, "handle_alert"
+                ):
+                    self.alert_pipeline.handle_alert(urgent)
+            elif self.alert_pipeline:
                 self.alert_pipeline.send_urgent(urgent)
             elif self.on_alert:
                 self.on_alert(urgent)
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] urgent alert delivery error: {e}")
 
-        # Ransomware tespit — aktif şüpheli IP'leri engelle
-        self._block_suspicious_ips(f"canary {change_type}: {filename}")
-    # ── Katman 3: Suspicious Process Detection ────────────────────
+        if not soft:
+            self._block_suspicious_ips(f"canary {change_type}: {filename}")
 
+    # ── Katman 3: Suspicious Process Detection ────────────────────
     def _process_monitor_loop(self):
         """Monitor for suspicious process spawns (every 5s)."""
         while self._running:
@@ -842,11 +1053,19 @@ class RansomwareShield:
                 cmdline_parts = info.get('cmdline') or []
                 cmdline = ' '.join(cmdline_parts)
 
+                # VSS inventory (agent poll / list shadows) — never ransomware_process
+                if pname == "vssadmin.exe" and is_vss_inventory_cmdline(cmdline):
+                    continue
+                if is_vss_delete_cmdline(cmdline):
+                    self._vss_delete_cmd_until = time.time() + 300.0
+
                 # Check process name (builtin + cloud intel)
                 if pname in SUSPICIOUS_PROCESSES:
                     reason = SUSPICIOUS_PROCESSES[pname]
                     self._on_suspicious_process(pname, pid, cmdline, reason, 50)
                 elif pname in self._cloud_processes:
+                    if pname == "vssadmin.exe" and is_vss_inventory_cmdline(cmdline):
+                        continue
                     reason = self._cloud_processes[pname]
                     self._on_suspicious_process(pname, pid, cmdline, reason, 55)
 
@@ -861,7 +1080,14 @@ class RansomwareShield:
                     for pattern, desc, score in self._cloud_cmdline_patterns:
                         try:
                             if pattern.search(cmdline):
-                                self._on_suspicious_process(pname, pid, cmdline, desc, score)
+                                if (
+                                    pname == "vssadmin.exe"
+                                    and is_vss_inventory_cmdline(cmdline)
+                                ):
+                                    break
+                                self._on_suspicious_process(
+                                    pname, pid, cmdline, desc, score
+                                )
                                 break
                         except Exception:
                             continue
@@ -1037,20 +1263,28 @@ class RansomwareShield:
             return None
 
     def _on_vss_deletion(self, deleted_count: int, remaining: int):
-        """Shadow copies were deleted — critical ransomware indicator."""
+        """Shadow copies decreased — severity from delta / remaining / delete cmd."""
         self._stats["vss_alerts"] += 1
         self._stats["total_detections"] += 1
 
+        delete_cmd_seen = time.time() < float(getattr(self, "_vss_delete_cmd_until", 0.0) or 0.0)
+        severity, threat_score = classify_shadow_copy_severity(
+            deleted_count, remaining, delete_cmd_seen=delete_cmd_seen
+        )
+        critical = severity == "critical"
+
         log(
-            f"[RANSOMWARE-SHIELD] 🚨 VSS DELETION DETECTED: "
-            f"{deleted_count} shadow copies deleted ({remaining} remaining)"
+            f"[RANSOMWARE-SHIELD] VSS DELETION: "
+            f"{deleted_count} deleted ({remaining} remaining) "
+            f"severity={severity} delete_cmd={delete_cmd_seen}"
         )
 
         detection = {
             "type": "vss_deletion",
             "deleted_count": deleted_count,
             "remaining": remaining,
-            "threat_score": 100,
+            "threat_score": threat_score,
+            "severity": severity,
             "timestamp": datetime.now().isoformat(),
         }
         self._detections.append(detection)
@@ -1059,43 +1293,58 @@ class RansomwareShield:
             self.on_alert({
                 "event_type": "vss_shadow_deleted",
                 "threat_type": "shadow_copy_deleted",
-                "severity": "critical",
-                "threat_score": 100,
+                "severity": severity,
+                "threat_score": threat_score,
                 "details": {
                     "deleted_count": deleted_count,
                     "remaining": remaining,
+                    "delete_cmd_seen": delete_cmd_seen,
                 },
                 "description": (
-                    f"🚨 {deleted_count} Volume Shadow Copy silindi! "
-                    f"Kalan: {remaining}. Aktif ransomware saldırısı göstergesi."
+                    f"{deleted_count} Volume Shadow Copy silindi (kalan: {remaining}). "
+                    + (
+                        "Aktif ransomware göstergesi."
+                        if critical
+                        else "Küçük delta — OS rotasyonu olabilir."
+                    )
                 ),
             })
 
         if self.alert_pipeline:
             try:
                 self.alert_pipeline.send_urgent({
-                    "severity": "critical",
+                    "severity": severity,
                     "threat_type": "shadow_copy_deleted",
-                    "title": f"🚨 VSS Shadow Copy Silindi — Ransomware Şüphesi!",
+                    "title": (
+                        "🚨 VSS Shadow Copy Silindi — Ransomware Şüphesi!"
+                        if critical
+                        else "🟠 VSS shadow sayısı azaldı (inceleme)"
+                    ),
                     "description": (
                         f"{deleted_count} adet Volume Shadow Copy silindi.\n"
-                        f"Kalan shadow copy sayısı: {remaining}\n\n"
-                        f"Bu, aktif bir ransomware saldırısının en güçlü göstergesidir.\n"
-                        f"Acil müdahale gereklidir!"
+                        f"Kalan shadow copy sayısı: {remaining}\n"
+                        + (
+                            "\nBu, aktif bir ransomware saldırısının güçlü göstergesidir."
+                            if critical
+                            else "\nKüçük azalma — OS shadow rotasyonu olabilir."
+                        )
                     ),
-                    "threat_score": 100,
-                    "auto_response_taken": ["emergency_alert"],
+                    "threat_score": threat_score,
+                    "auto_response_taken": (
+                        ["emergency_alert"] if critical else ["alert_only"]
+                    ),
                 })
             except Exception:
                 pass
 
-        # VSS silme — aktif şüpheli IP'leri engelle
-        self._block_suspicious_ips(f"VSS deletion: {deleted_count} shadows deleted")
-
-        self._contain_after_hit(
-            trigger=f"vss_deletion:{deleted_count}",
-            focus_path="",
-        )
+        if critical:
+            self._block_suspicious_ips(
+                f"VSS deletion: {deleted_count} shadows deleted"
+            )
+            self._contain_after_hit(
+                trigger=f"vss_deletion:{deleted_count}",
+                focus_path="",
+            )
 
     # ── Helpers ────────────────────────────────────────────────────
 

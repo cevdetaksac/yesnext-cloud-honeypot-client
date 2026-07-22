@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.10"  # guardian fast-path + heal loop / counter fix
+VERSION = "4.9.11"  # alert signal hygiene (CLIENT_ALERT_SIGNAL_HYGIENE)
 
 
 CLIENT_VERSION = VERSION  # Main version constant
@@ -434,7 +434,10 @@ SILENT_HOURS_WEEKEND_SILENT = True        # All-day silent on weekends
 THREAT_CONFIG_SYNC_INTERVAL = 300         # Re-fetch threat config every 5 min (V4)
 
 # Ransomware Shield — canary & detection intervals
-RANSOMWARE_CANARY_CHECK_INTERVAL = 15     # Canary integrity check (seconds)
+RANSOMWARE_CANARY_CHECK_INTERVAL = 30     # Canary integrity check (seconds)
+# Soft single-file MODIFIED debounce (all paths) — hygiene §3 / 30 dk loop
+CANARY_SOFT_DEBOUNCE_SEC = 1800
+
 RANSOMWARE_PROCESS_CHECK_INTERVAL = 5     # Check suspicious processes every 5s
 RANSOMWARE_VSS_CHECK_INTERVAL = 120       # Check VSS shadow copies every 2min
 ENABLE_RANSOMWARE_SHIELD = get_from_config("ransomware_shield.enabled", True)

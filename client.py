@@ -395,6 +395,7 @@ class CloudHoneypotClient:
                     self.ransomware_shield = RansomwareShield(
                         on_alert=self.alert_pipeline.handle_alert if self.alert_pipeline else None,
                         auto_response=self.auto_response,
+                        alert_pipeline=self.alert_pipeline,
                         threat_engine=self.threat_engine,
                     )
                 # Network Guard — offline ransomware bomb + net-drive recovery (≥4.7.0)

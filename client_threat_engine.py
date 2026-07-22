@@ -173,6 +173,35 @@ LOGON_EVENT_TYPES: Set[str] = {
     "explicit_credential_logon",
 }
 
+# Trusted / local logon noise — info only (CLIENT_ALERT_SIGNAL_HYGIENE.md §6)
+TRUSTED_LOGON_NOISE_TYPES: Set[str] = {
+    "successful_logon",
+    "successful_logon_rdp",
+    "successful_logon_network",
+    "successful_logon_sql",
+    "sql_successful_logon",
+    "explicit_credential_logon",
+    "privilege_assigned",
+    "rdp_connection_succeeded",
+    "rdp_session_logon",
+    "rdp_login_success",
+}
+TRUSTED_LOGON_SCORE_CAP = 10
+_LOCAL_IP_KEYS = frozenset({"local", "", "127.0.0.1", "::1", "localhost"})
+
+
+def is_trusted_logon_source(ip_key: str, whitelist: Optional[Set[str]] = None) -> bool:
+    """Whitelist or local/loopback — trusted logon noise (info ≤10)."""
+    key = (ip_key or "").strip().lower()
+    if key in _LOCAL_IP_KEYS:
+        return True
+    if whitelist and ip_key in whitelist:
+        return True
+    if whitelist and key in {w.lower() for w in whitelist}:
+        return True
+    return False
+
+
 # These must always reach API immediately (POST /api/alerts/urgent)
 URGENT_IMMEDIATE_TYPES: Set[str] = LOGON_EVENT_TYPES | {
     "audit_log_cleared",
@@ -573,19 +602,32 @@ class ThreatEngine:
 
             # Whitelist — lower effective score, never HP-BLOCK from this path
             whitelisted = ip_key in getattr(self, "_whitelist_ips", set())
+            trusted = is_trusted_logon_source(
+                ip_key, getattr(self, "_whitelist_ips", set())
+            )
+            trusted_noise = trusted and event_type in TRUSTED_LOGON_NOISE_TYPES
 
             # 4. Alert decision — successful logons always emit (urgent path)
             force_urgent = event_type in URGENT_IMMEDIATE_TYPES
+            if trusted_noise:
+                # Trusted/local logon: info only — never inflate to high/critical
+                force_urgent = False
             if correlation_match:
                 corr_sev = correlation_match["severity"]
-                if force_urgent and corr_sev not in ("critical", "high"):
-                    corr_sev = "high"
                 corr_score = float(correlation_match["score"])
-                if whitelisted:
+                if trusted_noise:
+                    corr_score = min(corr_score, float(TRUSTED_LOGON_SCORE_CAP))
+                    corr_sev = "info"
+                elif force_urgent and corr_sev not in ("critical", "high"):
+                    corr_sev = "high"
+                if whitelisted and not trusted_noise:
                     corr_score = min(corr_score, 40.0)
                     corr_sev = "warning" if corr_sev == "critical" else corr_sev
                 auto_resp = list(correlation_match.get("auto_response") or [])
-                if "block_ip" in auto_resp and not should_auto_block(
+                if trusted_noise:
+                    auto_resp = [a for a in auto_resp if a != "block_ip"]
+                    auto_resp = [a for a in auto_resp if a != "notify_urgent"]
+                elif "block_ip" in auto_resp and not should_auto_block(
                     event_type,
                     correlation_rule=correlation_match.get("name") or "",
                     failed_attempts=ctx.failed_attempts,
@@ -603,17 +645,34 @@ class ThreatEngine:
                     rule_name=correlation_match["name"],
                     description=correlation_match["description"],
                     auto_response=auto_resp,
-                    force_urgent=force_urgent or corr_sev in ("critical", "high"),
+                    force_urgent=(
+                        False
+                        if trusted_noise
+                        else (force_urgent or corr_sev in ("critical", "high"))
+                    ),
                 )
-            elif force_urgent or score >= SEVERITY_THRESHOLDS["warning"]:
+            elif (
+                force_urgent
+                or score >= SEVERITY_THRESHOLDS["warning"]
+                or trusted_noise
+            ):
                 alert_score = float(score)
-                if event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES:
+                if trusted_noise:
+                    alert_score = min(alert_score, float(TRUSTED_LOGON_SCORE_CAP))
+                    severity = "info"
+                elif event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES:
                     # Report capped score for bare success (not cumulative 100 from stacking)
                     alert_score = min(alert_score, float(self._success_score_cap(event)))
                     if whitelisted:
                         alert_score = min(alert_score, 25.0)
-                severity = self._score_to_severity(alert_score)
-                if force_urgent and severity not in ("critical", "high"):
+                    severity = self._score_to_severity(alert_score)
+                else:
+                    severity = self._score_to_severity(alert_score)
+                if (
+                    not trusted_noise
+                    and force_urgent
+                    and severity not in ("critical", "high")
+                ):
                     # Keep urgent delivery but do not inflate bare success to critical
                     if event_type in BARE_SUCCESS_TYPES or event_type in LOGON_EVENT_TYPES:
                         severity = "high"
@@ -621,7 +680,9 @@ class ThreatEngine:
                         severity = "high"
                 # Identity password events stay alert-only (no disable/lockout).
                 standalone_auto_response: List[str] = []
-                if event_type in (
+                if trusted_noise:
+                    standalone_auto_response = []
+                elif event_type in (
                     "password_change_attempt",
                     "password_reset_attempt",
                 ):
@@ -647,7 +708,11 @@ class ThreatEngine:
                     rule_name="",
                     description=f"{event_type} detected from {ip_key}",
                     auto_response=standalone_auto_response,
-                    force_urgent=force_urgent or severity in ("critical", "high"),
+                    force_urgent=(
+                        False
+                        if trusted_noise
+                        else (force_urgent or severity in ("critical", "high"))
+                    ),
                     alert_threat_score=int(alert_score),
                 )
 
@@ -822,6 +887,15 @@ class ThreatEngine:
         source_ip = (event.get("source_ip") or "").strip()
         if source_ip and source_ip in getattr(self, "_whitelist_ips", set()):
             base_score = min(base_score, 20)
+
+        ip_key = source_ip if source_ip else "local"
+        if (
+            event_type in TRUSTED_LOGON_NOISE_TYPES
+            and is_trusted_logon_source(
+                ip_key, getattr(self, "_whitelist_ips", set())
+            )
+        ):
+            base_score = min(base_score, float(TRUSTED_LOGON_SCORE_CAP))
 
         # Cap bare success — 100 reserved for canary/VSS/tamper/ransomware
         if (
@@ -1083,6 +1157,17 @@ class ThreatEngine:
         ):
             reported_score = min(reported_score, int(self._success_score_cap(event)))
 
+        # §9 hard cap: local / trusted console noise never score 100 critical
+        if is_trusted_logon_source(
+            ctx.ip, getattr(self, "_whitelist_ips", set())
+        ) and (
+            etype in TRUSTED_LOGON_NOISE_TYPES
+            or (event.get("event_type") or "") in TRUSTED_LOGON_NOISE_TYPES
+        ):
+            reported_score = min(reported_score, int(TRUSTED_LOGON_SCORE_CAP))
+            severity = "info"
+            force_urgent = False
+
         # Final safety: bare success never carries block_ip
         safe_response = list(auto_response or [])
         if not should_auto_block(
@@ -1158,7 +1243,7 @@ class ThreatEngine:
             titles = {
                 "brute_force_then_access": "🔓 Brute Force → Successful Login",
                 "rdp_after_hours":         "🌙 RDP Access After Hours",
-                "lateral_movement":        "🕸️ Lateral Movement Detected",
+                "lateral_movement":        "🔐 Multi-service logon activity",
                 "post_exploitation":       "💀 Post-Exploitation Activity",
             }
             return titles.get(rule_name, f"⚠️ Correlation: {rule_name}")

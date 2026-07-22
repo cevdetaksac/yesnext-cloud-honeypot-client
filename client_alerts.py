@@ -207,17 +207,62 @@ class AlertPipeline:
         """
         Main entry point — routes alert based on severity.
         Called by ThreatEngine when threshold is exceeded.
-        Successful logons and other kritik olaylar always go urgent.
+        Successful logons and other kritik olaylar always go urgent —
+        except trusted/local noise and observe-only intel (hygiene §6/§9/§10).
         """
         self._stats["alerts_received"] += 1
-        severity = alert.get("severity", "info")
+        severity = str(alert.get("severity", "info") or "info").lower()
         threat_type = str(alert.get("threat_type", "") or "")
         corr = str(alert.get("correlation_rule", "") or "")
-        force_urgent = bool(alert.get("force_urgent")) or (
-            threat_type in _URGENT_IMMEDIATE_TYPES
-            or corr in _URGENT_IMMEDIATE_TYPES
-            or severity in ("critical", "high")
-        )
+        source_ip = str(alert.get("source_ip", "") or "").strip().lower()
+        score = int(alert.get("threat_score") or 0)
+
+        # §1 — never urgent inventory VSS list shadows
+        if self._is_vss_inventory_noise(alert):
+            self._stats["alerts_deduplicated"] += 1
+            log("[ALERTS] drop vss inventory (list shadows) — not urgent")
+            return
+
+        # §9 / §6 — local / trusted logon noise stays info ≤10
+        trusted_noise_types = {
+            "successful_logon", "successful_logon_rdp", "successful_logon_network",
+            "successful_logon_sql", "sql_successful_logon", "explicit_credential_logon",
+            "privilege_assigned", "rdp_connection_succeeded", "rdp_session_logon",
+            "rdp_login_success",
+        }
+        is_local = source_ip in ("local", "", "127.0.0.1", "::1", "localhost")
+        if (is_local or severity == "info") and threat_type in trusted_noise_types:
+            alert["severity"] = "info"
+            alert["threat_score"] = min(score if score > 0 else 10, 10)
+            alert["force_urgent"] = False
+            severity = "info"
+            # Strip misleading lateral title
+            title = str(alert.get("title") or "")
+            if "Lateral Movement" in title:
+                alert["title"] = threat_type.replace("_", " ").title()
+
+        # §10 — intel observe only
+        if threat_type in ("intel_watch", "intel_banner", "threat_intel_process_watch",
+                           "threat_intel_banner"):
+            alert["severity"] = "info"
+            alert["threat_score"] = min(int(alert.get("threat_score") or 5), 15)
+            alert["force_urgent"] = False
+            severity = "info"
+
+        force_urgent = bool(alert.get("force_urgent"))
+        if severity == "info":
+            force_urgent = False
+        elif not force_urgent:
+            force_urgent = (
+                threat_type in _URGENT_IMMEDIATE_TYPES
+                or corr in _URGENT_IMMEDIATE_TYPES
+                or severity in ("critical", "high")
+            )
+            # Trusted/local logon types: membership alone must not force urgent
+            if threat_type in trusted_noise_types and (
+                is_local or int(alert.get("threat_score") or 0) <= 10
+            ):
+                force_urgent = False
 
         # Deduplication — urgent/logon: kısa cooldown (anında API)
         dedup_key = f"{alert.get('source_ip', '')}:{threat_type or corr}"
@@ -235,8 +280,10 @@ class AlertPipeline:
         alert["machine_name"] = self.machine_name
         alert["client_token"] = self.token_getter()
         if force_urgent and severity not in ("critical", "high"):
-            alert["severity"] = "high"
-            severity = "high"
+            # Do not inflate info/warning trusted noise
+            if severity != "info":
+                alert["severity"] = "high"
+                severity = "high"
 
         # Always log locally
         self._log_threat(alert)
@@ -258,6 +305,28 @@ class AlertPipeline:
                 self._notify_gui(alert)
         else:  # info
             self._buffer_for_batch(alert)
+
+    @staticmethod
+    def _is_vss_inventory_noise(alert: dict) -> bool:
+        """True for list-shadows inventory misclassified as ransomware_process."""
+        t = str(alert.get("threat_type") or "").lower()
+        if t in ("vss_inventory",):
+            return True
+        desc = " ".join(
+            str(x) for x in (
+                alert.get("description"),
+                alert.get("title"),
+                (alert.get("details") or {}).get("cmdline"),
+                (alert.get("details") or {}).get("reason"),
+            ) if x
+        ).lower()
+        if "list shadows" in desc or "list  shadows" in desc:
+            if t in ("ransomware_process", "suspicious_process_detected",
+                     "suspicious_process", ""):
+                return True
+        if "shadow copy manipulation" in desc and "delete" not in desc:
+            return True
+        return False
 
     def get_stats(self) -> dict:
         """Return pipeline statistics."""
@@ -325,6 +394,13 @@ class AlertPipeline:
     def _send_urgent(self, alert: dict):
         """Send alert immediately to API /api/alerts/urgent (canonical flat payload)."""
         try:
+            if self._is_vss_inventory_noise(alert):
+                log("[ALERTS] block urgent for vss inventory (list shadows)")
+                return
+            tt = str(alert.get("threat_type") or "")
+            if tt in ("intel_watch", "intel_banner"):
+                log("[ALERTS] block urgent for intel observe")
+                return
             token = self.token_getter()
             if not token or not self.api_client:
                 log("[ALERTS] Cannot send urgent — no token or API client")

@@ -1,3 +1,7 @@
+# v4.9.2
+- **OOB-501 ↔ contract 1.4.7:** `api/10-offline-urgent-queue` hizası — yerel TTL 7 gün prune, payload ≤200 KB reddi, batch ≤500, `rejected` için schema/too_large/expired drop + transient retry; drain artık başarılı heartbeat **ve** control WS reconnect sonrası. Flag `security.offline_urgent_queue` hâlâ **default off** (pilot drain hazır).
+- **Threat Center UX:** Autoblock eşiği threat score (0–100); Engellenen IP kartı IP Listeleri → Engellenen sekmesine gider; Skor kolonu.
+
 # v4.9.1
 - **WebRTC JPEG suppression:** ICE+DTLS gerçekten `connected` olduğunda bekleyen JPEG temizlenir ve WS sender binary JPEG göndermez; fallback durumunda JPEG-WS/HTTP anında yeniden devreye girer.
 - **10 fps clamp kaldırıldı:** dashboard `fps=30` istediğinde client artık değeri 10'a düşürmez; JPEG adaptive ceiling 30 fps, WebRTC helper ceiling 60 fps.

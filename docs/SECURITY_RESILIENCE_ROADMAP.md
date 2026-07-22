@@ -296,9 +296,9 @@ Kabul:
   retained signed baseline before mutate; automatic connectivity rollback open.
 - [ ] **NET-503 — Restore safety:** RDP/management NIC, VPN, DHCP/statik IP ve
   domain network profili test matrisi.
-- [~] **OOB-501 — Offline signed queue:** `client_offline_queue` DPAPI+HMAC
-  bounded/idempotent primitive landed; **not** wired into urgent alert path
-  until cloud ingest/ACK schema.
+- [~] **OOB-501 — Offline signed queue:** contract **1.4.7** `api/10` live;
+  client spool/drain aligned (TTL/caps/reject policy; heartbeat + control WS);
+  `security.offline_urgent_queue` still **default off** — pilot drain next.
 - [ ] **OOB-502 — Secondary HTTPS path:** müşteri onaylı ikinci FQDN/endpoint,
   sistem proxy ve certificate pin/rotation stratejisi.
 - [A] **OOB-503 — Managed side channel:** müşterinin sağladığı management VPN,
@@ -402,9 +402,9 @@ Kabul:
   coverage required; contract-controlled profiles/corpus evaluation pending
 - [~] NET-501/502 restore dry-run plan + signed retained-version rollback selector
   (automatic connectivity rollback intentionally not enabled)
-- [~] OOB-501 DPAPI+HMAC bounded/idempotent offline queue + default-off
-  spool/drain (`security.offline_urgent_queue`; batch ACK scaffold); enable
-  after normative api/ promote
+- [~] OOB-501 DPAPI+HMAC offline queue aligned to contract **1.4.7** api/10
+  (batch ACK, soft idempotency, TTL/caps/reject); flag still default off —
+  enable only for pilot drain
 - [~] ID-402/403 password-change burst correlation in Event Log health; no raw
   identities/passwords and no auto-lockout (dashboard schema pending)
 - [~] ZT-602/603 public operator-key poll (`security.operator_keys_observe`) +

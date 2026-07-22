@@ -381,7 +381,7 @@ class AlertPipeline:
                 "raw_events": alert.get("raw_events", []) or [],
                 "system_context": alert.get("system_context", {}) or {},
             }
-            # Soft-idempotency keys (cloud 1.4.5 scaffold); safe when ignored.
+            # Soft-idempotency keys (contract api/10, 1.4.7); safe when ignored.
             payload["event_id"] = str(
                 alert.get("event_id") or payload["alert_id"]
             )

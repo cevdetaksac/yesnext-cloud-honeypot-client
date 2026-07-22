@@ -64,6 +64,7 @@ class AgentControlWebSocket:
         on_config_hint: Optional[Callable[[dict], None]] = None,
         on_threat_intel_updated: Optional[Callable[[dict], None]] = None,
         on_threat_config_updated: Optional[Callable[[dict], None]] = None,
+        on_connected: Optional[Callable[[], None]] = None,
     ):
         self.api_client = api_client
         self.token_getter = token_getter or (lambda: "")
@@ -71,6 +72,7 @@ class AgentControlWebSocket:
         self.on_config_hint = on_config_hint
         self.on_threat_intel_updated = on_threat_intel_updated
         self.on_threat_config_updated = on_threat_config_updated
+        self.on_connected = on_connected
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -251,6 +253,12 @@ class AgentControlWebSocket:
                     pass
                 ws.send(json.dumps(hello))
                 log("[CONTROL-WS] connected")
+                # OOB-501 (contract 1.4.7): drain after control WS, same as heartbeat.
+                try:
+                    if callable(self.on_connected):
+                        self.on_connected()
+                except Exception as exc:
+                    log(f"[CONTROL-WS] on_connected hook error: {exc}")
 
                 ws.settimeout(RECV_TIMEOUT_SEC)
                 last_ping = time.time()

@@ -262,6 +262,7 @@ class RemoteCommandExecutor:
                 on_command=lambda cmd: self.handle_incoming_command(cmd, source="ws"),
                 on_threat_intel_updated=self._on_threat_intel_updated,
                 on_threat_config_updated=self._on_threat_config_updated,
+                on_connected=self._drain_offline_urgent_queue,
             )
             self._control_ws.start()
         except Exception as e:
@@ -330,6 +331,31 @@ class RemoteCommandExecutor:
                 })
         except Exception as e:
             log(f"[AUTOLOGON] resume error: {e}")
+
+    def _drain_offline_urgent_queue(self) -> None:
+        """OOB-501: drain local spool after control WS reconnect (contract 1.4.7)."""
+        try:
+            from client_offline_queue import drain_to_cloud, offline_queue_enabled
+            if not offline_queue_enabled():
+                return
+            token = ""
+            try:
+                token = self.token_getter() if callable(self.token_getter) else ""
+            except Exception:
+                token = ""
+            if not token or not self.api_client:
+                return
+            out = drain_to_cloud(self.api_client, token)
+            attempted = int(out.get("attempted") or 0)
+            if attempted:
+                log(
+                    "[REMOTE-CMD] offline urgent drain "
+                    f"attempted={attempted} acked={out.get('acked', 0)} "
+                    f"dup={out.get('duplicate', 0)} "
+                    f"drop_rej={out.get('dropped_rejected', 0)}"
+                )
+        except Exception as exc:
+            log(f"[REMOTE-CMD] offline urgent drain skip: {exc}")
 
     def _on_threat_intel_updated(self, data: dict) -> None:
         """Control WS push → sync threat-intel bundle immediately (contract 09)."""

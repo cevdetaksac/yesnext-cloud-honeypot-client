@@ -1,7 +1,7 @@
 # P1 Security & Resilience — Client implementation record
 
 > Date: 2026-07-22  
-> Contract baseline: 1.4.6  
+> Contract baseline: 1.4.7  
 > Production floor: client 4.9.0 (unchanged)  
 > Policy: observe-only/default-off until cloud enables dashboard consume + flags.
 
@@ -15,7 +15,7 @@
 | DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` + health `canary_coverage` | Counts only; Desktop forbidden; on `health/report` |
 | DEC-205/206/208/209 | `BaseHoneypot.get_health` → snapshot `deception_health[]` | Existing handler/rate/backlog budgets; static profile honestly reported |
 | NET-501/502 | `plan_network_restore`, `load_baseline_version`, `dry_run`, `rollback_version` | Signed baseline required; destructive restore remains confirm-gated |
-| OOB-501 | `client_offline_queue` + alert spool/drain | DPAPI + HMAC queue; `security.offline_urgent_queue` default **off**; drain via `alerts/urgent/batch` |
+| OOB-501 | `client_offline_queue` + alert spool/drain | Contract **api/10** (1.4.7): DPAPI+HMAC, TTL 7d, 200KB/500 caps, reject drop vs transient retry; drain after heartbeat **or** control WS; flag default **off** (pilot-ready) |
 | ID-402/403 | `PasswordBurstCorrelator` | Aggregate health only; no password/raw event retention; auto lockout false |
 | ZT-602/603 | `client_operator_keys.fetch_keyset` | Polls observe stub; `security.operator_keys_observe` default off; verify always false |
 | ZT-605b | Test matrix below | No TLS bypass or covert fallback |
@@ -31,8 +31,8 @@ enforcement:
 2. ACL auto-repair and SACL mutation;
 3. ETW detection batch ingest beyond health aggregates + 4723/4724 burst
    **alert** payload (counts already on health);
-4. Enable `security.offline_urgent_queue` only after normative `api/` promote
-   + green ACK acceptance (wiring exists, flag default off);
+4. Enable `security.offline_urgent_queue` only for **pilot drain** after ops OK
+   (api/10 live; client 4.9.2 aligned; flag still default off);
 5. Enable operator verify only after algorithm + test vectors (poll stub OK);
 6. TPM enrollment/attestation/rotation.
 

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""OOB-501 local offline urgent-event queue.
+"""OOB-501 local offline urgent-event queue (contract api/10, 1.4.7).
 
 Bounded, idempotent, replay-safe local spool:
 - payload is recursively redacted before persistence;
 - Windows uses machine-scope DPAPI via TokenStore;
 - each encrypted record is HMAC-protected and has a deterministic event id;
-- FIFO load/ack helpers never perform network I/O themselves.
+- FIFO load/ack helpers never perform network I/O themselves;
+- local TTL 7 days; max payload 200 KB; batch drain ≤ 500.
 
-Default integration remains off until the ingest contract is promoted.
+Flag ``security.offline_urgent_queue`` remains default off until pilot.
 """
 
 from __future__ import annotations
@@ -27,7 +28,16 @@ from client_security_utils import redact_sensitive
 
 QUEUE_FILE = os.path.join(MACHINE_DATA_DIR, "offline_urgent_queue_v1.jsonl")
 MAX_RECORDS = 500
+MAX_BATCH = 500
+MAX_PAYLOAD_BYTES = 200 * 1024
+LOCAL_TTL_SEC = 7 * 24 * 3600
+_DROP_REJECT_REASONS = frozenset({"schema", "too_large", "expired"})
 _lock = threading.Lock()
+_stats = {
+    "oldest_dropped": 0,
+    "expired_dropped": 0,
+    "too_large_rejected": 0,
+}
 
 
 def offline_queue_enabled() -> bool:
@@ -37,6 +47,12 @@ def offline_queue_enabled() -> bool:
         return bool(get_from_config("security.offline_urgent_queue", False))
     except Exception:
         return False
+
+
+def queue_stats() -> dict:
+    """Local drop counters (additive observe)."""
+    with _lock:
+        return dict(_stats)
 
 
 def _key(token: str) -> bytes:
@@ -64,6 +80,39 @@ def _record_id(event: dict) -> str:
     return hashlib.sha256(stable).hexdigest()
 
 
+def _parse_queued_at(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _is_expired(queued_at, *, now: Optional[datetime] = None) -> bool:
+    dt = _parse_queued_at(queued_at)
+    if dt is None:
+        return False
+    ref = now or datetime.now(timezone.utc)
+    return (ref - dt).total_seconds() > LOCAL_TTL_SEC
+
+
+def _payload_too_large(payload: dict) -> bool:
+    try:
+        raw = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    except Exception:
+        return True
+    return len(raw) > MAX_PAYLOAD_BYTES
+
+
 def enqueue(
     token: str,
     event: dict,
@@ -74,6 +123,10 @@ def enqueue(
     if not token or not isinstance(event, dict):
         return None
     safe = redact_sensitive(event)
+    if _payload_too_large(safe):
+        with _lock:
+            _stats["too_large_rejected"] += 1
+        return None
     event_id = str(safe.get("event_id") or _record_id(safe))
     envelope = {
         "version": 1,
@@ -105,7 +158,11 @@ def enqueue(
             if any(f'"event_id":"{event_id}"' in line for line in existing):
                 return event_id
             existing.append(json.dumps(record, separators=(",", ":")))
-            existing = existing[-max(1, int(max_records)):]
+            cap = max(1, int(max_records))
+            if len(existing) > cap:
+                dropped = len(existing) - cap
+                _stats["oldest_dropped"] += dropped
+                existing = existing[-cap:]
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(existing) + "\n")
@@ -120,6 +177,7 @@ def load(
     *,
     path: str = QUEUE_FILE,
     limit: int = 50,
+    prune_expired: bool = True,
 ) -> list[dict]:
     if not token or not os.path.isfile(path):
         return []
@@ -130,7 +188,9 @@ def load(
         except Exception:
             return []
     result = []
-    for line in lines[:max(1, int(limit))]:
+    expired_ids: list[str] = []
+    now = datetime.now(timezone.utc)
+    for line in lines:
         try:
             record = json.loads(line)
             encrypted = base64.b64decode(record["blob"], validate=True)
@@ -140,10 +200,19 @@ def load(
             envelope = json.loads(_open(encrypted).decode("utf-8"))
             if envelope.get("event_id") != record.get("event_id"):
                 continue
+            if prune_expired and _is_expired(envelope.get("queued_at"), now=now):
+                eid = str(envelope.get("event_id") or "")
+                if eid:
+                    expired_ids.append(eid)
+                continue
             result.append(envelope)
         except Exception:
             continue
-    return result
+    if expired_ids:
+        with _lock:
+            _stats["expired_dropped"] += len(expired_ids)
+        acknowledge(expired_ids, path=path)
+    return result[: max(1, int(limit))]
 
 
 def acknowledge(
@@ -179,28 +248,47 @@ def acknowledge(
             return 0
 
 
+def _rejected_drop_ids(rejected) -> list[str]:
+    """Drop schema/too_large/expired; leave transient for retry."""
+    out: list[str] = []
+    if not isinstance(rejected, list):
+        return out
+    for item in rejected:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("reason") or "").strip().lower()
+        event_id = str(item.get("event_id") or "").strip()
+        if event_id and reason in _DROP_REJECT_REASONS:
+            out.append(event_id)
+    return out
+
+
 def drain_to_cloud(
     api_client,
     token: str,
     *,
     path: str = QUEUE_FILE,
-    limit: int = 50,
+    limit: int = MAX_BATCH,
 ) -> dict:
-    """POST /api/alerts/urgent/batch and acknowledge acked+duplicate ids.
+    """POST /api/alerts/urgent/batch and ACK per contract 1.4.7.
 
-    Observe/default-off only. Never raises into callers; returns a status dict.
+    Delete local rows for ``acked``, ``duplicate``, and non-retry ``rejected``
+    (schema / too_large / expired). Keep ``transient`` for a later drain.
+    Observe/default-off only. Never raises into callers.
     """
     out = {
         "attempted": 0,
         "acked": 0,
         "duplicate": 0,
         "rejected": 0,
+        "dropped_rejected": 0,
         "error": "",
     }
     if not offline_queue_enabled() or not api_client or not token:
         out["error"] = "disabled_or_unconfigured"
         return out
-    events = load(token, path=path, limit=limit)
+    cap = min(MAX_BATCH, max(1, int(limit)))
+    events = load(token, path=path, limit=cap)
     if not events:
         return out
     out["attempted"] = len(events)
@@ -225,10 +313,12 @@ def drain_to_cloud(
         acked = [str(x) for x in (resp.get("acked") or []) if x]
         duplicate = [str(x) for x in (resp.get("duplicate") or []) if x]
         rejected = resp.get("rejected") or []
+        drop_rejected = _rejected_drop_ids(rejected)
         out["acked"] = len(acked)
         out["duplicate"] = len(duplicate)
         out["rejected"] = len(rejected) if isinstance(rejected, list) else 0
-        done = acked + duplicate
+        out["dropped_rejected"] = len(drop_rejected)
+        done = acked + duplicate + drop_rejected
         if done:
             acknowledge(done, path=path)
         return out

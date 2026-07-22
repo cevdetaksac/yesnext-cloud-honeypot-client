@@ -110,11 +110,38 @@ def start_deadman_beacon(interval_sec: float = 60.0) -> None:
     def _loop():
         while not _deadman_stop.is_set():
             try:
-                _write_json(HEARTBEAT_FILE, {
+                payload = {
                     "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "pid": os.getpid(),
                     "graceful_capable": True,
-                })
+                }
+                # RES-103 observe: optional signed proof for Guardian soft-check.
+                # Never gates motor liveness; flag default off.
+                try:
+                    from client_resilience_p1 import (
+                        build_heartbeat_observe,
+                        heartbeat_observe_enabled,
+                    )
+                    if heartbeat_observe_enabled():
+                        hostname = (
+                            os.environ.get("COMPUTERNAME")
+                            or os.environ.get("HOSTNAME")
+                            or ""
+                        )
+                        proof = build_heartbeat_observe(
+                            _read_token() or "",
+                            hostname=hostname,
+                            status="online",
+                            running=True,
+                        )
+                        if proof:
+                            payload["hostname"] = hostname
+                            payload["status"] = "online"
+                            payload["running"] = True
+                            payload["heartbeat_proof"] = proof
+                except Exception:
+                    pass
+                _write_json(HEARTBEAT_FILE, payload)
             except Exception:
                 pass
             _deadman_stop.wait(interval_sec)

@@ -67,3 +67,8 @@ class PasswordBurstCorrelator:
             "peak_actor_events": peak,
             "burst_detected": burst,
         }
+
+    @classmethod
+    def idle_status(cls, window_sec: int = 300, threshold: int = 5) -> dict:
+        """Contract-shaped empty aggregate when correlator is unavailable."""
+        return cls(window_sec=window_sec, threshold=threshold).status()

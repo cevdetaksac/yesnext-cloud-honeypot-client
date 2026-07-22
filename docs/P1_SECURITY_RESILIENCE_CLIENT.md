@@ -1,7 +1,7 @@
 # P1 Security & Resilience — Client implementation record
 
 > Date: 2026-07-22  
-> Contract baseline: 1.4.5  
+> Contract baseline: 1.4.6  
 > Production floor: client 4.9.0 (unchanged)  
 > Policy: observe-only/default-off until cloud enables dashboard consume + flags.
 
@@ -23,15 +23,18 @@
 
 ## Contract gates still required
 
-The following are deliberately **not** production behavior:
+Schemas for the observe blocks below are **promoted in contract 1.4.5**
+(additive; missing = legacy). These remain deliberately **not** production
+enforcement:
 
-1. heartbeat proof wire/verification, replay window and cloud coverage metrics;
-2. access-integrity/device-identity health schemas;
-3. ETW detection batch ingest and 4723/4724 burst alert payload;
-4. offline urgent-event ingest + ACK/idempotency schema;
-5. operator public-key endpoint, algorithm, canonical serialization and
-   asymmetric signature verification;
-6. TPM enrollment/attestation/rotation/re-enrollment.
+1. heartbeat proof cloud verify / Guardian reject-stale / coverage metrics;
+2. ACL auto-repair and SACL mutation;
+3. ETW detection batch ingest beyond health aggregates + 4723/4724 burst
+   **alert** payload (counts already on health);
+4. offline urgent ingest + ACK (see `cloud/offline-urgent-queue-design.md`);
+5. operator public-key endpoint + asymmetric verify
+   (`cloud/operator-keyset-design.md`);
+6. TPM enrollment/attestation/rotation.
 
 ## ZT-605b transport threat matrix
 

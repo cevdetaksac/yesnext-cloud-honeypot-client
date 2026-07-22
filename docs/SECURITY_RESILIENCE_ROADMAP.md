@@ -1,11 +1,12 @@
 # Security & Resilience Roadmap
 
 > Tarih: 2026-07-22  
-> Başlangıç sürümü: client **4.9.0**, contract **1.4.0**  
+> Başlangıç sürümü: client **4.9.0**, contract **1.4.6** (P1 observe schemas
+> promoted additive; floor unchanged)  
 > Kapsam: agent hayatta kalma, deception, anti-ransomware, ağ kurtarma ve zero-trust  
-> Durum: planlama belgesi; API/wire değişiklikleri uygulanmadan önce
-> `honeypot-contract` güncellenir.
-> Ortak Client/Cloud teslim planı: contract **1.4.1**
+> Durum: planlama + landed observe primitives; enforce/pilot kapıları
+> `honeypot-contract` üzerinden ilerler.
+> Ortak Client/Cloud teslim planı:
 > [`SECURITY_RESILIENCE_VNEXT.md`](../../honeypot-contract/SECURITY_RESILIENCE_VNEXT.md).
 
 Bu belge dış önerileri mevcut mimari ve daha önce yaşanan üretim
@@ -390,7 +391,8 @@ Kabul:
   removed + deploy-time Desktop path reject; matrix expansion pending);
   `canary_coverage` + `deception_health[]` now on `health/report` (contract 1.4.5)
 - [~] RES-103 signed-heartbeat candidate + local `verify_heartbeat_proof`
-  (`client_resilience_p1`; default off; Guardian reject-stale not wired)
+  + Guardian observe-only deadman soft-check (`client_guardian_service`;
+  default off; reject-stale **not** wired)
 - [~] RES-105 SACL/access audit (bounded DACL fingerprint landed; SACL privilege
   inventory and canonical health schema pending)
 - [~] RES-106 ACL drift monitor (local HMAC baseline, observe-only, no mutation)

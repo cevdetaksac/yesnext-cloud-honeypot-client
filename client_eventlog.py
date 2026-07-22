@@ -280,12 +280,15 @@ class EventLogWatcher:
             "watched_ids": sorted(
                 {eid for ids in WATCHED_CHANNELS.values() for eid in ids}
             ),
-            "password_burst": (
-                getattr(self, "identity_correlator").status()
-                if getattr(self, "identity_correlator", None) is not None
-                else None
-            ),
+            "password_burst": self._password_burst_health(),
         }
+
+    def _password_burst_health(self) -> dict:
+        correlator = getattr(self, "identity_correlator", None)
+        if correlator is not None and hasattr(correlator, "status"):
+            return correlator.status()
+        from client_identity_correlation import PasswordBurstCorrelator
+        return PasswordBurstCorrelator.idle_status()
 
     def update_whitelist(self, ips: Set[str]):
         """Update whitelisted IPs (thread-safe)."""

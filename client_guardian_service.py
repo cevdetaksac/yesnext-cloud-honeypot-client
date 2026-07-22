@@ -159,6 +159,57 @@ def is_motor_healthy(timeout: float = 0.9) -> bool:
         return False
 
 
+def observe_motor_heartbeat_proof() -> dict:
+    """RES-103 soft-check of motor deadman proof. Never gates resurrect.
+
+    Returns a small observe dict for tests/logs. Missing flag or file is not
+    an error. Invalid/stale proofs are logged only.
+    """
+    result = {
+        "checked": False,
+        "ok": None,
+        "reason": "disabled",
+        "enforce": False,
+    }
+    try:
+        from client_utils import get_from_config
+        if not bool(get_from_config("security.signed_heartbeat_observe", False)):
+            return result
+    except Exception:
+        return result
+    try:
+        from client_tamper import HEARTBEAT_FILE, _read_token
+        import json
+        if not os.path.isfile(HEARTBEAT_FILE):
+            result["reason"] = "no_file"
+            return result
+        with open(HEARTBEAT_FILE, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+        proof = doc.get("heartbeat_proof")
+        if not isinstance(proof, dict):
+            result["reason"] = "no_proof"
+            return result
+        from client_resilience_p1 import verify_heartbeat_proof
+        check = verify_heartbeat_proof(
+            _read_token() or "",
+            proof,
+            hostname=str(doc.get("hostname") or ""),
+            status=str(doc.get("status") or "online"),
+            running=bool(doc.get("running", True)),
+        )
+        result["checked"] = True
+        result["ok"] = bool(check.get("ok"))
+        result["reason"] = str(check.get("reason") or "")
+        if result["ok"]:
+            log("[GUARDIAN] heartbeat_proof observe ok")
+        else:
+            log(f"[GUARDIAN] heartbeat_proof observe fail reason={result['reason']}")
+    except Exception as exc:
+        result["reason"] = f"error:{exc}"
+        log(f"[GUARDIAN] heartbeat_proof observe error: {exc}")
+    return result
+
+
 def resurrect_motor() -> bool:
     if _legitimate_stand_down():
         return False
@@ -207,6 +258,11 @@ def guardian_watch_loop(stop_event=None, interval_sec: float = 10.0) -> None:
                 else:
                     time.sleep(sleep_for)
                 continue
+            # Observe-only RES-103 soft-check; never skips resurrect.
+            try:
+                observe_motor_heartbeat_proof()
+            except Exception:
+                pass
             if not is_motor_healthy(timeout=0.9):
                 try:
                     from client_resilience import (

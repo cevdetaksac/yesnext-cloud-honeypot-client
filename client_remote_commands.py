@@ -139,7 +139,8 @@ PROTECTED_SERVICES: Set[str] = {
     "wuauserv", "windefend", "eventlog", "mpssvc",
 }
 
-# Commands that require dashboard-side confirmation before reaching here
+# Commands that require dashboard-side confirmation before reaching here.
+# Mutating network_restore needs confirm; dry_run-only must not (contract 1.4.5).
 REQUIRES_CONFIRMATION: Set[str] = {
     "emergency_lockdown", "reset_password", "disable_account",
     "disable_all_users", "contain_user",
@@ -147,11 +148,17 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "suspend_process",
     # Disaster recovery (destructive / reboot) — server confirm + HMAC
     "create_user", "remote_logon", "set_autologon", "reboot",
-    # Network Guard — restore mutates adapters/DNS/firewall/drives
+    # Network Guard — mutating restore only (see network_restore_requires_confirm)
     "network_restore",
     # GUI PIN — overwrite/reset local anti-tamper PIN needs operator confirm
     "set_gui_pin", "clear_gui_pin",
 }
+
+
+def network_restore_requires_confirm(params: Optional[dict] = None) -> bool:
+    """True for mutating restore; False for dry-run plan-only (contract 1.4.5)."""
+    params = params or {}
+    return not bool(params.get("dry_run", False))
 
 # Hard-skip only (AGENT_DISABLE_ALL_USERS_PROMPT) — Administrator is NOT here
 _SKIP_DISABLE_ALWAYS: Set[str] = {

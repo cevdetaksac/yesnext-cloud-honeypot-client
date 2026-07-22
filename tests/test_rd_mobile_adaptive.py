@@ -215,7 +215,8 @@ class TestAdaptiveController(unittest.TestCase):
         self.assertIsNotNone(changed)
         self.assertLess(changed["fps"], 8)
         self.assertLess(changed["quality"], 60)
-        self.assertLess(changed["max_width"], 1600)
+        # Resolution must stay locked — dashboard UX.
+        self.assertEqual(changed["max_width"], 1600)
         self.assertEqual(controller.metrics["degrades"], 1)
 
     def test_no_oscillation_inside_cooldown(self):
@@ -238,7 +239,12 @@ class TestAdaptiveController(unittest.TestCase):
         self.assertIsNotNone(recovered)
         self.assertGreater(recovered["quality"], degraded["quality"])
         self.assertLessEqual(recovered["quality"], 60)
+        self.assertEqual(recovered["max_width"], 1600)
         self.assertEqual(controller.metrics["recovers"], 1)
+
+    def test_width_floor_is_800(self):
+        controller = AdaptiveStreamController(8, 60, 400)
+        self.assertEqual(controller.effective["max_width"], 800)
 
     def test_telemetry_records_capture_send_and_failures(self):
         _clock, controller = self.make()
@@ -271,6 +277,23 @@ class TestAdaptiveController(unittest.TestCase):
         })
         self.assertEqual(rd.get_status()["effective"]["fps"], 4.0)
         self.assertEqual(helper.configs[-1]["max_width"], 900)
+
+
+class TestEncodeSizeLock(unittest.TestCase):
+    def test_locks_first_frame_size_for_session(self):
+        rd = RemoteDesktopStreamer()
+        first = rd._resolve_encode_size(1920, 1080, 1280)
+        second = rd._resolve_encode_size(1920, 1080, 900)  # adaptive shrink ignored
+        self.assertEqual(first, (1280, 720))
+        self.assertEqual(second, (1280, 720))
+
+    def test_min_floor_800x600_when_source_allows(self):
+        rd = RemoteDesktopStreamer()
+        w, h = rd._compute_encode_size(1920, 1080, 800)
+        self.assertGreaterEqual(w, 800)
+        self.assertGreaterEqual(h, 450)  # 16:9 at 800w
+        w2, h2 = rd._compute_encode_size(1600, 1200, 800)
+        self.assertEqual((w2, h2), (800, 600))
 
 
 if __name__ == "__main__":

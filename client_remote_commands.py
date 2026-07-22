@@ -80,7 +80,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",  # aliases
     "unlock_ransomware_quarantine", "list_ransomware_quarantine",
-    "list_sessions", "list_processes", "list_local_users", "snapshot",
+    "list_sessions", "list_processes", "list_local_users", "list_services", "snapshot",
     "collect_diagnostics",
     "remote_stream_start", "remote_stream_stop", "remote_input",
     "remote_send_sas",
@@ -99,6 +99,7 @@ _STREAM_COMMANDS = frozenset({
     "remote_stream_start", "remote_stream_stop", "remote_input",
     "remote_send_sas",
     "remote_session_prepare", "list_local_users", "list_sessions",
+    "list_processes", "list_services",
 })
 
 # Incident-response: always fast poll + no rate limit (breach containment)
@@ -107,13 +108,15 @@ _IR_URGENT_COMMANDS = frozenset({
     "logoff_user", "contain_user",
     "block_ip", "unblock_ip",
     "disable_account", "disable_all_users", "reset_password",
-    "stop_service", "disable_service",
+    "stop_service", "start_service", "restart_service", "disable_service",
+    "list_services",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",
     "unlock_ransomware_quarantine",
     "clear_firewall",
     "self_update", "check_update",  # dashboard update — same urgency as IR
     "remote_session_prepare", "list_local_users",
+    "list_processes", "list_sessions",
     # Disaster recovery — must reach a compromised host instantly
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
     # Network Guard — offline bomb response must reach host instantly
@@ -137,6 +140,7 @@ PROTECTED_PROCESSES: Set[str] = {
 
 PROTECTED_SERVICES: Set[str] = {
     "wuauserv", "windefend", "eventlog", "mpssvc",
+    "cloudhoneypotguardian",
 }
 
 # Commands that require dashboard-side confirmation before reaching here.
@@ -634,12 +638,19 @@ class RemoteCommandExecutor:
             out["ok"] = True
             if cmd_type != "remote_input":
                 log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')} ({source})")
-            if cmd_type in ("kill_process", "logoff_user", "contain_user",
-                            "block_process", "reset_password", "disable_account",
-                            "disable_all_users",
-                            "stop_service", "disable_service",
-                            "emergency_lockdown"):
+            if cmd_type in (
+                "kill_process", "block_process", "suspend_process", "resume_process",
+                "logoff_user", "contain_user",
+                "reset_password", "disable_account", "enable_account",
+                "disable_all_users", "create_user",
+                "stop_service", "start_service", "restart_service", "disable_service",
+                "emergency_lockdown",
+            ):
                 out["health_refresh"] = True
+                try:
+                    self._refresh_inventory_after_mutate(cmd_type)
+                except Exception:
+                    pass
         else:
             self._stats["commands_failed"] += 1
             log(f"[REMOTE-CMD] ❌ {cmd['command_type']} — {result.get('error', 'Failed')} ({source})")
@@ -991,6 +1002,27 @@ class RemoteCommandExecutor:
                 return {"success": False, "error": str(e)}
 
         return {"success": False, "error": f"No handler for: {cmd_type}"}
+
+    def _refresh_inventory_after_mutate(self, cmd_type: str) -> None:
+        """Best-effort health refresh so dashboard poll sees fresh sessions/processes."""
+        if cmd_type in (
+            "stop_service", "start_service", "restart_service", "disable_service",
+        ):
+            # Services are cached from list_services results, not health.
+            return
+        hm = self.health_monitor
+        if hm is None or not hasattr(hm, "force_report"):
+            return
+
+        def _run():
+            try:
+                hm.force_report(refresh=True)
+            except Exception as exc:
+                log(f"[REMOTE-CMD] post-mutate health refresh: {exc}")
+
+        threading.Thread(
+            target=_run, name="ServerMgmt-InventoryRefresh", daemon=True
+        ).start()
 
     def get_remote_desktop_status(self) -> dict:
         """UI / diagnostics — lazy-init streamer status without starting stream."""
@@ -2283,94 +2315,188 @@ class RemoteCommandExecutor:
             try:
                 reported = bool(self.health_monitor.force_report(refresh=True))
                 procs = list(
-                    (self.health_monitor.get_stats() or {}).get("top_processes") or []
+                    (self.health_monitor.get_stats() or {}).get("top_processes")
+                    or []
                 )
             except Exception as e:
-                return {"success": False, "error": str(e)}
-        else:
+                log(f"[REMOTE-CMD] list_processes health path: {e}")
+        if not procs:
             try:
                 import psutil
-                for p in psutil.process_iter(
-                    ["pid", "name", "cpu_percent", "memory_info", "username", "exe"]
+                mem_total = psutil.virtual_memory().total or 1
+                if self.health_monitor and hasattr(
+                    self.health_monitor, "_collect_rich_processes"
                 ):
-                    try:
-                        info = p.info
-                        mem = info.get("memory_info")
-                        procs.append({
-                            "pid": info.get("pid", 0),
-                            "name": info.get("name", ""),
-                            "cpu_percent": info.get("cpu_percent", 0),
-                            "memory_mb": round((mem.rss if mem else 0) / 1024 / 1024, 1),
-                            "username": info.get("username", ""),
-                            "path": info.get("exe") or "",
-                        })
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-                procs.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
-                procs = procs[:150]
+                    procs = self.health_monitor._collect_rich_processes(
+                        psutil, mem_total
+                    )
+                else:
+                    for p in psutil.process_iter(
+                        ["pid", "name", "cpu_percent", "memory_info", "username", "exe"]
+                    ):
+                        try:
+                            info = p.info
+                            mem = info.get("memory_info")
+                            procs.append({
+                                "pid": info.get("pid", 0),
+                                "name": info.get("name", ""),
+                                "cpu_percent": info.get("cpu_percent", 0),
+                                "cpu": info.get("cpu_percent", 0),
+                                "memory_mb": round(
+                                    (mem.rss if mem else 0) / 1024 / 1024, 1
+                                ),
+                                "username": info.get("username", ""),
+                                "path": info.get("exe") or "",
+                            })
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    procs.sort(
+                        key=lambda p: p.get("cpu_percent", 0), reverse=True
+                    )
+                    procs = procs[:150]
             except Exception as e:
                 return {"success": False, "error": str(e)}
         return {
             "success": True,
-            "message": f"{len(procs)} process(es); health_report={'ok' if reported else 'skipped'}",
+            "message": (
+                f"{len(procs)} process(es); "
+                f"health_report={'ok' if reported else 'skipped'}"
+            ),
             "data": {"processes": procs, "top_processes": procs},
         }
 
-    def _cmd_stop_service(self, params: dict) -> dict:
-        svc = params.get("service_name", "")
+    def _cmd_list_services(self, params: dict) -> dict:
+        """Contract 1.4.8 — Server Management → Services inventory."""
+        from client_server_management import list_windows_services
+
+        include_drivers = bool(params.get("include_drivers", False))
+        include_stopped = bool(params.get("include_stopped", True))
+        try:
+            services = list_windows_services(
+                include_drivers=include_drivers,
+                include_stopped=include_stopped,
+            )
+            return {
+                "success": True,
+                "message": f"{len(services)} service(s)",
+                "data": {"services": services},
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": str(e),
+            }
+
+    @staticmethod
+    def _service_name_from_params(params: dict) -> str:
+        from client_server_management import normalize_service_name
+        return normalize_service_name(params)
+
+    def _refuse_protected_service(self, svc: str) -> Optional[dict]:
         if not svc:
-            return {"success": False, "error": "No service_name specified"}
+            return {
+                "success": False,
+                "error": "NOT_FOUND",
+                "message": "No service name specified (name or service_name)",
+            }
+        if svc.lower() in {s.lower() for s in PROTECTED_SERVICES}:
+            return {
+                "success": False,
+                "error": "PROTECTED_SERVICE",
+                "message": f"Service {svc} is protected and cannot be mutated",
+            }
+        return None
+
+    def _cmd_stop_service(self, params: dict) -> dict:
+        svc = self._service_name_from_params(params)
+        blocked = self._refuse_protected_service(svc)
+        if blocked:
+            return blocked
         result = subprocess.run(
             ["sc", "stop", svc],
             capture_output=True, text=True, timeout=15,
             creationflags=CREATE_NO_WINDOW,
         )
-        return {
-            "success": result.returncode == 0,
-            "message": f"Service {svc} stop requested",
+        ok = result.returncode == 0
+        err = (result.stderr or result.stdout or "").strip()
+        out = {
+            "success": ok,
+            "message": f"Service {svc} stop requested" if ok else (
+                err[:200] or f"Failed to stop {svc}"
+            ),
+            "data": {"name": svc, "service_name": svc},
         }
+        if not ok:
+            out["error"] = "ACCESS_DENIED" if "access" in err.lower() else "FAILED"
+        return out
 
     def _cmd_start_service(self, params: dict) -> dict:
-        svc = params.get("service_name", "")
-        if not svc:
-            return {"success": False, "error": "No service_name specified"}
+        svc = self._service_name_from_params(params)
+        blocked = self._refuse_protected_service(svc)
+        if blocked:
+            return blocked
         result = subprocess.run(
             ["sc", "start", svc],
             capture_output=True, text=True, timeout=30,
             creationflags=CREATE_NO_WINDOW,
         )
-        return {
-            "success": result.returncode == 0,
-            "message": f"Service {svc} start requested",
+        ok = result.returncode == 0
+        err = (result.stderr or result.stdout or "").strip()
+        # sc start returns 1056 if already running — treat as success
+        if not ok and ("1056" in err or "already been started" in err.lower()):
+            ok = True
+        out = {
+            "success": ok,
+            "message": f"Service {svc} start requested" if ok else (
+                err[:200] or f"Failed to start {svc}"
+            ),
+            "data": {"name": svc, "service_name": svc},
         }
+        if not ok:
+            out["error"] = "ACCESS_DENIED" if "access" in err.lower() else "FAILED"
+        return out
 
     def _cmd_restart_service(self, params: dict) -> dict:
-        svc = params.get("service_name", "")
-        if not svc:
-            return {"success": False, "error": "No service_name specified"}
-        stop = self._cmd_stop_service(params)
+        svc = self._service_name_from_params(params)
+        blocked = self._refuse_protected_service(svc)
+        if blocked:
+            return blocked
+        stop = self._cmd_stop_service({"name": svc, "service_name": svc})
         time.sleep(1.5)
-        start = self._cmd_start_service(params)
+        start = self._cmd_start_service({"name": svc, "service_name": svc})
         ok = bool(start.get("success"))
         return {
             "success": ok,
-            "message": f"Service {svc} restarted",
-            "data": {"stop": stop, "start": start},
+            "message": f"Service {svc} restarted" if ok else (
+                start.get("message") or f"Failed to restart {svc}"
+            ),
+            "error": None if ok else (start.get("error") or "FAILED"),
+            "data": {"name": svc, "service_name": svc, "stop": stop, "start": start},
         }
 
     def _cmd_disable_service(self, params: dict) -> dict:
-        svc = params.get("service_name", "")
-        if not svc:
-            return {"success": False, "error": "No service_name specified"}
+        svc = self._service_name_from_params(params)
+        blocked = self._refuse_protected_service(svc)
+        if blocked:
+            return blocked
         result = subprocess.run(
-            ["sc", "config", svc, "start=disabled"],
+            ["sc", "config", svc, "start=", "disabled"],
             capture_output=True, text=True, timeout=15,
             creationflags=CREATE_NO_WINDOW,
         )
-        return {
-            "success": result.returncode == 0,
-            "message": f"Service {svc} disabled",
+        ok = result.returncode == 0
+        err = (result.stderr or result.stdout or "").strip()
+        out = {
+            "success": ok,
+            "message": f"Service {svc} disabled" if ok else (
+                err[:200] or f"Failed to disable {svc}"
+            ),
+            "data": {"name": svc, "service_name": svc},
         }
+        if not ok:
+            out["error"] = "ACCESS_DENIED" if "access" in err.lower() else "FAILED"
+        return out
 
     def _cmd_emergency_lockdown(self, params: dict) -> dict:
         mgmt_ip = params.get("management_ip", "")

@@ -138,6 +138,7 @@ def list_local_users(*, include_disabled: bool = True) -> List[Dict[str, Any]]:
                     "enabled": enabled,
                     "local": "ActiveDirectory" not in src,
                     "is_admin": False,
+                    "groups": [],
                     "last_logon": last_iso or None,
                     "has_session": False,
                     "session_id": None,
@@ -164,6 +165,8 @@ def list_local_users(*, include_disabled: bool = True) -> List[Dict[str, Any]]:
         for u in users:
             if u["username"].lower() in admin_names:
                 u["is_admin"] = True
+                if "Administrators" not in u["groups"]:
+                    u["groups"].append("Administrators")
     except Exception:
         pass
 
@@ -175,6 +178,8 @@ def list_local_users(*, include_disabled: bool = True) -> List[Dict[str, Any]]:
         if un and un not in by_user:
             by_user[un] = s
     for u in users:
+        if "groups" not in u:
+            u["groups"] = []
         s = by_user.get(u["username"].lower())
         if s:
             u["has_session"] = True

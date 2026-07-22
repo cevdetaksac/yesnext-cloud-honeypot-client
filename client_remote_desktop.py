@@ -34,6 +34,8 @@ from client_rd_adaptive import AdaptiveStreamController
 DEFAULT_FPS = 6.0
 DEFAULT_QUALITY = 35
 DEFAULT_MAX_WIDTH = 1280
+MIN_ENCODE_WIDTH = 800
+MIN_ENCODE_HEIGHT = 600
 TARGET_FRAME_BYTES = 320 * 1024       # aim ≤ ~320 KB
 MAX_FRAME_BYTES = 2 * 1024 * 1024
 IDLE_STOP_SECONDS = 300
@@ -152,6 +154,9 @@ class RemoteDesktopStreamer:
         self._screen_y = 0
         self._capture_w = 0
         self._capture_h = 0
+        # Session-locked encode size — adaptive must not thrash dashboard WxH.
+        self._locked_encode_w = 0
+        self._locked_encode_h = 0
         self._last_capture_mono = 0.0
         self._last_send_mono = 0.0
         self._last_helper_capture_ms = 0.0
@@ -243,7 +248,7 @@ class RemoteDesktopStreamer:
             self._requested_fps = max(1.0, min(float(fps or DEFAULT_FPS), 30.0))
             self._requested_quality = max(20, min(int(quality or DEFAULT_QUALITY), 85))
             self._requested_max_width = max(
-                640, min(int(max_width or DEFAULT_MAX_WIDTH), 1920)
+                MIN_ENCODE_WIDTH, min(int(max_width or DEFAULT_MAX_WIDTH), 1920)
             )
             if self._running:
                 self._adaptive.update_requested(
@@ -257,6 +262,8 @@ class RemoteDesktopStreamer:
                     self._requested_quality,
                     self._requested_max_width,
                 )
+                self._locked_encode_w = 0
+                self._locked_encode_h = 0
             self._apply_effective_settings(self._adaptive.effective, notify_helper=False)
             try:
                 self._monitor_index = max(0, int(monitor or 0))
@@ -542,6 +549,8 @@ class RemoteDesktopStreamer:
             pass
         self._dxcam = None
         self._media_session_id = ""
+        self._locked_encode_w = 0
+        self._locked_encode_h = 0
         self._stop_persistent_helper()
         self._close_ws()
         self._transport = "idle"
@@ -1201,6 +1210,54 @@ class RemoteDesktopStreamer:
         flush()
         return out
 
+    def _compute_encode_size(
+        self, src_w: int, src_h: int, max_width: int
+    ) -> Tuple[int, int]:
+        """Downscale for encode: respect max_width, keep ≥800×600 when source allows."""
+        src_w = max(1, int(src_w))
+        src_h = max(1, int(src_h))
+        max_width = max(MIN_ENCODE_WIDTH, min(int(max_width or DEFAULT_MAX_WIDTH), 1920))
+
+        scale = 1.0
+        if src_w > max_width:
+            scale = min(scale, max_width / float(src_w))
+        # Prefer not to go below the UX floor when the desktop is large enough.
+        if src_w >= MIN_ENCODE_WIDTH and src_h >= MIN_ENCODE_HEIGHT:
+            tw = max(1, int(round(src_w * scale)))
+            th = max(1, int(round(src_h * scale)))
+            if tw < MIN_ENCODE_WIDTH or th < MIN_ENCODE_HEIGHT:
+                # Raise scale to meet the floor without exceeding max_width/native.
+                need = max(
+                    MIN_ENCODE_WIDTH / float(src_w),
+                    MIN_ENCODE_HEIGHT / float(src_h),
+                )
+                scale = min(1.0, max_width / float(src_w), max(scale, need))
+        tw = max(1, int(round(src_w * scale)))
+        th = max(1, int(round(src_h * scale)))
+        # Final clamp: never exceed max_width; never upscale past native.
+        if tw > max_width:
+            ratio = max_width / float(tw)
+            tw = max_width
+            th = max(1, int(round(th * ratio)))
+        return tw, th
+
+    def _resolve_encode_size(
+        self, src_w: int, src_h: int, max_width: int
+    ) -> Optional[Tuple[int, int]]:
+        """Lock encode WxH for the stream session so dashboard size stays stable."""
+        if src_w <= 0 or src_h <= 0:
+            return None
+        if self._locked_encode_w > 0 and self._locked_encode_h > 0:
+            return self._locked_encode_w, self._locked_encode_h
+        tw, th = self._compute_encode_size(src_w, src_h, max_width)
+        self._locked_encode_w = tw
+        self._locked_encode_h = th
+        log(
+            f"[REMOTE-DESKTOP] encode size locked {tw}x{th} "
+            f"(src={src_w}x{src_h} max_w={max_width})"
+        )
+        return tw, th
+
     def _grab_jpeg(self):
         """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
         try:
@@ -1309,11 +1366,16 @@ class RemoteDesktopStreamer:
         _fps, effective_quality, effective_max_width = (
             self._effective_capture_settings()
         )
-        if img.width > effective_max_width:
-            ratio = effective_max_width / float(img.width)
-            new_size = (effective_max_width, max(1, int(img.height * ratio)))
-            resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else Image.BILINEAR
-            img = img.resize(new_size, resample)
+        target = self._resolve_encode_size(
+            img.width, img.height, effective_max_width
+        )
+        if target and (img.width, img.height) != target:
+            resample = (
+                Image.Resampling.BILINEAR
+                if hasattr(Image, "Resampling")
+                else Image.BILINEAR
+            )
+            img = img.resize(target, resample)
 
         self._capture_w, self._capture_h = img.size
         rgb = img.convert("RGB")

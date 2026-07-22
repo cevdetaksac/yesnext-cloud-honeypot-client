@@ -1,3 +1,7 @@
+# v4.9.4
+- **Contract 1.4.8 Server Management:** `list_services` + `name`/`service_name` on start/stop/restart; protected services refuse; `list_local_users.groups`; rich `list_processes`/`list_sessions` + post-mutate health refresh. Hesap silme yok → disable.
+- **Remote Desktop:** oturum boyunca encode boyutu kilitli; adaptive yalnız fps/quality; minimum **800×600** tabanı — dashboard’da çözünürlük zıplaması giderildi.
+
 # v4.9.3
 - **OOB-501 acceptance visibility:** durable `oldest_dropped` / expire / too-large counters; `health/report` → `offline_urgent_queue{}`; pilot harness (`tests/test_offline_queue_pilot.py`). Flag hâlâ default off.
 - **GUI:** istatistik kartlarında ikon+değer aynı satır; IP Listeleri tek scrollbar (sayfa yüksekliğine oturan tablo).

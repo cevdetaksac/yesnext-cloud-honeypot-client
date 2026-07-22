@@ -11,13 +11,14 @@ from typing import Callable, Optional
 class AdaptiveStreamController:
     """Hysteretic controller bounded by caller-requested ceilings.
 
-    Pressure degrades at most once per cooldown. Recovery requires a quiet
-    stable window and advances one small step, preventing rapid oscillation.
+    Pressure degrades fps/quality at most once per cooldown. Recovery requires
+    a quiet stable window. **Encode width stays locked** for the session —
+    oscillating resolution makes the dashboard hard to use.
     """
 
     MIN_FPS = 1.0
     MIN_QUALITY = 20
-    MIN_WIDTH = 640
+    MIN_WIDTH = 800
 
     def __init__(
         self,
@@ -58,7 +59,10 @@ class AdaptiveStreamController:
         return {
             "fps": max(1.0, min(float(fps), 30.0)),
             "quality": max(20, min(int(quality), 85)),
-            "max_width": max(640, min(int(max_width), 1920)),
+            "max_width": max(
+                AdaptiveStreamController.MIN_WIDTH,
+                min(int(max_width), 1920),
+            ),
         }
 
     def reset(self, fps, quality, max_width, *, now: Optional[float] = None) -> None:
@@ -71,8 +75,13 @@ class AdaptiveStreamController:
 
     def update_requested(self, fps, quality, max_width) -> None:
         self.requested = self._clamp_requested(fps, quality, max_width)
-        for key, ceiling in self.requested.items():
-            self.effective[key] = min(self.effective[key], ceiling)
+        # Keep resolution at the new ceiling when dashboard raises it; never
+        # silently shrink below the session floor via adaptive alone.
+        self.effective["max_width"] = self.requested["max_width"]
+        self.effective["fps"] = min(self.effective["fps"], self.requested["fps"])
+        self.effective["quality"] = min(
+            self.effective["quality"], self.requested["quality"]
+        )
 
     @staticmethod
     def _ewma(old: float, value: float, alpha: float = 0.2) -> float:
@@ -158,9 +167,7 @@ class AdaptiveStreamController:
         self.effective["quality"] = max(
             self.MIN_QUALITY, self.effective["quality"] - 5
         )
-        self.effective["max_width"] = max(
-            self.MIN_WIDTH, int(self.effective["max_width"] * 0.85)
-        )
+        # Intentionally do not touch max_width — stable frame size for dashboard.
         return self.effective != old
 
     def _recover(self) -> bool:
@@ -171,9 +178,8 @@ class AdaptiveStreamController:
         self.effective["quality"] = min(
             self.requested["quality"], self.effective["quality"] + 2
         )
-        self.effective["max_width"] = min(
-            self.requested["max_width"], self.effective["max_width"] + 128
-        )
+        # Resolution remains locked to requested max_width for the session.
+        self.effective["max_width"] = self.requested["max_width"]
         return self.effective != old
 
     def snapshot(self) -> dict:

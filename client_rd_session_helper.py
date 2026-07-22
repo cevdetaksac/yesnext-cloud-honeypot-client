@@ -339,7 +339,7 @@ def run_session_helper(host: str, port: int, secret_hex: str, session_id: int) -
     # 30-60 fps independently through update_config.
     rd._fps = max(1.0, min(float(config.get("fps", 6.0)), 60.0))
     rd._quality = max(20, min(int(config.get("quality", 35)), 85))
-    rd._max_width = max(640, min(int(config.get("max_width", 1280)), 1920))
+    rd._max_width = max(800, min(int(config.get("max_width", 1280)), 1920))
     rd._monitor_index = max(0, int(config.get("monitor", 0)))
     stop = threading.Event()
 
@@ -378,9 +378,19 @@ def run_session_helper(host: str, port: int, secret_hex: str, session_id: int) -
             if kind == "C":
                 rd._fps = max(1.0, min(float(header.get("fps", rd._fps)), 60.0))
                 rd._quality = max(20, min(int(header.get("quality", rd._quality)), 85))
-                rd._max_width = max(
-                    640, min(int(header.get("max_width", rd._max_width)), 1920)
+                try:
+                    from client_remote_desktop import MIN_ENCODE_WIDTH
+                    floor_w = int(MIN_ENCODE_WIDTH)
+                except Exception:
+                    floor_w = 800
+                new_max_w = max(
+                    floor_w, min(int(header.get("max_width", rd._max_width)), 1920)
                 )
+                if new_max_w != int(rd._max_width):
+                    # Explicit dashboard width change only — keep size locked otherwise.
+                    rd._locked_encode_w = 0
+                    rd._locked_encode_h = 0
+                rd._max_width = new_max_w
                 rd._monitor_index = max(
                     0, int(header.get("monitor", rd._monitor_index))
                 )

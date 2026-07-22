@@ -713,7 +713,7 @@ class AiortcMediaTransport(OptionalMediaTransport):
                     image = runtime["Image"].open(io.BytesIO(jpeg)).convert("RGB")
                     self.last_frame = runtime["VideoFrame"].from_image(image)
                 if self.last_frame is None:
-                    image = runtime["Image"].new("RGB", (640, 360), "black")
+                    image = runtime["Image"].new("RGB", (800, 600), "black")
                     self.last_frame = runtime["VideoFrame"].from_image(image)
                 frame = self.last_frame
                 frame.pts = pts

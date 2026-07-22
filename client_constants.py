@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.3"  # OOB health counters + GUI card/IP Lists layout
+VERSION = "4.9.4"  # Server Management 1.4.8 + RD encode size lock
 
 
 CLIENT_VERSION = VERSION  # Main version constant

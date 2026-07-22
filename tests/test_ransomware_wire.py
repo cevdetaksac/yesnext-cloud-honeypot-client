@@ -3,6 +3,7 @@
 """Contract 1.1.3: enriched ransomware canary wire payload."""
 
 import unittest
+from unittest import mock
 
 from client_ransomware_shield import CanaryState, RansomwareShield
 from client_system_health import SystemHealthMonitor
@@ -120,6 +121,44 @@ class TestHealthRansomwareWire(unittest.TestCase):
         self.assertEqual(
             quarantine["entries"][0]["cmdline"], "evil.exe --encrypt"
         )
+
+
+class TestCanaryPolicy(unittest.TestCase):
+    def test_desktop_paths_are_forbidden(self):
+        from client_ransomware_shield import is_forbidden_canary_path
+        self.assertTrue(is_forbidden_canary_path(
+            r"C:\Users\Public\Desktop\.ImportantNotes.docx.canary"
+        ))
+        self.assertTrue(is_forbidden_canary_path(
+            r"C:/Users/Alice/Desktop/bait.xlsx"
+        ))
+        self.assertFalse(is_forbidden_canary_path(
+            r"C:\Users\Public\Documents\.FinancialReport2024.xlsx.canary"
+        ))
+        self.assertFalse(is_forbidden_canary_path(
+            r"C:\ProgramData\.SystemConfig.dat.canary"
+        ))
+
+    def test_canary_coverage_is_path_free(self):
+        shield = RansomwareShield()
+        shield._canaries = [
+            CanaryState(path=r"C:\Users\Public\Documents\.cloud-honeypot-canary\!000_reports\a.xlsx",
+                        sha256="a" * 64, size=10),
+            CanaryState(path=r"C:\ProgramData\.cloud-honeypot-canary\!000_reports\b.xlsx",
+                        sha256="b" * 64, size=10),
+        ]
+        with mock.patch("os.path.isfile", return_value=True):
+            stats = shield.get_stats()
+        cov = stats["canary_coverage"]
+        self.assertEqual(cov["files_total"], 2)
+        self.assertEqual(cov["files_intact"], 2)
+        self.assertEqual(cov["files_missing"], 0)
+        self.assertTrue(cov["coverage_ok"])
+        self.assertGreaterEqual(cov["roots_covered"], 1)
+        blob = str(cov)
+        self.assertNotIn("Documents", blob)
+        self.assertNotIn("ProgramData", blob)
+        self.assertNotIn(".xlsx", blob)
 
 
 if __name__ == "__main__":

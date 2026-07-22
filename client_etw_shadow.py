@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RANS-301 — read-only ETW file-I/O shadow sensor (PoC).
+"""RANS-301/302 — read-only ETW file-I/O shadow sensor (PoC).
 
 Hard invariants:
 - Never suspend/kill/restore network.
 - Shadow mode only: aggregate locally, optional callback for telemetry.
 - Safe without elevated privileges / without pywintrace: reports unavailable.
+- Optional psutil disk-IO fallback is named honestly and never claims ETW.
 """
 
 from __future__ import annotations
@@ -23,9 +24,12 @@ class EtwShadowSensor:
         self,
         on_sample: Optional[Callable[[dict], None]] = None,
         window_sec: float = 60.0,
+        *,
+        enable_psutil_fallback: bool = False,
     ):
         self.on_sample = on_sample
         self.window_sec = float(window_sec)
+        self.enable_psutil_fallback = bool(enable_psutil_fallback)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -36,12 +40,16 @@ class EtwShadowSensor:
         self._available = False
         self._error = ""
         self._mode = "shadow"
+        self._source = "stub"
+        self._fallback = "none"
+        self._disk_io_prev: Optional[tuple] = None  # (write_count, write_bytes, ts)
 
     def capabilities(self) -> dict:
         return {
             "etw_file_io": False,  # truthful until a real consumer is wired
             "mode": self._mode,
             "auto_containment": False,
+            "psutil_fallback": bool(self.enable_psutil_fallback),
         }
 
     def start(self) -> bool:
@@ -50,6 +58,8 @@ class EtwShadowSensor:
         # PoC: do not attach kernel providers yet — inventory + API surface only.
         self._available = False
         self._error = "etw consumer not attached (shadow stub)"
+        self._source = "stub"
+        self._fallback = "none"
         self._running = True
         self._stop.clear()
         self._thread = threading.Thread(
@@ -88,8 +98,63 @@ class EtwShadowSensor:
         with self._lock:
             self._provider_restarts += 1
 
+    def _sample_psutil_fallback(self) -> None:
+        """Host disk write deltas as soft observe signal (no paths, no ETW claim)."""
+        if not self.enable_psutil_fallback:
+            return
+        try:
+            import psutil
+        except Exception:
+            with self._lock:
+                self._fallback = "none"
+                self._error = "etw consumer not attached; psutil unavailable"
+            return
+        try:
+            io = psutil.disk_io_counters()
+            if io is None:
+                with self._lock:
+                    self._fallback = "none"
+                    self._error = "etw consumer not attached; disk_io unavailable"
+                return
+            now = time.time()
+            cur = (int(io.write_count or 0), int(io.write_bytes or 0), now)
+            prev = self._disk_io_prev
+            self._disk_io_prev = cur
+            with self._lock:
+                self._fallback = "psutil"
+                self._source = "psutil_io"
+                self._error = "etw consumer not attached; using psutil disk_io fallback"
+            if not prev:
+                return
+            dt = max(now - prev[2], 0.5)
+            write_delta = max(0, cur[0] - prev[0])
+            # Bound synthetic events so fallback cannot flood the deque.
+            synthetic = min(write_delta, 32)
+            if synthetic <= 0:
+                # Still mark activity when bytes moved without count change.
+                if cur[1] > prev[1]:
+                    self.ingest_test_event(
+                        op="write",
+                        pid=0,
+                        path="",
+                        image="psutil_disk_io",
+                    )
+                return
+            for _ in range(int(synthetic)):
+                self.ingest_test_event(
+                    op="write",
+                    pid=0,
+                    path="",
+                    image="psutil_disk_io",
+                )
+        except Exception as exc:
+            with self._lock:
+                self._fallback = "none"
+                self._error = f"etw consumer not attached; psutil fallback error: {exc}"
+
     def _loop(self) -> None:
         while self._running and not self._stop.is_set():
+            self._sample_psutil_fallback()
             sample = self.sample()
             if self.on_sample:
                 try:
@@ -156,7 +221,10 @@ class EtwShadowSensor:
             correlated.sort(key=lambda item: item["score"], reverse=True)
             return {
                 "available": bool(self._available),
+                "provider_attached": False,
                 "mode": self._mode,
+                "source": self._source,
+                "fallback": self._fallback,
                 "auto_containment": False,
                 "window_sec": self.window_sec,
                 "events_in_window": len(recent),

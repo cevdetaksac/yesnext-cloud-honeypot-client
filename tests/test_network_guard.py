@@ -312,5 +312,34 @@ class TestTriggerFlow(unittest.TestCase):
         self.assertEqual(len(sent), 1)  # second call debounced within 60s
 
 
+class TestRestoreRollback(unittest.TestCase):
+    def test_missing_rollback_version_fails_closed(self):
+        guard = ng.NetworkGuard(config={})
+        with mock.patch.object(ng, "load_baseline_version", return_value=None):
+            result = guard.restore_network(rollback_version=9)
+        self.assertEqual(result["error"], "rollback_baseline_not_found_or_invalid")
+
+    def test_rollback_version_uses_signed_retained_baseline(self):
+        guard = ng.NetworkGuard(config={})
+        baseline = {
+            "version": 3,
+            "adapters": [],
+            "firewall": {},
+            "mapped_drives": [],
+            "hmac": "x",
+        }
+        with mock.patch.object(ng, "load_baseline_version", return_value=baseline) as load, \
+                mock.patch.object(ng, "verify_baseline", return_value=True), \
+                mock.patch.object(ng, "check_connectivity",
+                                  return_value={"internet_ok": True}):
+            result = guard.restore_network(
+                rollback_version=3, dry_run=True, targets=["firewall"]
+            )
+        load.assert_called_once_with(3)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["baseline_version"], 3)
+        self.assertEqual(result["restore_actions"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import client_resilience_p1 as p1
@@ -31,6 +32,57 @@ class TestSignedHeartbeat(unittest.TestCase):
             self.assertIsNone(p1.build_heartbeat_observe(
                 "token", hostname="host", status="online", running=True
             ))
+
+    def test_verify_accepts_valid_and_rejects_tamper_or_stale(self):
+        issued = "2026-07-22T01:00:00.000000Z"
+        proof = p1.make_heartbeat_proof(
+            "token",
+            hostname="SERVER-A",
+            status="online",
+            running=True,
+            issued_at=issued,
+        )
+        now = datetime.fromisoformat("2026-07-22T01:01:00+00:00")
+        ok = p1.verify_heartbeat_proof(
+            "token",
+            proof,
+            hostname="SERVER-A",
+            status="online",
+            running=True,
+            max_age_sec=300,
+            now=now,
+        )
+        self.assertTrue(ok["ok"])
+        self.assertEqual(ok["reason"], "ok")
+        self.assertFalse(ok["enforce"])
+
+        bad = dict(proof)
+        bad["signature"] = "0" * 64
+        self.assertEqual(
+            p1.verify_heartbeat_proof(
+                "token",
+                bad,
+                hostname="SERVER-A",
+                status="online",
+                running=True,
+                now=now,
+            )["reason"],
+            "bad_signature",
+        )
+
+        stale_now = datetime.fromisoformat("2026-07-22T02:00:00+00:00")
+        self.assertEqual(
+            p1.verify_heartbeat_proof(
+                "token",
+                proof,
+                hostname="SERVER-A",
+                status="online",
+                running=True,
+                max_age_sec=300,
+                now=stale_now,
+            )["reason"],
+            "stale",
+        )
 
 
 class TestAclDrift(unittest.TestCase):

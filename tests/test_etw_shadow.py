@@ -3,6 +3,7 @@
 """RANS-301 shadow sensor surface — no elevated ETW session required."""
 
 import unittest
+from unittest import mock
 
 from client_etw_shadow import EtwShadowSensor
 
@@ -60,6 +61,41 @@ class TestEtwShadow(unittest.TestCase):
         self.assertNotIn("file-1.docx", str(sample))
         self.assertNotIn("sample.exe", str(sample))
         self.assertFalse(sample["available"])
+
+    def test_status_names_stub_source_and_no_provider(self):
+        sensor = EtwShadowSensor(window_sec=30)
+        sample = sensor.sample()
+        self.assertEqual(sample["source"], "stub")
+        self.assertEqual(sample["fallback"], "none")
+        self.assertFalse(sample["provider_attached"])
+        self.assertFalse(sample["available"])
+
+    def test_psutil_fallback_is_named_and_bounded(self):
+        sensor = EtwShadowSensor(window_sec=60, enable_psutil_fallback=True)
+
+        class _IO:
+            write_count = 10
+            write_bytes = 1000
+
+        class _IO2:
+            write_count = 50
+            write_bytes = 9000
+
+        with mock.patch.dict("sys.modules", {"psutil": mock.Mock()}):
+            import sys
+            fake = sys.modules["psutil"]
+            fake.disk_io_counters.side_effect = [_IO(), _IO2()]
+            sensor._sample_psutil_fallback()  # seed prev
+            sensor._sample_psutil_fallback()
+        sample = sensor.sample()
+        self.assertEqual(sample["source"], "psutil_io")
+        self.assertEqual(sample["fallback"], "psutil")
+        self.assertFalse(sample["provider_attached"])
+        self.assertFalse(sample["available"])
+        self.assertFalse(sample["auto_containment"])
+        # write_count delta 40, capped at 32 synthetic events
+        self.assertEqual(sample["events_in_window"], 32)
+        self.assertNotIn("C:\\", str(sample))
 
 
 if __name__ == "__main__":

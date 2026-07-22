@@ -52,11 +52,11 @@ değil; güvenli, ölçülebilir ve geri alınabilir olanları ürüne kazandır
 | Credential honeytoken | `[R]` | LSASS/bellek enjeksiyonu yapılmayacak. Yetkisiz/ayrıcalıksız host-unique decoy credential + kullanım telemetrisi, açık opt-in ile PoC. |
 | “Görünmez” tuzak dosya | `[R]` | NTFS hidden/system özniteliği gerçek görünmezlik sağlamaz. OS klasörlerini kirletmeden kontrollü canary dizinleri ve erişim telemetrisi genişletilecek. |
 | RDP/SMB/SSH banner + tarpit | `[R]` | Gerçek servis portuyla çakışmayan, kaynak limitli düşük-etkileşimli state machine; timeout/rate limit ve hukuki banner incelemesiyle. |
-| ETW file I/O | `[ ]` | `psutil` polling'e göre değerli. Sabit “50 dosya = kesin ransomware” kabul edilmez; korelasyon skoru, event-loss ve fallback gerekir. |
+| ETW file I/O | `[~]` | `client_etw_shadow` shadow surface + bounded fan-out/rename/write correlation landed; gerçek provider attach ve corpus hâlâ açık. |
 | Şüpheli süreci anında suspend | `[~]` | Exact-target, onaylı suspend/resume zaten var. Otomatik suspend hard-disabled kalır; yüksek güvenli alarm + tek tık onay hızlandırılır. |
 | Toplu parola değişimi tespiti | `[R]` | Security Event Log/AD olaylarıyla alert üretilecek. Admin'i otomatik lock etmek availability riski; yalnız operatör/onaylı kimlik sistemi aksiyonu. |
 | DNS/ICMP tunneling | `[X]` | Covert channel/malware davranışıdır; müşteri ağ politikasını ve IDS/EDR güvenini ihlal eder. Yönetilen OOB HTTPS/proxy/VPN/cellular ve offline signed queue kullanılacak. |
-| Shadow network state | `[~]` | HMAC-imzalı versioned network baseline ve onaylı restore mevcut. Dry-run, diff, rollback ve güvenli bağlantı doğrulaması geliştirilecek. |
+| Shadow network state | `[~]` | Baseline + confirm restore + dry-run plan/`rollback_version` landed; otomatik connectivity rollback ve NIC safety matrix açık. |
 | Asimetrik E2E komutlar | `[R]` | Önce browser/hardware-backed admin imzası + agent verification; sonra gerekirse agent public key'ine payload encryption. Key lifecycle şart. |
 | Hardware fingerprint kilidi | `[R]` | UUID+MAC+CPU katı kilit VM clone/NIC/anakart değişiminde sistemi kilitler. TPM-backed device key/certificate + kontrollü re-enrollment tercih edilir. |
 | PyInstaller decompilation riski | `[R]` | Python bytecode/metadata çıkarılabilir; kaynak birebir garanti edilmese de mantık büyük ölçüde analiz edilebilir. Secret gömmeme + signing/integrity öncelikli, Nuitka maliyet artırıcı katman. |
@@ -80,10 +80,14 @@ değil; güvenli, ölçülebilir ve geri alınabilir olanları ürüne kazandır
 - `[~]` Komut HMAC mevcut ama **imzasız komutlar hâlâ kabul edilir**
   (`verify_command_signature` transition-period).
 - `[x]` DPAPI ile yerel token saklama.
-- `[~]` Device identity bugün `MachineGuid` seviyesinde; TPM attestation yok.
-- `[~]` Honeypot banner/handshake olgun; gerçek tarpit (yavaş yanıt) yok.
-- `[~]` Event Log izleme var (4624/4625/4720/…); **4723/4724 parola değişimi yok**.
-- `[~]` Update SHA-256 opsiyonel; Authenticode + WinVerifyTrust yok.
+- `[~]` Device identity: `MachineGuid` + read-only TPM capability PoC
+  (`client_device_identity`); enrollment/attestation yok.
+- `[~]` Honeypot banner/handshake olgun; handler/rate budgets exposed; gerçek
+  tarpit (yavaş yanıt) yok.
+- `[x]` Event Log 4723/4724 parola değişimi/reset + ID-402 burst aggregate
+  (alert-only, no lockout).
+- `[~]` Update SHA-256 + Authenticode/WinVerifyTrust policy hooks; fleet
+  signing / enforce hâlâ org-cert + contract bağımlı.
 
 ### Kod envanteri (2026-07-22)
 
@@ -91,14 +95,14 @@ değil; güvenli, ölçülebilir ve geri alınabilir olanları ürüne kazandır
 |---|---|---|
 | Daemon / Guardian / Watchdog | Mature | `client_guardian_service.py`, `client_task_scheduler.py`, `client_tamper.py` |
 | Self-protect / DACL / tamper | Mature* | `client_self_protection.py` — *SeDebug bypass mümkün; process-wide priority yok |
-| Packaging / signing | Partial | `build.ps1` / NSIS — Authenticode imzasız; WinVerifyTrust yok |
-| Canary / decoy credentials | Mature / Partial | canary + protocol bait var; LSASS/Credential Manager plant yok |
-| Honeypot banner / tarpit | Mature / Absent | banner+handshake var; tarpit yok |
-| Ransomware / ETW / suspend | Mature / Absent / Mature | davranışsal + onaylı suspend var; ETW yok; auto-contain kapalı |
-| AD/SAM password-change | Absent | `client_eventlog.py` 4723/4724 izlemiyor |
-| Network baseline / OOB | Mature / Absent | baseline+confirm restore var; gerçek OOB kanal yok |
-| Cmd HMAC / E2E | Partial / Absent | HMAC var ama imzasız kabul; E2E payload crypto yok |
-| Device ID / TPM | Partial / Absent | `get_machine_id()` MachineGuid; TPM yok |
+| Packaging / signing | Partial | `build.ps1 -Sign` + provenance + WinVerifyTrust policy; org cert yok |
+| Canary / decoy credentials | Mature / Partial | canary + coverage counts + protocol bait; LSASS plant yok |
+| Honeypot banner / tarpit | Mature / Partial | banner+handshake + `get_health` budgets; delay tarpit yok |
+| Ransomware / ETW / suspend | Mature / Partial / Mature | canary/VSS + ETW shadow correlation; provider attach yok; auto-contain kapalı |
+| AD/SAM password-change | Partial | 4723/4724 + burst aggregate landed; cloud timeline (ID-403) pending |
+| Network baseline / OOB | Mature / Partial | dry-run/rollback selector + DPAPI offline queue primitive; secondary path yok |
+| Cmd HMAC / E2E | Partial / Absent | v1 HMAC observe + envelope-v2/keyset scaffold; E2E payload crypto yok |
+| Device ID / TPM | Partial | MachineGuid + read-only TPM probe; enrollment yok |
 
 Referanslar:
 
@@ -136,8 +140,10 @@ update-integrity boşluklarını kapatmak.
   (sha256/size/toolchain); tam SBOM sonraki adım.
 - [ ] **SUP-003 — Reproducible-build yaklaşımı:** aynı kaynak/tag için
   doğrulanabilir artifact manifesti; release checksum contract/metadata'ya bağlanır.
-- [ ] **QA-001 — Fault-injection harness:** daemon/Guardian kill, task disable,
-  ağ kesme, disk dolu, bozuk baseline, update ortasında reboot senaryoları.
+- [x] **QA-001 — Fault-injection harness:** `tests/test_fault_injection.py`
+  recovery defer/reopen, storm prune, stand-down, Guardian heal. Broader
+  scenarios (network cut, disk-full, corrupt baseline, mid-update reboot)
+  remain as follow-on coverage.
 
 Kabul:
 
@@ -160,15 +166,18 @@ Kabul:
 
 ### Watchdog ve process koruma
 
-- [ ] **RES-103 — Guardian↔motor signed heartbeat:** PID, boot-id, version,
-  monotonic timestamp ve health nonce; eski PID/heartbeat kabul edilmez.
-- [ ] **RES-104 — Recovery policy testleri:** task silme/disable, service stop,
-  binary rename/delete, config corruption ve update-lock yarışları.
+- [~] **RES-103 — Guardian↔motor signed heartbeat:** `client_resilience_p1`
+  HMAC candidate + `system_context.heartbeat_proof` (default-off). Guardian
+  verify/reject-stale henüz bağlı değil; cloud/schema promote gerekli.
+- [x] **RES-104 — Recovery policy testleri:** `tests/test_fault_injection.py`
+  recovery defer/reopen, storm prune, stand-down, Guardian heal.
 - [ ] **RES-105 — SACL/access audit:** `PROCESS_TERMINATE`,
   `PROCESS_VM_WRITE`, `PROCESS_VM_OPERATION`, handle duplication taleplerini
   offender PID/image/hash ile audit et; event kaybını raporla.
-- [ ] **RES-106 — ACL drift monitor:** process/file/service/task DACL beklenen
-  şablondan saparsa alarm + güvenli onarım.
+  *(Note: RES-105 ACL fingerprint observe is landed under access_integrity;
+  process-handle SACL remains open.)*
+- [~] **RES-106 — ACL drift monitor:** `client_resilience_p1` icacls fingerprint
+  + HMAC baseline → `access_integrity` (default-off). Auto-repair yok.
 - [A] **RES-107 — PPL/signed driver feasibility:** Microsoft signing,
   HVCI/WDAC/Defender uyumluluğu, patch cadence ve kernel crash riski incelenir.
   PoC başarı/kabul kriteri olmadan driver geliştirilmez.
@@ -178,10 +187,8 @@ Kabul:
 - [ ] **REV-101 — Binary exposure threat model:** offline binary sahibi local
   user, local admin/SYSTEM, sandbox/debugger ve cloud compromise yeteneklerini
   ayrı değerlendir; hangi kontrolün hangi saldırgana direnç sağladığını yaz.
-- [ ] **REV-102 — Embedded secret inventory:** source, PyInstaller archive,
-  NSIS, config, docs ve release binary içinde API private key, uzun ömürlü
-  credential veya tenant secret bulunmadığını CI'da tara. API endpoint/token
-  field adı gibi public string'leri secret sayma.
+- [~] **REV-102 — Embedded secret inventory:** `scripts/scan_embedded_secrets.py`
+  (+ CI-friendly path) landed; expand corpus / release-binary scan cadence open.
 - [ ] **REV-103 — Local-state protection:** token dışındaki hassas policy,
   network baseline, command cache ve forensic metadata için DPAPI/ACL/içerik
   bütünlüğü matrisi; local admin sınırı açıkça belgelenir.
@@ -218,30 +225,28 @@ Kabul:
 
 ## Faz 2 — Deception ve honeytoken genişletmesi
 
-- [ ] **DEC-201 — Canary coverage map:** kullanıcı profilleri, paylaşımlar ve
-  kritik veri kökleri için düşük etkili canary yerleşim planı; silme/rename/write
-  sinyalleri tek correlation-id altında.
-- [ ] **DEC-202 — Controlled NTFS canary:** hidden/system/ACL varyantlarını
-  yalnız ürün-owned dizinlerde dene; Windows/Program Files köklerine rastgele
-  tuzak bırakma.
+- [~] **DEC-201 — Canary coverage map:** `RansomwareShield.get_stats().canary_coverage`
+  path-free counts landed; share/profile inventory expansion + shared
+  correlation-id across delete/rename/write still open.
+- [~] **DEC-202 — Controlled NTFS canary:** Hidden|System|NotContentIndexed in
+  product-owned trees; ACL variant PoC under canary root still open. No
+  Windows/Program Files planting.
 - [A] **DEC-203 — Credential honeytoken PoC:** ayrıcalıksız, gerçek erişim
   vermeyen, host-unique decoy; kullanım yalnız kontrollü decoy endpoint/domain
   üzerinde alarm üretir. LSASS veya gerçek credential belleğine enjeksiyon yok.
 - [ ] **DEC-204 — Honeytoken lifecycle:** create/rotate/revoke, tenant isolation,
   incident correlation, privacy ve uninstall cleanup.
-- [ ] **DEC-205 — Protocol-aware decoys:** SSH/RDP/SMB için güvenli banner/state
-  machine; gerçek servis portu çakışması kontrolü.
-- [ ] **DEC-206 — Tarpit resource budget:** bağlantı başına süre/bellek,
-  global concurrency, source rate limit ve emergency disable.
+- [~] **DEC-205 — Protocol-aware decoys:** existing SSH/RDP/MySQL/MSSQL/HTTP/SMB
+  handlers + port-in-use reject; deeper SMB share decoy + signed banner profiles open.
+- [~] **DEC-206 — Tarpit resource budget:** handler cap + rate limiter +
+  `BaseHoneypot.get_health()` budgets landed; delay tarpit / emergency disable
+  telemetry still open.
 - [ ] **DEC-207 — Deception telemetrisi:** auth attempt, username, source IP,
   protocol stage ve dwell time; parola/secret loglamadan.
-- [ ] **DEC-208 — Fingerprint-resistance:** tek ve sabit Python banner/timeout
-  kalıbına güvenme; contract kontrollü banner profilleri, gerçekçi protocol
-  state transition ve tenant-safe jitter. Deception başarısı “ayırt edilemez”
-  iddiasıyla değil, attacker dwell/telemetry değeriyle ölçülür.
-- [ ] **DEC-209 — Bypass-aware coverage:** saldırgan decoy portlarını görmezden
-  gelse bile gerçek servis attack telemetry, Event Log, firewall ve behavioral
-  sensor coverage'ı devam eder; honeypot tek detection katmanı olmaz.
+- [~] **DEC-208 — Fingerprint-resistance:** `fingerprint_profile=static_legacy`
+  exposed; contract-controlled banner profiles + jitter not yet distributed.
+- [~] **DEC-209 — Bypass-aware coverage:** Event Log + Network Guard + ransomware
+  remain independent of honeypot listeners; explicit health matrix narrative open.
 
 Kabul:
 
@@ -253,11 +258,11 @@ Kabul:
 
 - [~] **RANS-301 — ETW provider PoC:** `client_etw_shadow` shadow yüzeyi +
   event-loss sayaçları (auto-containment kapalı; gerçek provider henüz bağlı değil).
-- [ ] **RANS-302 — Kayıp olay telemetrisi:** dropped events, buffer pressure,
-  provider restart ve `psutil`/Event Log fallback.
-- [ ] **RANS-303 — Korelasyon motoru:** file fan-out + rename + entropy/extension
-  shift + canary + VSS + suspicious origin; tek sabit eşik “kesin ransomware”
-  sayılmaz.
+- [~] **RANS-302 — Kayıp olay telemetrisi:** drop/pressure/restart counters in
+  `etw_shadow` status; `psutil`/Event Log named fallback wiring still open.
+- [~] **RANS-303 — Korelasyon motoru:** bounded fan-out/rename/write correlation
+  in shadow sample (no raw paths; no containment). Entropy + canary/VSS join
+  and corpus evaluation remain open.
 - [ ] **RANS-304 — Shadow mode:** en az iki release boyunca alarm-only ölçüm;
   backup/indexer/compiler/browser/AV false-positive corpus'u.
 - [ ] **RANS-305 — Hızlı operatör containment:** yüksek güvenli alarmda exact
@@ -272,26 +277,27 @@ Kabul:
 ## Faz 4 — Kimlik saldırıları ve parola değişimi görünürlüğü
 
 - [~] **ID-401 — Security Event Log sensörü:** **4723/4724** izleme + skor/
-  kategori eklendi (alert-only; otomatik lockout yok). Burst correlation
-  (ID-402) ve cloud incident görünümü (ID-403) ayrı.
-- [ ] **ID-402 — Burst correlation:** actor/target/host/domain bazında kayan
-  pencere; servis hesapları ve planlı IAM operasyonları için allowlist.
-- [ ] **ID-403 — Cloud incident görünümü:** hedef hesap sayısı, actor, DC/host,
-  event-id ve zaman çizgisi; hassas alanları redakte et.
+  kategori eklendi (alert-only; otomatik lockout yok).
+- [~] **ID-402 — Burst correlation:** `PasswordBurstCorrelator` →
+  `event_log_health.password_burst` (sliding window aggregates; no lockout).
+  Service-account allowlist expansion open.
+- [~] **ID-403 — Cloud incident görünümü:** client emits bounded burst stats;
+  dashboard timeline/redaction UX is cloud-owned and still pending.
 - [ ] **ID-404 — Onaylı response entegrasyonu:** dashboard önerisi/harici IAM
   playbook; endpoint agent kendi başına domain admin hesabını lock etmez.
 - [X] Salt burst sinyaliyle otomatik admin lockout uygulanmayacak.
 
 ## Faz 5 — Ağ self-healing ve meşru OOB
 
-- [ ] **NET-501 — Baseline diff/dry-run:** restore öncesi değişiklik planı,
-  interface identity doğrulaması ve uygulanacak komut listesi.
-- [ ] **NET-502 — Versioned rollback:** restore sonrası bağlantı kötüleşirse
-  önceki ağ sürümüne kontrollü geri dönüş.
+- [~] **NET-501 — Baseline diff/dry-run:** `plan_network_restore` + `dry_run`
+  on restore commands (no mutate). Interface/NIC safety matrix still open.
+- [~] **NET-502 — Versioned rollback:** `rollback_version` selector verifies
+  retained signed baseline before mutate; automatic connectivity rollback open.
 - [ ] **NET-503 — Restore safety:** RDP/management NIC, VPN, DHCP/statik IP ve
   domain network profili test matrisi.
-- [ ] **OOB-501 — Offline signed queue:** urgent olayları DPAPI + bütünlük
-  korumalı sırada tut; bağlantı gelince idempotent/replay-safe gönder.
+- [~] **OOB-501 — Offline signed queue:** `client_offline_queue` DPAPI+HMAC
+  bounded/idempotent primitive landed; **not** wired into urgent alert path
+  until cloud ingest/ACK schema.
 - [ ] **OOB-502 — Secondary HTTPS path:** müşteri onaylı ikinci FQDN/endpoint,
   sistem proxy ve certificate pin/rotation stratejisi.
 - [A] **OOB-503 — Managed side channel:** müşterinin sağladığı management VPN,
@@ -311,17 +317,18 @@ Kabul:
   operator imza doğrulaması ve production `version:2` wire, kontrat gate 1
   (serialization/algoritma/test vektörleri promote) ve ZT-603 anahtar dağıtımı
   öncesi **çıkarılmaz**.
-- [ ] **ZT-602 — Hardware-backed admin signing:** browser'da WebAuthn/passkey
-  veya yönetilen signing key; cloud private key'i görmez.
-- [ ] **ZT-603 — Agent verification:** tenant admin public key seti, key-id,
-  rotation/revocation ve dual-key migration; HMAC legacy fallback kontrollü.
+- [~] **ZT-602 — Hardware-backed admin signing:** browser WebAuthn still
+  cloud/dashboard; client exposes public keyset metadata scaffold only.
+- [~] **ZT-603 — Agent verification:** `client_operator_keys.inspect_keyset`
+  public metadata/rotation observe; asymmetric verify disabled until cloud
+  distributes keys + contract promote.
 - [ ] **ZT-604 — Multi-party approval:** panic/isolate/restore/credential gibi
   yüksek etkili komutlarda tenant politikasına göre ikinci onay.
 - [ ] **ZT-605 — Replay/ordering:** nonce + TTL + per-device sequence window +
   idempotent result; audit kaydı imza hash'i taşır.
-- [ ] **ZT-605b — Transport threat model:** TLS certificate validation ve
-  rotation testleri; pasif packet capture, kurumsal TLS interception, local
-  trust-store compromise ve cloud compromise ayrı acceptance senaryoları.
+- [~] **ZT-605b — Transport threat model:** documented in
+  `docs/P1_SECURITY_RESILIENCE_CLIENT.md` + unit coverage; production pin/
+  custom-CA parity on WS path still open.
 
 ### Opsiyonel payload gizliliği
 
@@ -338,8 +345,9 @@ Kabul:
 
 ### Device identity
 
-- [ ] **DEV-601 — TPM device certificate:** kurulumda cihaz anahtarı üret,
-  proof-of-possession ile cloud'a kaydet.
+- [~] **DEV-601 — TPM device certificate:** `client_device_identity.probe_tpm`
+  read-only capability PoC (default-off). No key generation, enrollment, or
+  lock on TPM absence.
 - [ ] **DEV-602 — Soft signals:** SMBIOS UUID, machine SID ve donanım sinyalleri
   yalnız risk/attestation girdisi; tek başına hard lock değil.
 - [ ] **DEV-603 — Re-enrollment:** anakart/NIC/VM clone değişiminde güvenli
@@ -375,14 +383,16 @@ Kabul:
 
 ### P1 — P0 ölçümleri yeşil olduktan sonra
 
-- [~] RES-103 signed-heartbeat candidate (`client_resilience_p1`; default off,
-  canonical cloud wire/replay/coverage pending)
+- [~] RANS-302/303 ETW event-loss + bounded fan-out/rename/write correlation
+  + named `source`/`fallback` (`stub`|`psutil`) observe sampler
+  (`threat_detection.etw_psutil_fallback`, default off; real provider/corpus pending)
+- [~] DEC-201/202 canary coverage counts (path-free health; Desktop config bait
+  removed + deploy-time Desktop path reject; matrix expansion pending)
+- [~] RES-103 signed-heartbeat candidate + local `verify_heartbeat_proof`
+  (`client_resilience_p1`; default off; Guardian reject-stale not wired)
 - [~] RES-105 SACL/access audit (bounded DACL fingerprint landed; SACL privilege
   inventory and canonical health schema pending)
 - [~] RES-106 ACL drift monitor (local HMAC baseline, observe-only, no mutation)
-- [~] RANS-302/303 ETW event-loss + bounded fan-out/rename/write correlation
-  (real provider attach/corpus/cloud detection batch pending)
-- [~] DEC-201/202 canary coverage counts (path-free health; matrix expansion pending)
 - [~] DEC-205/206 protocol-aware decoy + resource budgets already present;
   `BaseHoneypot.get_health` exposes handler/rate/backlog saturation
 - [~] DEC-208/209 static fingerprint profile is honestly reported and bypass

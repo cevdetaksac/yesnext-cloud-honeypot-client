@@ -9,10 +9,10 @@
 
 | Work item | Client surface | Default / invariant |
 |---|---|---|
-| RES-103 | `client_resilience_p1.make_heartbeat_proof` | Candidate HMAC heartbeat proof; default off, no cloud enforcement |
+| RES-103 | `client_resilience_p1.make_heartbeat_proof` / `verify_heartbeat_proof` | Candidate HMAC heartbeat proof + local verify; default off, no Guardian reject-stale |
 | RES-105/106 | `client_resilience_p1.acl_drift_status` | DACL fingerprint only; no ACL mutation, raw principals never uploaded |
-| RANS-302/303 | `client_etw_shadow.sample().correlation` | Dropped/restart/buffer health + bounded fan-out/rename/write correlation; shadow only |
-| DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` | Counts only; no user paths |
+| RANS-302/303 | `client_etw_shadow.sample().correlation` | Dropped/restart/buffer health + bounded fan-out/rename/write correlation; optional named `psutil` fallback (`etw_psutil_fallback`); shadow only |
+| DEC-201/202 | `RansomwareShield.get_stats().canary_coverage` + `is_forbidden_canary_path` | Counts only; Desktop paths rejected/removed from default config |
 | DEC-205/206/208/209 | `BaseHoneypot.get_health` | Existing handler/rate/backlog budgets exposed; static profile honestly reported |
 | NET-501/502 | `plan_network_restore`, `load_baseline_version`, `dry_run`, `rollback_version` | Signed baseline required; destructive restore remains confirm-gated |
 | OOB-501 | `client_offline_queue` | DPAPI + HMAC + bounded/idempotent queue; no ingest wiring before contract |

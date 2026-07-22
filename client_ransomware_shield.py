@@ -56,6 +56,14 @@ CREATE_NO_WINDOW = 0x08000000
 # Admin notice → ProgramData only (not inside bait tree).
 CANARY_ROOT_FOLDER = ".cloud-honeypot-canary"
 
+
+def is_forbidden_canary_path(path: str) -> bool:
+    """True for Desktop (any profile) — contract forbids Desktop canaries."""
+    if not path:
+        return True
+    parts = os.path.normpath(str(path)).replace("/", "\\").lower().split("\\")
+    return "desktop" in parts
+
 CANARY_SUBFOLDER_NAMES = [
     "!000_reports",
     "!000_finance",
@@ -465,6 +473,17 @@ class RansomwareShield:
                     extra = get_from_config("canary_file_paths", [])
                 for filepath in (extra or []):
                     try:
+                        if is_forbidden_canary_path(filepath):
+                            log(
+                                "[RANSOMWARE-SHIELD] skip Desktop/config canary "
+                                f"(forbidden): {filepath}"
+                            )
+                            try:
+                                if os.path.isfile(filepath):
+                                    os.remove(filepath)
+                            except OSError:
+                                pass
+                            continue
                         d = os.path.dirname(filepath)
                         if d:
                             os.makedirs(d, exist_ok=True)

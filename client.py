@@ -395,7 +395,12 @@ class CloudHoneypotClient:
                         "threat_detection.etw_file_io_shadow", False
                     )):
                         from client_etw_shadow import EtwShadowSensor
-                        self.health_monitor.etw_shadow = EtwShadowSensor()
+                        psutil_fb = bool(get_from_config(
+                            "threat_detection.etw_psutil_fallback", False
+                        ))
+                        self.health_monitor.etw_shadow = EtwShadowSensor(
+                            enable_psutil_fallback=psutil_fb,
+                        )
                         self.health_monitor.etw_shadow.start()
                 except Exception as etw_exc:
                     log(f"⚠️ ETW shadow init skipped: {etw_exc}")

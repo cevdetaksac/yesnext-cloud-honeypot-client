@@ -96,6 +96,65 @@ def build_heartbeat_observe(
     )
 
 
+def verify_heartbeat_proof(
+    token: str,
+    proof: Optional[dict],
+    *,
+    hostname: str,
+    status: str,
+    running: bool,
+    max_age_sec: float = 300.0,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Local RES-103 verify helper (observe-only; never used for reject-stale)."""
+    result = {
+        "ok": False,
+        "observe": True,
+        "enforce": False,
+        "reason": "missing",
+    }
+    if not token or not isinstance(proof, dict):
+        return result
+    if int(proof.get("version") or 0) != 1:
+        result["reason"] = "unsupported_version"
+        return result
+    issued_at = str(proof.get("issued_at") or "")
+    signature = str(proof.get("signature") or "")
+    if not issued_at or not signature:
+        result["reason"] = "incomplete"
+        return result
+    expected = make_heartbeat_proof(
+        token,
+        hostname=hostname,
+        status=status,
+        running=running,
+        issued_at=issued_at,
+    )
+    if not hmac.compare_digest(signature, expected["signature"]):
+        result["reason"] = "bad_signature"
+        return result
+    try:
+        issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+        if issued.tzinfo is None:
+            issued = issued.replace(tzinfo=timezone.utc)
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        age = (reference - issued).total_seconds()
+        if age < -30:
+            result["reason"] = "clock_skew"
+            return result
+        if age > float(max_age_sec):
+            result["reason"] = "stale"
+            return result
+    except Exception:
+        result["reason"] = "bad_timestamp"
+        return result
+    result["ok"] = True
+    result["reason"] = "ok"
+    return result
+
+
 def _icacls_fingerprint(path: str) -> dict:
     """Return a bounded hash of icacls output; no principal names leave host."""
     out = {

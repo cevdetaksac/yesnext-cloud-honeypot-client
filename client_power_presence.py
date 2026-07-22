@@ -26,7 +26,7 @@ PBT_APMQUERYSUSPEND = 0x0000
 
 DEVICE_NOTIFY_CALLBACK = 2
 DEVICE_NOTIFY_CALLBACK_ROUTINE = ctypes.WINFUNCTYPE(
-    wintypes.ULONG, wintypes.PVOID, wintypes.ULONG, wintypes.PVOID
+    wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p
 )
 
 CTRL_C_EVENT = 0
@@ -45,7 +45,7 @@ _ctrl_ref = None
 class DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS(ctypes.Structure):
     _fields_ = [
         ("Callback", DEVICE_NOTIFY_CALLBACK_ROUTINE),
-        ("Context", wintypes.PVOID),
+        ("Context", ctypes.c_void_p),
     ]
 
 

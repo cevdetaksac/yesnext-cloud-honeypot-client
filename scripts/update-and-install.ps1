@@ -105,12 +105,24 @@ function Clear-UpdateArtifacts {
     $script:UaRemoved = 0
     try {
         if ($UsedInstaller -and (Test-Path -LiteralPath $UsedInstaller)) {
-            Remove-Item -LiteralPath $UsedInstaller -Force -ErrorAction SilentlyContinue
-            if (-not (Test-Path -LiteralPath $UsedInstaller)) {
-                $script:UaRemoved++
-                Write-UpLog "Removed used installer: $UsedInstaller"
+            # Only delete the used EXE when it lives under known staging/TEMP/Downloads.
+            # Never wipe a developer build path (e.g. repo cloud-client-installer.exe).
+            $norm = [string]$UsedInstaller
+            $stagingRoot = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient\update"
+            $safe = $false
+            if ($norm.StartsWith($stagingRoot, [StringComparison]::OrdinalIgnoreCase)) { $safe = $true }
+            elseif ($env:TEMP -and $norm.StartsWith($env:TEMP, [StringComparison]::OrdinalIgnoreCase)) { $safe = $true }
+            elseif ($norm -match '(?i)\\Downloads\\cloud-client-installer') { $safe = $true }
+            if ($safe) {
+                Remove-Item -LiteralPath $UsedInstaller -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $UsedInstaller)) {
+                    $script:UaRemoved++
+                    Write-UpLog "Removed used installer: $UsedInstaller"
+                } else {
+                    Write-UpLog "WARN: could not delete used installer (locked?): $UsedInstaller"
+                }
             } else {
-                Write-UpLog "WARN: could not delete used installer (locked?): $UsedInstaller"
+                Write-UpLog "Skip used-installer delete (outside staging): $UsedInstaller"
             }
         }
     } catch {

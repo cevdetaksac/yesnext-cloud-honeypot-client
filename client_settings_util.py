@@ -49,7 +49,7 @@ SECTIONS: List[Tuple[str, list]] = [
     ]),
     ("settings_sec_autoblock", [
         ("auto_block_enabled", "bool", "settings_autoblock_enabled", None),
-        ("auto_block_threshold", "int", "settings_autoblock_threshold", (1, 1000)),
+        ("auto_block_threshold", "int", "settings_autoblock_threshold", (1, 100)),
         ("auto_block_duration_hours", "int", "settings_autoblock_duration", (0, 8760)),
         ("max_auto_blocks_per_hour", "int", "settings_autoblock_max_hour", (1, 1000)),
         ("max_auto_blocks_per_day", "int", "settings_autoblock_max_day", (1, 10000)),

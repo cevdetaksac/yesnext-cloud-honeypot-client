@@ -70,6 +70,8 @@ class TestBuildPatch(unittest.TestCase):
     def test_int_out_of_range_rejected(self):
         _patch, errors = build_threat_config_patch({"auto_block_threshold": 0})
         self.assertIn("auto_block_threshold", errors)
+        _patch2, errors2 = build_threat_config_patch({"auto_block_threshold": 1000})
+        self.assertIn("auto_block_threshold", errors2)
 
     def test_webhook_enabled_requires_url(self):
         _patch, errors = build_threat_config_patch({

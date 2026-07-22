@@ -136,7 +136,7 @@ class ModernGUI:
         self._pages: Dict[str, ctk.CTkScrollableFrame] = {}
         self._nav_buttons: Dict[str, dict] = {}
         self._pages_built = {
-            "status": False, "threat": False, "services": False,
+            "status": False, "threat": False, "iplist": False, "services": False,
             "layers": False, "settings": False,
         }
         self._page_placeholders = {}
@@ -145,6 +145,7 @@ class ModernGUI:
         nav_items = [
             ("status", "📊", self.t("tab_status")),
             ("threat", "🛡", self.t("tab_threat_center")),
+            ("iplist", "📡", self.t("tab_ip_lists")),
             ("services", "🐝", self.t("tab_services")),
             ("layers", "⚙", self.t("tab_security_layers")),
             ("settings", "🛠", self.t("tab_settings")),
@@ -211,8 +212,9 @@ class ModernGUI:
             root.after(600, self._start_update_banner_poll)
             # Prewarm delayed — early prewarm competed with Status paint and started IPC timers
             root.after(8000, lambda: self._prewarm_page("services"))
+            root.after(10000, lambda: self._prewarm_page("iplist"))
             root.after(12000, lambda: self._prewarm_page("threat"))
-            log("[PERF] GUI shell ready; status@30ms data@120ms prewarm@8s/12s")
+            log("[PERF] GUI shell ready; status@30ms data@120ms prewarm@8s/10s/12s")
         except Exception:
             self._ensure_page_built("status")
             self._lazy_load_status_data()
@@ -287,10 +289,11 @@ class ModernGUI:
         try:
             if page_id == "status":
                 self._build_dashboard(page)
-                self._build_ip_activity_table(page)
                 self._ensure_pulse_blink()
             elif page_id == "threat":
                 self._build_threat_center(page)
+            elif page_id == "iplist":
+                self._build_ip_activity_table(page)
             elif page_id == "services":
                 self._build_services_section(page)
             elif page_id == "layers":
@@ -319,11 +322,7 @@ class ModernGUI:
             if tok:
                 self.app.refresh_attack_count(async_thread=True)
             self._refresh_dashboard()
-            # IP table a bit later — heavier
-            if self.root:
-                self.root.after(250, self._refresh_ip_table)
-            else:
-                self._refresh_ip_table()
+            # IP Lists live on their own tab now.
         except Exception as e:
             log(f"[GUI] status data load: {e}")
 
@@ -380,6 +379,11 @@ class ModernGUI:
                 self.root.after(50, self._lazy_load_status_data)
             except Exception:
                 self._lazy_load_status_data()
+        elif page_id == "iplist":
+            try:
+                self.root.after(50, lambda: self._refresh_ip_table(force_firewall=True))
+            except Exception:
+                self._refresh_ip_table(force_firewall=True)
         elif page_id == "threat" and not self._page_data_loaded.get("threat"):
             try:
                 self.root.after(50, self._lazy_load_threat_data)
@@ -2057,7 +2061,7 @@ class ModernGUI:
         threat_cards_data = [
             ("threat_level",    "🛡️", self.t("card_threat_level"),  "SAFE", COLORS["green"],    0, 0, "_detail_threat_level"),
             ("events_per_hour", "📊", self.t("card_events_per_hour"),   "0",    COLORS["text_dim"], 0, 1, "_detail_events_per_hour"),
-            ("blocked_ips",     "🚫", self.t("card_tracked_ips"),   "0",    COLORS["text_dim"], 0, 2, "_detail_blocked_ips"),
+            ("blocked_ips",     "🚫", self.t("card_blocked_ips"),   "0",    COLORS["text_dim"], 0, 2, "_open_blocked_ips_tab"),
         ]
 
         for key, emoji, label, value, color, row, col, handler_name in threat_cards_data:
@@ -3456,7 +3460,7 @@ class ModernGUI:
         cols = [
             (self.t("ip_col_address"), 140),
             (self.t("ip_col_service"), 65),
-            (self.t("ip_col_attempts"), 60),
+            (self.t("ip_col_score"), 60),
             (self.t("ip_col_last_time"), 130),
             (self.t("ip_col_status"), 80),
         ]
@@ -3770,7 +3774,7 @@ class ModernGUI:
                 (
                     r.get("ip"),
                     r.get("status"),
-                    r.get("attempts"),
+                    r.get("score"),
                     r.get("service"),
                     r.get("last_seen"),
                 )
@@ -3826,13 +3830,14 @@ class ModernGUI:
                     text_color=COLORS["text_dim"], anchor="w",
                 ).pack(side="left", padx=4)
 
-                # Deneme sayısı
-                att_color = COLORS["red"] if r["attempts"] >= 3 else (
-                    COLORS["orange"] if r["attempts"] >= 1 else COLORS["text_dim"])
+                # Tehdit skoru (0–100) — eşik karşılaştırması skor üzerinden
+                score_val = int(float(r.get("score") or 0))
+                score_color = COLORS["red"] if score_val >= 80 else (
+                    COLORS["orange"] if score_val >= 40 else COLORS["text_dim"])
                 ctk.CTkLabel(
-                    row_frame, text=str(r["attempts"]), width=60,
+                    row_frame, text=str(score_val), width=60,
                     font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=att_color, anchor="w",
+                    text_color=score_color, anchor="w",
                 ).pack(side="left", padx=4)
 
                 # Son zaman
@@ -5265,105 +5270,21 @@ class ModernGUI:
             "total": len(blocked) + len(watching),
         }
 
+    def _open_blocked_ips_tab(self):
+        """Tehdit Merkezi kartı → IP Listeleri sekmesi (Engellenen filtresi)."""
+        self._show_page("iplist")
+        try:
+            self._set_ip_table_tab("blocked")
+        except Exception:
+            self._ip_table_tab = "blocked"
+        try:
+            self._refresh_ip_table(force_firewall=True)
+        except Exception:
+            pass
+
     def _detail_blocked_ips(self):
-        """Engellenen/takip edilen IP detayları — tam liste (store + TE)."""
-        popup = self._show_detail_window(f"🚫 {self.t('card_tracked_ips')}", height=520)
-        content = popup._content
-
-        snapshot = self._tracked_ip_snapshot()
-        threat_engine = snapshot["threat_engine"]
-        store_blocks = snapshot["store_blocks"]
-        blocked = snapshot["blocked"]
-        active_ips = snapshot["active_ips"]
-        blocked_count = len(blocked)
-        watching_count = len(snapshot["watching"])
-
-        ctk.CTkLabel(
-            content,
-            text=f"{self.t('card_tracked_ips')}: {snapshot['total']}  |  "
-                 f"{self.t('detail_blocked_count')}: {blocked_count}  |  "
-                 f"{self.t('detail_watching_count')}: {watching_count}",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=COLORS["orange"],
-        ).pack(anchor="w", padx=8, pady=(0, 8))
-
-        from datetime import datetime
-        rows = []
-        actions = []
-        displayed = set()
-        # Render the same union used by the card count: firewall store + threat
-        # contexts + rule-blocked addresses. Never hide watching rows merely
-        # because at least one firewall block exists.
-        for b in store_blocks:
-            ip = str(b.get("ip") or "")
-            if not ip or ip in displayed:
-                continue
-            displayed.add(ip)
-            ts_raw = float(b.get("blocked_at") or 0)
-            try:
-                ts = datetime.fromtimestamp(ts_raw).strftime("%d.%m %H:%M") if ts_raw else "—"
-            except Exception:
-                ts = "—"
-            rows.append([
-                ip, (self.t("ip_status_blocked"), COLORS["red"]),
-                ("—", COLORS["text_dim"]), "—", ts,
-            ])
-            actions.append([
-                (self.t("ip_btn_unblock"), COLORS["orange"],
-                 lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
-            ])
-
-        sorted_ips = sorted(
-            active_ips, key=lambda x: x[1].last_seen, reverse=True
-        )
-        for ip, ctx in sorted_ips:
-            if ip in displayed:
-                continue
-            displayed.add(ip)
-            is_blocked = ip in blocked or ctx.is_blocked
-            status = (self.t("ip_status_blocked"), COLORS["red"]) if is_blocked else \
-                     (self.t("ip_status_watching"), COLORS["orange"])
-            score_color = COLORS["red"] if ctx.threat_score >= 80 else (
-                COLORS["orange"] if ctx.threat_score >= 40 else COLORS["text_dim"])
-            try:
-                ts = datetime.fromtimestamp(ctx.last_seen).strftime("%d.%m %H:%M")
-            except Exception:
-                ts = "—"
-            rows.append([ip, status, (str(ctx.threat_score), score_color),
-                         str(ctx.failed_attempts), ts])
-            if is_blocked:
-                actions.append([
-                    (self.t("ip_btn_unblock"), COLORS["orange"],
-                     lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
-                ])
-            else:
-                actions.append([
-                    (self.t("ip_btn_block"), COLORS["red"],
-                     lambda i=ip: (self._ip_table_block(i), popup.destroy())),
-                ])
-
-        for ip in sorted(blocked - displayed):
-            rows.append([
-                ip, (self.t("ip_status_blocked"), COLORS["red"]),
-                ("—", COLORS["text_dim"]), "—", "—",
-            ])
-            actions.append([
-                (self.t("ip_btn_unblock"), COLORS["orange"],
-                 lambda i=ip: (self._ip_table_unblock(i), popup.destroy())),
-            ])
-
-        if not rows:
-            try:
-                msg = self.t("ip_no_blocked")
-            except Exception:
-                msg = self.t("detail_no_data")
-            ctk.CTkLabel(content, text=msg, text_color=COLORS["text_dim"]).pack(anchor="w", padx=8)
-            return
-
-        headers = ["IP", self.t("ip_col_status"), self.t("detail_score"),
-                    self.t("ip_col_attempts"), self.t("ip_col_last_time")]
-        self._add_detail_table(content, headers, rows,
-                               col_widths=[130, 80, 55, 65, 90], row_actions=actions)
+        """Geriye uyumluluk: eski detay popup yerine IP Listeleri sekmesini aç."""
+        self._open_blocked_ips_tab()
 
     # ── Süreç Durdurma (Process Kill) ── #
     def _kill_process(self, pid: int, name: str = ""):
@@ -5805,8 +5726,8 @@ class ModernGUI:
             self._ip_table_tick = 0
         self._ip_table_tick += 1
         if (
-            self._active_page == "status"
-            and self._pages_built.get("status")
+            self._active_page == "iplist"
+            and self._pages_built.get("iplist")
             and self._ip_table_tick >= ticks_per_ip
         ):
             self._ip_table_tick = 0
@@ -5930,9 +5851,9 @@ class ModernGUI:
             else:
                 self._update_card("connection", self.t("dash_disconnected"), COLORS["red"])
 
-            # 7) Threat Detection cards — card/detail share one canonical IP set
+            # 7) Threat Detection cards — blocked IP count matches IP Lists tab
             threat_engine = getattr(self.app, 'threat_engine', None)
-            tracked_count = self._tracked_ip_snapshot()["total"]
+            blocked_count = len(self._tracked_ip_snapshot()["blocked"])
             if threat_engine:
                 try:
                     level, level_color = threat_engine.get_threat_level()
@@ -5946,20 +5867,20 @@ class ModernGUI:
                         COLORS["orange"] if events_per_hour > 20 else COLORS["text_dim"])
                     self._update_card("events_per_hour", str(events_per_hour), eph_color)
 
-                    blocked_color = COLORS["red"] if tracked_count > 5 else (
-                        COLORS["orange"] if tracked_count > 0 else COLORS["text_dim"])
-                    self._update_card("blocked_ips", str(tracked_count), blocked_color)
+                    blocked_color = COLORS["red"] if blocked_count > 5 else (
+                        COLORS["orange"] if blocked_count > 0 else COLORS["text_dim"])
+                    self._update_card("blocked_ips", str(blocked_count), blocked_color)
                 except Exception:
-                    if tracked_count:
+                    if blocked_count:
                         self._update_card(
                             "blocked_ips",
-                            str(tracked_count),
-                            COLORS["red"] if tracked_count > 5 else COLORS["orange"],
+                            str(blocked_count),
+                            COLORS["red"] if blocked_count > 5 else COLORS["orange"],
                         )
             else:
-                blocked_color = COLORS["red"] if tracked_count > 5 else (
-                    COLORS["orange"] if tracked_count > 0 else COLORS["text_dim"])
-                self._update_card("blocked_ips", str(tracked_count), blocked_color)
+                blocked_color = COLORS["red"] if blocked_count > 5 else (
+                    COLORS["orange"] if blocked_count > 0 else COLORS["text_dim"])
+                self._update_card("blocked_ips", str(blocked_count), blocked_color)
 
             # 8) Silent Hours status (v4.0 Faz 2)
             sh_guard = getattr(self.app, 'silent_hours_guard', None)

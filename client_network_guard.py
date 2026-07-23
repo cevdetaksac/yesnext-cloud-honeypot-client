@@ -31,7 +31,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     import psutil
@@ -715,6 +715,10 @@ class NetworkGuard:
         self._NET_CUT_PERSIST_SEC = 15
         self._last_auto_restore_mono = 0.0
         self._AUTO_RESTORE_DEDUPE_SEC = 300
+        # Cached live surface for STATUS — never block the single-threaded
+        # control socket with PowerShell Get-NetIPConfiguration.
+        self._cached_live: Dict[str, Any] = {}
+        self._cached_live_mono = 0.0
 
     # -- lifecycle --
 
@@ -817,6 +821,15 @@ class NetworkGuard:
         conn = check_connectivity()
         # Surface watch always needs adapters for auto_restore_network + dashboard.
         live_adapters = collect_adapters()
+        live_drives = collect_mapped_drives()
+        live_fw = collect_firewall()
+        self._cached_live = {
+            "adapters": live_adapters,
+            "mapped_drives": live_drives,
+            "firewall": live_fw,
+            "connectivity": conn,
+        }
+        self._cached_live_mono = time.time()
         conn["_adapters"] = live_adapters if self._maybe_net_change(baseline, conn) else None
         netdiff = diff_connectivity(baseline, conn)
 
@@ -1244,6 +1257,10 @@ class NetworkGuard:
     # -- status --
 
     def status(self) -> dict:
+        """Fast STATUS snapshot — uses detect-loop cache, no PowerShell.
+
+        Full live collect belongs on `list_baseline` / `diff_now` (commands).
+        """
         base = self._last_baseline or load_baseline() or {}
         age = None
         try:
@@ -1252,25 +1269,29 @@ class NetworkGuard:
                 age = int((datetime.now(timezone.utc) - dt).total_seconds())
         except Exception:
             pass
-        live_adapters = []
-        live_drives = []
-        live_fw = {}
-        live_conn = {}
+        cached = dict(self._cached_live or {})
+        live_adapters = list(cached.get("adapters") or [])
+        live_drives = list(cached.get("mapped_drives") or [])
+        live_fw = dict(cached.get("firewall") or {})
+        live_conn = dict(cached.get("connectivity") or {})
         changes: List[dict] = []
         try:
-            live_adapters = collect_adapters()
-            live_drives = collect_mapped_drives()
-            live_fw = collect_firewall()
-            live_conn = check_connectivity()
-            changes = diff_network_surface(
-                base, live_adapters=live_adapters,
-                live_drives=live_drives, live_firewall=live_fw,
-            ) if base else []
+            if base and (live_adapters or live_drives or live_fw):
+                changes = diff_network_surface(
+                    base, live_adapters=live_adapters,
+                    live_drives=live_drives, live_firewall=live_fw,
+                )
         except Exception:
             pass
         with self._lock:
             suspended = len(self._suspended)
         maint = get_maintenance()
+        cache_age = None
+        try:
+            if self._cached_live_mono:
+                cache_age = int(time.time() - self._cached_live_mono)
+        except Exception:
+            pass
         return {
             "present": True,
             "enabled": bool(self.cfg.get("enabled", True)),
@@ -1284,12 +1305,12 @@ class NetworkGuard:
             "verified": verify_baseline(base) if base else False,
             "internet_ok": live_conn.get("internet_ok",
                                          (base.get("connectivity") or {}).get("internet_ok")),
-            "mapped_drives": len(live_drives if live_drives is not None
-                                 else (base.get("mapped_drives") or [])),
+            "mapped_drives": len(live_drives) if live_drives else len(base.get("mapped_drives") or []),
             "suspended_processes": suspended,
             "last_trigger_ts": self._last_trigger_ts,
             "drift": bool(changes),
             "drift_count": len(changes),
+            "live_cache_age_sec": cache_age,
             "auto_contain": bool(self.cfg.get("auto_contain", False)),
             "auto_restore": bool(self.cfg.get("auto_restore", False)),
             "auto_kill": bool(self.cfg.get("auto_kill", False)),

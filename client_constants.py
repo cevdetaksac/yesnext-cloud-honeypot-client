@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.12"  # system recovery + NG panel/auto-restore + maintenance
+VERSION = "4.9.13"  # STATUS hang fix (NG live cache) + 4.9.12 features
 
 
 CLIENT_VERSION = VERSION  # Main version constant

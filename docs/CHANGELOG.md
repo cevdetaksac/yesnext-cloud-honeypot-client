@@ -1,3 +1,6 @@
+# v4.9.13
+- **STATUS hang fix:** Network Guard / System Recovery `status()` artık STATUS soketinde PowerShell/`diff` çalıştırmaz (detect-loop cache). `list_network_baseline` / `network_diff` / `system_recovery_diff` zengin live için kullanılır. Tek iş parçacıklı `:58632` timeout’larını giderir.
+
 # v4.9.12
 - **System Recovery (contract 1.4.13):** saldırı yüzeyi allowlist — TaskMgr/Regedit/CMD policy, kritik servisler (VSS/wscsvc/EventLog/…), firewall profil state. İmzalı snapshot + drift watch (`system_recovery_drift`) + dashboard komutları `system_recovery_snapshot` / `list_system_recovery` / `system_recovery_diff` / `system_recovery_restore` (dry_run + confirm). Full registry dump yok. STATUS `system_recovery{}`. HKCU policy okuma/yazma SYSTEM daemon’da `HKEY_USERS\<interactive-SID>` üzerinden (saldırganın kilitlediği kullanıcı hive’ı).
 - **Network Guard dashboard panel (contract 1.4.14):** STATUS/`list_network_baseline` full live+golden adapters (IPv4/DNS/dhcp); `network_diff`; golden baseline zehirlenmez (periyodik yalnız connectivity); `auto_restore_network` default on (süreç contain hâlâ hard-off); IPv4 dhcp/static restore; bilinçli IP değişiminde önce `network_snapshot`.

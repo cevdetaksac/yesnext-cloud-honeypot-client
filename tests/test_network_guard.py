@@ -231,6 +231,8 @@ class TestStatus(unittest.TestCase):
         self.assertEqual(st["suspended_processes"], 0)
         self.assertIn("live", st)
         self.assertIn("baseline", st)
+        # STATUS must not require live collectors (cache may be empty)
+        self.assertEqual(st.get("live", {}).get("adapters"), [])
 
 
 class TestSurfaceDiff(unittest.TestCase):

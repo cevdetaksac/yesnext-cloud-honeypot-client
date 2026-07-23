@@ -807,11 +807,8 @@ class SystemRecoveryGuard:
 
     def status(self) -> dict:
         info = list_snapshots()
-        changes = []
-        try:
-            changes = diff_against()
-        except Exception:
-            pass
+        # STATUS path must stay fast — skip live reg/service/firewall scan here.
+        # Operators use system_recovery_diff for full drift.
         return {
             "present": True,
             "enabled": self.enabled,
@@ -819,8 +816,8 @@ class SystemRecoveryGuard:
             "baseline_age_sec": info.get("baseline_age_sec"),
             "last_snapshot_at": info.get("captured_at"),
             "verified": info.get("verified"),
-            "drift": bool(changes),
-            "drift_count": len(changes),
+            "drift": None,
+            "drift_count": None,
         }
 
     def snapshot_now(self) -> dict:

@@ -172,15 +172,32 @@ $graceMs = 50
 if (-not $Force) { $graceMs = 150 }
 Start-Sleep -Milliseconds $graceMs
 
-$maxRounds = 3
+$maxRounds = 5
 $round = 0
 do {
     $round++
     Write-Host "[KILL] terminate round $round..."
     Stop-HoneypotProcessesFast
+    # Also stop any process whose image lives under the install dir (locks _internal\*.pyd).
+    try {
+        $roots = @(
+            (Join-Path ${env:ProgramFiles} "YesNext\Cloud Honeypot Client"),
+            (Join-Path ${env:ProgramFiles} "YesNext\CloudHoneypotClient")
+        )
+        foreach ($root in $roots) {
+            if (-not $root -or -not (Test-Path $root)) { continue }
+            $needle = $root.ToLowerInvariant()
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+                $ep = [string]($_.ExecutablePath)
+                if ($ep -and $ep.ToLowerInvariant().StartsWith($needle)) {
+                    try { & taskkill.exe /F /T /PID $_.ProcessId 2>$null | Out-Null } catch {}
+                }
+            }
+        }
+    } catch {}
     $left = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
     if ($left.Count -eq 0) { break }
-    Start-Sleep -Milliseconds 80
+    Start-Sleep -Milliseconds 120
 } while ($round -lt $maxRounds)
 
 $left = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)

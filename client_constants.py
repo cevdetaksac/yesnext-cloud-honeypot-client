@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.21"  # RD console Winlogon / pre-logon mirror
+VERSION = "4.9.22"  # Installer: rename locked _internal aside (no FileInUse stall)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

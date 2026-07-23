@@ -491,6 +491,20 @@ if (-not (Wait-ProcessesGone -TimeoutSec 5)) {
 Write-UpLog "Processes gone - settling 0.8s before installer..."
 Start-Sleep -Milliseconds 800
 
+# Rename locked onedir trees aside before NSIS extract (avoids FileInUse dialogs).
+try {
+    $prep = Join-Path $PSScriptRoot "prepare-install-dir.ps1"
+    $kill = Join-Path $PSScriptRoot "kill-honeypot.ps1"
+    $installDir = Join-Path ${env:ProgramFiles} "YesNext\Cloud Honeypot Client"
+    if (Test-Path $prep) {
+        Write-UpLog "prepare-install-dir.ps1..."
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $prep -InstallDir $installDir -KillScript $kill
+        Write-UpLog "prepare-install-dir exit=$LASTEXITCODE"
+    }
+} catch {
+    Write-UpLog "WARN: prepare-install-dir failed: $($_.Exception.Message)"
+}
+
 $argList = @()
 if ($Silent) {
     $argList = @("/S", "/NCRC")

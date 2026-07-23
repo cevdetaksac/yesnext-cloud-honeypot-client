@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 9
-!define VERSIONBUILD 21
+!define VERSIONBUILD 22
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -244,11 +244,25 @@ Function PreInstallKillFast
     InitPluginsDir
     SetOutPath "$PLUGINSDIR"
     File "scripts\kill-honeypot.ps1"
+    File "scripts\prepare-install-dir.ps1"
 
     DetailPrint "[PRE-KILL] Stopping tasks + DACL-protected processes..."
     nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\kill-honeypot.ps1" -Force'
     Pop $0
     DetailPrint "[PRE-KILL] kill-honeypot.ps1 exit code: $0"
+FunctionEnd
+
+; Move locked onedir trees aside so File /r never hits Abort/Retry/Ignore.
+Function PrepareInstallDirForOverwrite
+    DetailPrint "[PREP-DIR] Making install dir writable (rename locked _internal)..."
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File "scripts\kill-honeypot.ps1"
+    File "scripts\prepare-install-dir.ps1"
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\prepare-install-dir.ps1" -InstallDir "$INSTDIR" -KillScript "$PLUGINSDIR\kill-honeypot.ps1"'
+    Pop $0
+    DetailPrint "[PREP-DIR] prepare-install-dir.ps1 exit code: $0"
+    Sleep 200
 FunctionEnd
 
 ; ===================================================================
@@ -389,6 +403,10 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     !insertmacro LOG "[PREP] Step 2 - Killing honeypot processes..."
     Call KillHoneypotProcesses
 
+    ; Step 3: Rename locked _internal/exe aside + Defender exclude BEFORE extract
+    !insertmacro LOG "[PREP] Step 3 - Prepare install dir for overwrite..."
+    Call PrepareInstallDirForOverwrite
+
     !insertmacro LOG "[PHASE 1] Pre-installation cleanup complete."
 
     ; =================================================================
@@ -397,6 +415,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     !insertmacro LOG "[PHASE 2] Starting file installation..."
     !insertmacro LOG "[INSTALL] Target directory: $INSTDIR"
     SetOutPath $INSTDIR
+    SetOverwrite on
 
     ; Install main files (onedir: exe + _internal next to it)
     !insertmacro LOG "[FILES] Installing application files (onedir)..."
@@ -409,6 +428,7 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=README.md "dist\README.md"
     CreateDirectory "$INSTDIR\scripts"
     File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
+    File /oname=scripts\prepare-install-dir.ps1 "scripts\prepare-install-dir.ps1"
     File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
     File /oname=scripts\memory_restart.ps1 "memory_restart.ps1"
     !insertmacro LOG "[FILES] Application files installed (exe + _internal)."
@@ -418,9 +438,9 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     ; =================================================================
     !insertmacro LOG "[PHASE 3] Starting post-installation configuration..."
 
-    ; Windows Defender exclusions — fire-and-forget (Add-MpPreference can hang
-    ; forever under nsExec::Exec and block silent self-update Wait).
-    !insertmacro LOG "[CONFIG] Adding Defender exclusions (async)..."
+    ; Windows Defender exclusions — already attempted in prepare-install-dir;
+    ; refresh async (Add-MpPreference can hang under nsExec::Exec).
+    !insertmacro LOG "[CONFIG] Refreshing Defender exclusions (async)..."
     nsExec::Exec 'cmd /c start "" /b powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try{Add-MpPreference -ExclusionPath \"$INSTDIR\" -Force -EA SilentlyContinue;Add-MpPreference -ExclusionProcess \"$INSTDIR\honeypot-client.exe\" -Force -EA SilentlyContinue}catch{}"'
 
     ; Create uninstaller
@@ -515,6 +535,7 @@ Section "Uninstall"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\scripts\kill-honeypot.ps1"
+    Delete "$INSTDIR\scripts\prepare-install-dir.ps1"
     Delete "$INSTDIR\scripts\update-and-install.ps1"
     Delete "$INSTDIR\scripts\memory_restart.ps1"
     RMDir "$INSTDIR\scripts"

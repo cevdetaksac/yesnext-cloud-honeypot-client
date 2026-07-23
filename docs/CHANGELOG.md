@@ -1,3 +1,6 @@
+# v4.9.22
+- **Installer FileInUse fix:** Before extract, kill install-dir processes, add Defender exclusion, and **rename** locked `_internal` / `honeypot-client.exe` aside (`.stale_*`) so NSIS never stalls on Abort/Retry/Ignore for `servicemanager.pyd` etc. `prepare-install-dir.ps1` + stronger `kill-honeypot.ps1`.
+
 # v4.9.21
 - **Remote Desktop Winlogon / pre-logon (contract 1.4.21):** When no interactive user is logged on, mirror console `WinSta0`/`Winlogon` so operators can type credentials on the stream. `list_sessions` synthesizes `pre_logon` console row; `remote_session_prepare` defaults to Winlogon probe instead of `UNSUPPORTED` (`prefer=existing` keeps old gate). Input attaches to Winlogon; switches to Default after logon.
 

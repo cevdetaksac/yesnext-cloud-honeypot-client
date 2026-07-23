@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.13"  # STATUS hang fix (NG live cache) + 4.9.12 features
+VERSION = "4.9.14"  # VSS delete intent immediate quarantine (contract 1.4.16)
 
 
 CLIENT_VERSION = VERSION  # Main version constant
@@ -438,7 +438,7 @@ RANSOMWARE_CANARY_CHECK_INTERVAL = 30     # Canary integrity check (seconds)
 # Soft single-file MODIFIED debounce (all paths) — hygiene §3 / 30 dk loop
 CANARY_SOFT_DEBOUNCE_SEC = 1800
 
-RANSOMWARE_PROCESS_CHECK_INTERVAL = 5     # Check suspicious processes every 5s
+RANSOMWARE_PROCESS_CHECK_INTERVAL = 2     # Suspicious process poll (VSS wipe race)
 RANSOMWARE_VSS_CHECK_INTERVAL = 120       # Check VSS shadow copies every 2min
 ENABLE_RANSOMWARE_SHIELD = get_from_config("ransomware_shield.enabled", True)
 

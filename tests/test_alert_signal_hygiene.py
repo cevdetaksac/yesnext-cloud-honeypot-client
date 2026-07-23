@@ -34,6 +34,23 @@ class TestVssInventoryHygiene(unittest.TestCase):
         self.assertTrue(is_vss_delete_cmdline("vssadmin delete shadows /all"))
         self.assertFalse(is_vss_inventory_cmdline("vssadmin delete shadows /all"))
 
+    def test_vss_delete_intent_arms_quarantine_without_ifeo(self):
+        alerts = []
+        shield = RansomwareShield(on_alert=lambda a: alerts.append(a))
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0)
+            with mock.patch.object(shield, "_apply_ifeo") as ifeo:
+                shield._respond_vss_delete_intent(
+                    "vssadmin.exe", 4242,
+                    "vssadmin delete shadows /all",
+                    "VSS shadow delete", 100,
+                )
+                ifeo.assert_not_called()
+        self.assertTrue(shield._quarantine.get("active"))
+        self.assertEqual(shield._quarantine.get("trigger"), "vss_delete_intent")
+        types = [a.get("threat_type") for a in alerts]
+        self.assertIn("ransomware_vss_delete_intent", types)
+
     def test_process_monitor_skips_list_shadows(self):
         alerts = []
         shield = RansomwareShield(on_alert=lambda a: alerts.append(a))

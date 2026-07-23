@@ -110,6 +110,13 @@ _PROTECTED_IMAGES = {
     "startmenuexperiencehost.exe", "textinputhost.exe",
 }
 
+# Admin tools used in VSS wipe TTPs — kill + quarantine arm OK; NEVER IFEO
+# (would break our own `vssadmin list shadows` / recovery tooling).
+_NO_IFEO_ADMIN_TOOLS = {
+    "vssadmin.exe", "wmic.exe", "powershell.exe", "pwsh.exe",
+    "cmd.exe", "wbadmin.exe", "diskshadow.exe", "conhost.exe",
+}
+
 # Suspicious file extensions commonly used by ransomware
 SUSPICIOUS_EXTENSIONS: Set[str] = {
     ".encrypted", ".locked", ".crypted", ".crypt",
@@ -1200,25 +1207,146 @@ class RansomwareShield:
                 ),
             })
 
-        # For VSS deletion — trigger emergency lockdown
-        if score >= 95 and self.auto_response:
+        # VSS wipe intent (delete shadows / WMI delete) — kill + quarantine NOW.
+        # Do NOT wait for shadow-count drop (≤120s) and do NOT IFEO vssadmin.exe.
+        # HP-BLOCK (firewall IP) is separate; it does not "block VSS delete".
+        if score >= 95 and (
+            is_vss_delete_cmdline(cmdline)
+            or "shadow" in (reason or "").lower()
+            or "vss" in (reason or "").lower()
+            or "backup deletion" in (reason or "").lower()
+        ):
             try:
-                log(f"[RANSOMWARE-SHIELD] Emergency lockdown triggered by: {reason}")
-                # Kill the suspicious process first
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", str(pid)],
-                        capture_output=True, timeout=5,
-                        creationflags=CREATE_NO_WINDOW,
-                    )
-                except Exception:
-                    pass
+                self._respond_vss_delete_intent(pname, pid, cmdline, reason, score)
+            except Exception as e:
+                log(f"[RANSOMWARE-SHIELD] vss_delete_intent response failed: {e}")
+        elif score >= 95:
+            # Other critical cmdline — best-effort kill only
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    capture_output=True, timeout=5,
+                    creationflags=CREATE_NO_WINDOW,
+                )
             except Exception:
                 pass
 
-        # Yüksek skorlu tespit — aktif şüpheli IP'leri engelle
+        # Yüksek skorlu tespit — aktif şüpheli IP'leri engelle (firewall HP-BLOCK)
         if score >= 90:
             self._block_suspicious_ips(f"suspicious process: {pname} — {reason}")
+
+    def _respond_vss_delete_intent(
+        self,
+        pname: str,
+        pid: int,
+        cmdline: str,
+        reason: str,
+        score: int,
+    ) -> None:
+        """Immediate response to VSS wipe TTP — contract ≥1.4.16.
+
+        1) taskkill the delete process
+        2) arm ransomware quarantine (dashboard/GUI) without waiting for count drop
+        3) never IFEO admin tools (vssadmin/wmic/powershell/cmd/wbadmin)
+        """
+        killed = False
+        try:
+            r = subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                capture_output=True, timeout=5,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            killed = r.returncode == 0
+        except Exception:
+            killed = False
+
+        image = (pname or "").lower()
+        allow_ifeo = bool(image) and image not in _PROTECTED_IMAGES and image not in _NO_IFEO_ADMIN_TOOLS
+
+        with self._quarantine_lock:
+            entries = list(self._quarantine.get("entries") or [])
+            self._quarantine = {
+                "active": True,
+                "locked_at": self._quarantine.get("locked_at")
+                or datetime.now().isoformat(),
+                "trigger": "vss_delete_intent",
+                "entries": entries,
+            }
+            known = {
+                (e.get("image") or "").lower()
+                for e in entries
+                if e.get("image")
+            }
+            if image and image not in known:
+                ifeo_ok = False
+                if allow_ifeo:
+                    ifeo_ok = bool(self._apply_ifeo(image))
+                    if ifeo_ok:
+                        self._quarantine_images.add(image)
+                entries.append({
+                    "image": image,
+                    "path": "",
+                    "pid": pid,
+                    "cmdline": (cmdline or "")[:300],
+                    "sha256": "",
+                    "ifeo": bool(ifeo_ok),
+                    "at": datetime.now().isoformat(),
+                    "trigger": "vss_delete_intent",
+                    "reason": reason,
+                    "killed": bool(killed),
+                })
+                self._quarantine["entries"] = entries
+            self._stats["quarantine_active"] = True
+            self._stats["quarantine_entries"] = len(self._quarantine.get("entries") or [])
+            if killed:
+                self._stats["quarantine_kills"] = (
+                    int(self._stats.get("quarantine_kills") or 0) + 1
+                )
+            self._persist_quarantine()
+
+        log(
+            f"[RANSOMWARE-SHIELD] VSS delete intent: kill={killed} "
+            f"pid={pid} image={image} quarantine=armed ifeo={allow_ifeo}"
+        )
+
+        if self.on_alert:
+            self.on_alert({
+                "event_type": "vss_delete_intent",
+                "threat_type": "ransomware_vss_delete_intent",
+                "severity": "critical",
+                "threat_score": min(100, max(int(score), 95)),
+                "force_urgent": True,
+                "suppress_local_notify": False,
+                "recommended_action": "review_quarantine",
+                "auto_response_taken": (
+                    ["taskkill", "quarantine_arm"]
+                    + (["ifeo"] if allow_ifeo else [])
+                ),
+                "details": {
+                    "process": pname,
+                    "pid": pid,
+                    "cmdline": (cmdline or "")[:300],
+                    "reason": reason,
+                    "killed": bool(killed),
+                    "quarantine_active": True,
+                },
+                "description": (
+                    f"VSS silme girişimi (intent) — gölge kopya sayısı beklenmeden "
+                    f"müdahale. Süreç: {pname} PID={pid}. Sebep: {reason}. "
+                    f"killed={killed}."
+                ),
+                "system_context": {
+                    "ransomware": {
+                        "trigger": "vss_delete_intent",
+                        "suspects": [{
+                            "pid": pid,
+                            "image": pname,
+                            "cmdline": (cmdline or "")[:300],
+                            "state": "killed" if killed else "observed",
+                        }],
+                    }
+                },
+            })
 
     # ── Katman 4: VSS Monitor ─────────────────────────────────────
 
@@ -1501,6 +1629,15 @@ class RansomwareShield:
                 image = (s.get("image") or "").lower()
                 if not image or image in _PROTECTED_IMAGES:
                     continue
+                if image in _NO_IFEO_ADMIN_TOOLS:
+                    # Kill only — never IFEO admin VSS tools
+                    pid = s.get("pid")
+                    if pid and self._kill_pid(int(pid)):
+                        actions.append(f"kill:{pid}:{image}")
+                        self._stats["quarantine_kills"] = (
+                            int(self._stats.get("quarantine_kills") or 0) + 1
+                        )
+                    continue
                 pid = s.get("pid")
                 if pid:
                     if self._kill_pid(int(pid)):
@@ -1687,6 +1824,8 @@ class RansomwareShield:
         """IFEO Debugger stub — process fails to start (reversible on unlock)."""
         image = (image or "").strip()
         if not image or image.lower() in _PROTECTED_IMAGES:
+            return False
+        if image.lower() in _NO_IFEO_ADMIN_TOOLS:
             return False
         try:
             import winreg

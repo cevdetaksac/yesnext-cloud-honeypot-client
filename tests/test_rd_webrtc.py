@@ -60,6 +60,10 @@ class FakeMedia:
         self.frames.append((jpeg, metadata))
         return self.active
 
+    def publish_raw(self, rgb, width, height, metadata=None):
+        self.frames.append(("raw", width, height, metadata))
+        return self.active
+
     def handle_signal(self, message):
         self.signals.append(message)
         return {"accepted": True, "action": message["action"]}
@@ -252,13 +256,23 @@ class TestFallbackAndMailbox(unittest.TestCase):
         first = mailbox.publish(b"one", {"seq": 1})
         mailbox.publish(b"two", {"seq": 2})
         latest = mailbox.latest()
-        self.assertEqual(latest[1], b"two")
-        self.assertEqual(latest[2]["seq"], 2)
+        self.assertEqual(latest[1], "jpeg")
+        self.assertEqual(latest[2], b"two")
+        self.assertEqual(latest[3]["seq"], 2)
         self.assertEqual(mailbox.coalesced, 1)
         self.assertIsNone(mailbox.latest(latest[0]))
         mailbox.publish(b"three", {"seq": 3})
         self.assertEqual(mailbox.coalesced, 1)  # previous frame was consumed
         self.assertGreater(latest[0], first)
+
+    def test_raw_mailbox_payload_kind(self):
+        mailbox = NewestFrameMailbox()
+        mailbox.publish_raw(b"\x00" * 12, 2, 2, {"seq": 9})
+        latest = mailbox.latest()
+        self.assertEqual(latest[1], "raw")
+        self.assertEqual(latest[2]["width"], 2)
+        self.assertEqual(latest[2]["height"], 2)
+        self.assertEqual(latest[3]["seq"], 9)
 
 
 class TestMediaReadiness(unittest.TestCase):
@@ -299,9 +313,22 @@ class TestMediaReadiness(unittest.TestCase):
         with transport._state_lock:
             transport._recompute_media_state_locked()
         self.assertTrue(transport.publish_frame(JPEG, {"seq": 2}))
-        self.assertEqual(transport.mailbox.latest()[2]["seq"], 2)
+        self.assertEqual(transport.mailbox.latest()[3]["seq"], 2)
         self.assertTrue(transport.status()["active"])
         self.assertEqual(transport.status()["connection_state"], "connected")
+
+    def test_raw_enters_mailbox_when_media_ready(self):
+        transport = self.make_transport()
+        transport._pc_connection_state = "connected"
+        transport._ice_state = "connected"
+        with transport._state_lock:
+            transport._recompute_media_state_locked()
+        rgb = b"\x01\x02\x03" * (4 * 3)
+        self.assertTrue(transport.publish_raw(rgb, 4, 3, {"seq": 7}))
+        latest = transport.mailbox.latest()
+        self.assertEqual(latest[1], "raw")
+        self.assertEqual(latest[2]["width"], 4)
+        self.assertEqual(latest[3]["seq"], 7)
 
     def test_ice_checking_timeout_falls_back_and_closes_peer(self):
         fallback_errors = []

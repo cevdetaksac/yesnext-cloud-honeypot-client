@@ -1,3 +1,6 @@
+# v4.9.20
+- **Remote Desktop smoothness (contract 1.4.20):** WebRTC path uses raw RGB mailbox (no JPEG double-encode); HW H.264 when FFmpeg exposes nvenc/qsv/amf else x264 ultrafast+zerolatency; idle unchanged-frame skip; capture ~45 fps on media; move rate 120/s; critical ACK 80 ms; adaptive JPEG knobs do not thrash helper while WebRTC connected; `media.encoder` / `target_bitrate_bps` telemetry.
+
 # v4.9.19
 - **Defense policy sync:** ignore non-defense / invalid cloud defense_rules_sig; bad sig applies unsigned (no false tamper_observe).
 

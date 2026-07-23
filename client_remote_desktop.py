@@ -41,12 +41,12 @@ MAX_FRAME_BYTES = 2 * 1024 * 1024
 IDLE_STOP_SECONDS = 300
 INPUT_RATE_LIMIT = 60                 # legacy alias (kept for backward compat)
 INPUT_RATE_WINDOW = 1.0
-MOVE_RATE_LIMIT = 60                  # absolute/relative pointer moves per window
+MOVE_RATE_LIMIT = 120                 # absolute/relative pointer moves per window
 MOVE_RATE_WINDOW = 1.0
 CRIT_RATE_LIMIT = 240                 # critical edges: tracked but never rejected
 HTTP_INPUT_POLL_SEC = 0.30            # WS down → poll fast (primary input path)
 HTTP_INPUT_POLL_SEC_WS = 2.0          # WS healthy → poll slowly (compat backup only)
-CRIT_ACK_TIMEOUT = 0.2               # short synchronous ACK for critical edges only
+CRIT_ACK_TIMEOUT = 0.08              # short synchronous ACK for critical edges only
 OUT_TEXT_MAXLEN = 32                  # retained control/meta frames (latest-frame queue)
 WS_RECONNECT_SEC = 3.0
 META_EVERY_N_FRAMES = 5
@@ -139,10 +139,12 @@ class RemoteDesktopStreamer:
         self._requested_quality = DEFAULT_QUALITY
         self._requested_max_width = DEFAULT_MAX_WIDTH
         # WebRTC capture pacing is independent from JPEG-era stream knobs.
-        self._media_fps = 30.0
+        self._media_fps = 45.0
         self._media_quality = 78
         self._media_mode_applied = False
         self._dxcam = None
+        self._last_raw_hash = b""
+        self._idle_skip_streak = 0
         self._adaptive = AdaptiveStreamController(
             DEFAULT_FPS, DEFAULT_QUALITY, DEFAULT_MAX_WIDTH
         )
@@ -549,6 +551,8 @@ class RemoteDesktopStreamer:
             pass
         self._dxcam = None
         self._media_session_id = ""
+        self._last_raw_hash = b""
+        self._idle_skip_streak = 0
         self._locked_encode_w = 0
         self._locked_encode_h = 0
         self._stop_persistent_helper()
@@ -659,7 +663,11 @@ class RemoteDesktopStreamer:
                 # Forward over the full-duplex helper channel. Moves are async
                 # (fire-and-forget); critical edges use a very short ACK only.
                 ok = bool(
-                    self._session_helper.send_input(dict(params), wait=not move_like)
+                    self._session_helper.send_input(
+                        dict(params),
+                        wait=not move_like,
+                        timeout=CRIT_ACK_TIMEOUT,
+                    )
                 )
                 if ok:
                     self._stats["inputs_applied"] += 1
@@ -936,6 +944,23 @@ class RemoteDesktopStreamer:
             return
         capture_started = time.monotonic()
 
+        # WebRTC connected + in-process capture: raw RGB → H.264 (no JPEG).
+        if self._media_ready() and not self._use_user_helper:
+            raw = self._grab_raw_rgb()
+            self._last_capture_mono = time.monotonic()
+            capture_elapsed = self._last_capture_mono - capture_started
+            self._adaptive.observe_capture(capture_elapsed)
+            self._adaptive_tick()
+            if raw is not None:
+                rgb, w, h = raw
+                if self._should_skip_unchanged_frame(rgb):
+                    return
+                self._seq += 1
+                seq = self._seq
+                if self._dispatch_raw_frame(rgb, w, h, seq):
+                    return
+                # Media publish failed — fall through to JPEG for WS/HTTP.
+
         if self._use_user_helper:
             if not self._persistent_helper_connected():
                 if not self._start_persistent_helper():
@@ -1004,11 +1029,74 @@ class RemoteDesktopStreamer:
                 self._stats["black_frames"] += 1
                 return
 
+        # Helper JPEG while WebRTC live: decode once → raw mailbox (no double encode).
+        if self._media_ready() and self._use_user_helper:
+            try:
+                from PIL import Image
+                rgb_img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+                if self._should_skip_unchanged_frame(rgb_img.tobytes()):
+                    return
+                self._seq += 1
+                seq = self._seq
+                if self._dispatch_raw_frame(
+                    rgb_img.tobytes(), rgb_img.width, rgb_img.height, seq
+                ):
+                    return
+            except Exception:
+                pass
+
         self._seq += 1
         seq = self._seq
         self._last_good_jpeg = jpeg
         self._last_good_wh = (w, h)
         self._dispatch_frame(token, jpeg, w, h, seq)
+
+    def _dispatch_raw_frame(self, rgb, w: int, h: int, seq: int) -> bool:
+        """Publish raw RGB into WebRTC mailbox. True if media accepted it."""
+        media_metadata = {
+            "seq": int(seq),
+            "width": int(w),
+            "height": int(h),
+            "capture_mono_ms": int(self._last_capture_mono * 1000),
+            "path": "raw",
+        }
+        try:
+            if self._media.publish_raw(rgb, w, h, media_metadata):
+                self._transport = "webrtc"
+                self._capture_w, self._capture_h = int(w), int(h)
+                self._last_activity = time.time()
+                self._stats["frames_sent"] += 1
+                with self._out_lock:
+                    self._pending_frame = None
+                if self._seq % META_EVERY_N_FRAMES == 0:
+                    self._enqueue_meta(force=True)
+                return True
+        except Exception as exc:
+            self._on_media_fallback(str(exc))
+        return False
+
+    def _should_skip_unchanged_frame(self, rgb) -> bool:
+        """Skip publish when desktop is static so encoder stays near-idle."""
+        import hashlib
+        try:
+            if hasattr(rgb, "tobytes"):
+                data = rgb.tobytes()
+            else:
+                data = bytes(rgb) if not isinstance(rgb, (bytes, bytearray)) else rgb
+            # Sample stride keeps hash cheap on 1080p RGB.
+            step = max(1, len(data) // 65536)
+            digest = hashlib.blake2b(data[::step], digest_size=16).digest()
+        except Exception:
+            return False
+        if digest == self._last_raw_hash and self._idle_skip_streak < 90:
+            self._idle_skip_streak += 1
+            self._stats["frames_coalesced"] = (
+                int(self._stats.get("frames_coalesced") or 0) + 1
+            )
+            return True
+        self._last_raw_hash = digest
+        self._idle_skip_streak = 0
+        return False
 
     def _dispatch_frame(self, token: str, jpeg: bytes, w: int, h: int, seq: int) -> None:
         """Route one frame. WS healthy → WS only (sent + counted on WS thread).
@@ -1070,7 +1158,10 @@ class RemoteDesktopStreamer:
     def _adaptive_tick(self) -> None:
         changed = self._adaptive.evaluate()
         if changed:
-            self._apply_effective_settings(changed, notify_helper=True)
+            # While WebRTC is live, keep local JPEG knobs warm for fallback but
+            # do not thrash the session helper with JPEG quality/fps churn.
+            notify = not self._media_ready()
+            self._apply_effective_settings(changed, notify_helper=notify)
 
     def _apply_effective_settings(
         self, settings: dict, *, notify_helper: bool = True
@@ -1258,13 +1349,13 @@ class RemoteDesktopStreamer:
         )
         return tw, th
 
-    def _grab_jpeg(self):
-        """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
+    def _capture_screen_image(self):
+        """Capture primary screen → PIL RGB Image (no encode). Returns (img, method)."""
         try:
             from PIL import Image
         except ImportError:
             log("[REMOTE-DESKTOP] Pillow (PIL) not available")
-            return None, 0, 0
+            return None, "none"
 
         # Ensure this thread is on the interactive input desktop (RDP black-BitBlt fix)
         self._attach_input_desktop()
@@ -1343,7 +1434,7 @@ class RemoteDesktopStreamer:
 
         if img is None:
             log("[REMOTE-DESKTOP] all in-process capture methods returned None")
-            return None, 0, 0
+            return None, "none"
 
         if self._is_mostly_black(img):
             self._stats["black_frames"] += 1
@@ -1363,7 +1454,7 @@ class RemoteDesktopStreamer:
         if native_w <= 0 or native_h <= 0:
             self._screen_w, self._screen_h = img.size
 
-        _fps, effective_quality, effective_max_width = (
+        _fps, _effective_quality, effective_max_width = (
             self._effective_capture_settings()
         )
         target = self._resolve_encode_size(
@@ -1378,13 +1469,32 @@ class RemoteDesktopStreamer:
             img = img.resize(target, resample)
 
         self._capture_w, self._capture_h = img.size
-        rgb = img.convert("RGB")
+        return img.convert("RGB"), method
 
+    def _grab_raw_rgb(self):
+        """Capture → resized RGB bytes for WebRTC (no JPEG). Returns (bytes,w,h) or None."""
+        img, method = self._capture_screen_image()
+        if img is None or "+black" in (method or ""):
+            return None
+        return img.tobytes(), img.width, img.height
+
+    def _grab_jpeg(self):
+        """Capture primary screen → resize → JPEG. Avoids Session-0 black frames."""
+        img, method = self._capture_screen_image()
+        if img is None:
+            return None, 0, 0
+        if "+black" in (method or ""):
+            # Preserve prior behavior: still return a JPEG so black-recovery logic runs.
+            pass
+
+        _fps, effective_quality, _effective_max_width = (
+            self._effective_capture_settings()
+        )
         quality = effective_quality
         jpeg = None
         for _ in range(6):
             buf = io.BytesIO()
-            rgb.save(buf, format="JPEG", quality=quality, optimize=False, subsampling=2)
+            img.save(buf, format="JPEG", quality=quality, optimize=False, subsampling=2)
             data = buf.getvalue()
             if len(data) <= TARGET_FRAME_BYTES or quality <= 22:
                 if len(data) <= MAX_FRAME_BYTES:

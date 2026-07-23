@@ -66,6 +66,10 @@ class FakeConnectedMedia:
         self.frames.append((jpeg, metadata))
         return True
 
+    def publish_raw(self, rgb, width, height, metadata=None):
+        self.frames.append(("raw", width, height, metadata))
+        return True
+
     def status(self):
         return {
             "available": True,
@@ -140,7 +144,7 @@ class TestTransportSelection(unittest.TestCase):
         rd._fps = 4.0
         rd._quality = 25
         fps, quality, _width = rd._effective_capture_settings()
-        self.assertEqual(fps, 30.0)
+        self.assertEqual(fps, 45.0)
         self.assertEqual(quality, 78)
 
     def test_ws_healthy_sends_no_http(self):

@@ -209,7 +209,7 @@ class PersistentSessionHelper:
                 return None
             return (self._frame_id,) + self._latest
 
-    def send_input(self, event: dict, timeout: float = 0.2, wait: bool = False) -> bool:
+    def send_input(self, event: dict, timeout: float = 0.08, wait: bool = False) -> bool:
         """Forward an input event to the helper.
 
         wait=False (moves): fire-and-forget, returns as soon as the frame is

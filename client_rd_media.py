@@ -126,7 +126,12 @@ def build_ice_configuration(validated: list, runtime: dict):
 
 
 class NewestFrameMailbox:
-    """One-slot thread-safe mailbox; publishing coalesces stale frames."""
+    """One-slot thread-safe mailbox; publishing coalesces stale frames.
+
+    Payload kinds:
+      - \"jpeg\": bytes JPEG
+      - \"raw\": dict {\"rgb\": bytes|bytearray, \"width\": int, \"height\": int}
+    """
 
     def __init__(self):
         self._condition = threading.Condition()
@@ -137,6 +142,30 @@ class NewestFrameMailbox:
         self.closed = False
 
     def publish(self, jpeg: bytes, metadata: Optional[dict] = None) -> int:
+        return self._publish("jpeg", bytes(jpeg), metadata)
+
+    def publish_raw(
+        self,
+        rgb,
+        width: int,
+        height: int,
+        metadata: Optional[dict] = None,
+    ) -> int:
+        if hasattr(rgb, "tobytes"):
+            payload = {
+                "rgb": rgb.tobytes(),
+                "width": int(width),
+                "height": int(height),
+            }
+        else:
+            payload = {
+                "rgb": bytes(rgb),
+                "width": int(width),
+                "height": int(height),
+            }
+        return self._publish("raw", payload, metadata)
+
+    def _publish(self, kind: str, payload, metadata: Optional[dict] = None) -> int:
         with self._condition:
             if self.closed:
                 return self._generation
@@ -145,7 +174,8 @@ class NewestFrameMailbox:
             self._generation += 1
             self._latest = (
                 self._generation,
-                bytes(jpeg),
+                kind,
+                payload,
                 dict(metadata or {}),
             )
             self._condition.notify_all()
@@ -269,6 +299,9 @@ class OptionalMediaTransport:
     def publish_frame(self, _jpeg: bytes, _metadata: Optional[dict] = None) -> bool:
         return False
 
+    def publish_raw(self, _rgb, _width: int, _height: int, _metadata: Optional[dict] = None) -> bool:
+        return False
+
     def handle_signal(self, _message: dict) -> dict:
         return {"accepted": False, "error": "webrtc runtime unavailable"}
 
@@ -322,6 +355,8 @@ class AiortcMediaTransport(OptionalMediaTransport):
         self._offer_lock = None
         self._codec = ""
         self._preferred_codec = ""
+        self._encoder_label = ""
+        self._target_bitrate_bps = 2_500_000
         self._error = ""
         self._closing = False
         self._start_thread()
@@ -336,6 +371,11 @@ class AiortcMediaTransport(OptionalMediaTransport):
         }
 
     def status(self) -> dict:
+        try:
+            from client_rd_encoder import encoder_info
+            enc = encoder_info().get("label") or "aiortc"
+        except Exception:
+            enc = "aiortc"
         with self._state_lock:
             return {
                 "available": True,
@@ -344,10 +384,13 @@ class AiortcMediaTransport(OptionalMediaTransport):
                 "ice_state": self._ice_state,
                 "codec": self._codec,
                 "preferred_codec": self._preferred_codec,
+                "encoder": getattr(self, "_encoder_label", None) or enc,
+                "target_bitrate_bps": getattr(self, "_target_bitrate_bps", None),
                 "error": self._error,
                 "mailbox_coalesced": self.mailbox.coalesced,
                 "session_id": self._session_id,
                 "stream_id": self._stream_id,
+                "raw_path": True,
             }
 
     def publish_frame(self, jpeg: bytes, metadata: Optional[dict] = None) -> bool:
@@ -362,6 +405,20 @@ class AiortcMediaTransport(OptionalMediaTransport):
         if not media_ready:
             return False
         self.mailbox.publish(jpeg, metadata)
+        return True
+
+    def publish_raw(self, rgb, width: int, height: int, metadata: Optional[dict] = None) -> bool:
+        if not self.available:
+            return False
+        with self._state_lock:
+            media_ready = bool(
+                self.active
+                and self._pc_connection_state == "connected"
+                and self._ice_state in self._CONNECTED_ICE_STATES
+            )
+        if not media_ready:
+            return False
+        self.mailbox.publish_raw(rgb, width, height, metadata)
         return True
 
     def handle_signal(self, message: dict) -> dict:
@@ -523,6 +580,11 @@ class AiortcMediaTransport(OptionalMediaTransport):
         self._pc = pc
         self._session_id = session_id
         self._stream_id = stream_id
+        try:
+            from client_rd_encoder import ensure_aiortc_h264_patched
+            self._encoder_label = ensure_aiortc_h264_patched()
+        except Exception:
+            self._encoder_label = self._encoder_label or "aiortc"
         track_class = self._make_track_class()
         pc.addTrack(track_class(self.mailbox))
 
@@ -536,6 +598,12 @@ class AiortcMediaTransport(OptionalMediaTransport):
 
         @pc.on("datachannel")
         def data_channel(channel):
+            # Prefer low-latency input: drain promptly; ordered delivery retained.
+            try:
+                channel.bufferedAmountLowThreshold = 0
+            except Exception:
+                pass
+
             @channel.on("message")
             def message(payload):
                 self.route_data_channel_input(payload)
@@ -695,7 +763,9 @@ class AiortcMediaTransport(OptionalMediaTransport):
     def _make_track_class(self):
         runtime = self._runtime
 
-        class LatestJpegTrack(runtime["VideoStreamTrack"]):
+        class LatestFrameTrack(runtime["VideoStreamTrack"]):
+            """Prefer raw RGB mailbox frames; JPEG only as helper/fallback."""
+
             def __init__(self, mailbox):
                 super().__init__()
                 self.mailbox = mailbox
@@ -706,12 +776,36 @@ class AiortcMediaTransport(OptionalMediaTransport):
                 pts, time_base = await self.next_timestamp()
                 item = self.mailbox.latest(self.generation)
                 if item is None:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.005)
                     item = self.mailbox.latest(self.generation)
                 if item is not None:
-                    self.generation, jpeg, _metadata = item
-                    image = runtime["Image"].open(io.BytesIO(jpeg)).convert("RGB")
-                    self.last_frame = runtime["VideoFrame"].from_image(image)
+                    # New mailbox: (gen, kind, payload, meta)
+                    # Legacy tests may still publish 3-tuples — tolerate.
+                    if len(item) == 4:
+                        self.generation, kind, payload, _metadata = item
+                    else:
+                        self.generation, payload, _metadata = item
+                        kind = "jpeg"
+                    try:
+                        if kind == "raw" and isinstance(payload, dict):
+                            import numpy as np  # type: ignore
+                            w = int(payload.get("width") or 0)
+                            h = int(payload.get("height") or 0)
+                            rgb = payload.get("rgb") or b""
+                            if w > 0 and h > 0 and len(rgb) >= w * h * 3:
+                                arr = np.frombuffer(rgb, dtype=np.uint8).reshape(
+                                    (h, w, 3)
+                                ).copy()
+                                self.last_frame = runtime["VideoFrame"].from_ndarray(
+                                    arr, format="rgb24"
+                                )
+                        else:
+                            image = runtime["Image"].open(
+                                io.BytesIO(payload)
+                            ).convert("RGB")
+                            self.last_frame = runtime["VideoFrame"].from_image(image)
+                    except Exception:
+                        pass
                 if self.last_frame is None:
                     image = runtime["Image"].new("RGB", (800, 600), "black")
                     self.last_frame = runtime["VideoFrame"].from_image(image)
@@ -720,7 +814,7 @@ class AiortcMediaTransport(OptionalMediaTransport):
                 frame.time_base = time_base
                 return frame
 
-        return LatestJpegTrack
+        return LatestFrameTrack
 
     async def _close_pc(self):
         self._cancel_ice_checking_timeout()

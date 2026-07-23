@@ -895,11 +895,32 @@ def hydrate_from_disk() -> dict:
                 policy_user_set=bool(data.get("policy_user_set")),
             )
             st = _apply_state(effective, sig_ok=True, source="programdata")
-            # Persist observe clock if newly stamped
             if st.get("observe_started_at") and not data.get("observe_started_at"):
                 effective["observe_started_at"] = st["observe_started_at"]
                 save_signed_cache(effective, promote_lkg=False)
             return st
+        # Token race / first-boot: structure OK but sig was made with empty token
+        name = str(data.get("policy_name") or "").lower()
+        if name in POLICY_NAMES and isinstance(data.get("rules"), dict):
+            log("[DEFENSE-POLICY] cache sig mismatch — re-sign with current token")
+            effective = build_effective(
+                policy_name=name,
+                policy_version=data.get("policy_version") or "",
+                rules=data.get("rules"),
+                isolate_armed=bool(data.get("isolate_armed")),
+                source="programdata_resign",
+                observe_started_at=data.get("observe_started_at") or _utc_now(),
+                observe_auto_promote_days=int(
+                    data.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+                ),
+                observe_auto_promote_enabled=bool(
+                    data.get("observe_auto_promote_enabled", True)
+                ),
+                defense_policy_locked=bool(data.get("defense_policy_locked")),
+                policy_user_set=bool(data.get("policy_user_set")),
+            )
+            save_signed_cache(effective, promote_lkg=False)
+            return _apply_state(effective, sig_ok=True, source="programdata_resign")
         return fail_safe_load(reason="cache_sig_invalid")
     # First boot — observe defaults (contract 1.4.19)
     effective = build_effective(

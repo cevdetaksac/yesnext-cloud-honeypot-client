@@ -1,3 +1,6 @@
+# v4.9.18
+- **Defense policy cache:** HMAC fail due to empty-token boot race ? re-sign with current token (`programdata_resign`) instead of false `tamper_observe`. Includes 4.9.17 observe default + auto-promote.
+
 # v4.9.17
 - **Defense Policy onboarding (contract 1.4.19):** Fresh install / empty cache defaults to **observe** (alerts on, no auto kill). Configurable auto-promote observe?balanced (default 3 days; lockable). GUI education for ?zleme/Denge/Tetikte + CTA. Never auto-opens paranoid/isolate. Cloud POST backup on promote.
 

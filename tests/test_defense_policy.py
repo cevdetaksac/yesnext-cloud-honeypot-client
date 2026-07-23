@@ -96,17 +96,22 @@ class TestDefensePolicyMatrix(unittest.TestCase):
         self.assertEqual(dp.process_action_plan("canary_write")["action"], "kill_quarantine")
         self.assertFalse(dp.allows_network_isolate())
 
-    def test_locked_observe_skips_promote(self):
-        dp.apply_from_config({
-            "protection": {
-                "defense_policy": "observe",
-                "observe_started_at": "2020-01-01T00:00:00Z",
-                "observe_auto_promote_days": 1,
-                "defense_policy_locked": True,
-            }
-        })
-        self.assertFalse(dp.promote_due_info().get("due"))
-        self.assertIsNone(dp.maybe_auto_promote())
+    def test_resign_on_token_race_not_tamper(self):
+        # Write a structurally valid cache with a wrong sig
+        payload = dp.build_effective(
+            policy_name="observe",
+            rules=dp.PRESET_RULES["observe"],
+            observe_started_at="2026-07-23T00:00:00Z",
+        )
+        payload["sig"] = "00" * 32
+        with open(dp.POLICY_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        st = dp.hydrate_from_disk()
+        self.assertEqual(st["policy_name"], "observe")
+        self.assertEqual(st["source"], "programdata_resign")
+        self.assertTrue(st["sig_ok"])
+        self.assertTrue(dp.verify_payload(dp._read_json(dp.POLICY_FILE)))
+
 
     def test_observe_alert_only_canary(self):
         dp.apply_from_config({

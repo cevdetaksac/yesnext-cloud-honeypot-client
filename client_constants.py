@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.24"  # Harden scripts ACL; no kill/update ps1 in Program Files
+VERSION = "4.9.25"  # Stop shipping client_*.py as plain datas in _internal
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -1,3 +1,6 @@
+# v4.9.25
+- **Source packing fix:** Stop copying `client_*.py` into `_internal` via PyInstaller `datas=` (they were world-readable source). Modules go into PYZ as bytecode via Analysis/`hiddenimports` only. Build fails if any `client_*.py` leaks into onedir.
+
 # v4.9.24
 - **Scripts ACL / attack surface:** Do not install `kill-honeypot.ps1` / `update-and-install.ps1` / `prepare-install-dir.ps1` under Program Files (installer embeds them in `$PLUGINSDIR` only). On upgrade, delete leftovers. `scripts\` (+ `_internal\scripts`) ACL = SYSTEM+Administrators only. Kill/update/memory_restart refuse non-elevated runs. Motor QUIT was already gated by operator_stop/update-lock.
 

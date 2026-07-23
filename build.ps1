@@ -96,6 +96,19 @@ try {
     & $PYTHON -m PyInstaller honeypot-client.spec --clean
     if ($LASTEXITCODE -eq 0) {
         Write-Host "   SUCCESS: Executable built successfully" -ForegroundColor Green
+        # Gate: our application modules must NOT appear as plain .py under onedir.
+        $onedirInternal = Join-Path (Get-Location) "dist\honeypot-client\_internal"
+        if (Test-Path $onedirInternal) {
+            $leaked = @(Get-ChildItem -Path $onedirInternal -Recurse -Filter "client_*.py" -File -ErrorAction SilentlyContinue)
+            $leaked += @(Get-ChildItem -Path $onedirInternal -Recurse -Filter "client.py" -File -ErrorAction SilentlyContinue)
+            if ($leaked.Count -gt 0) {
+                Write-Host "   ERROR: Plain Python sources leaked into _internal:" -ForegroundColor Red
+                $leaked | Select-Object -First 20 | ForEach-Object { Write-Host ("      " + $_.FullName) -ForegroundColor Red }
+                Write-Host "   Remove client_*.py from honeypot-client.spec datas= (use hiddenimports/PYZ)." -ForegroundColor Yellow
+                exit 1
+            }
+            Write-Host "   SUCCESS: No client_*.py sources in _internal (PYZ bytecode only)" -ForegroundColor Green
+        }
     } else {
         throw "PyInstaller failed"
     }

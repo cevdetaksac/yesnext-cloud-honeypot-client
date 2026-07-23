@@ -76,6 +76,8 @@ ALLOWED_COMMANDS: Set[str] = {
     "contain_user",  # IR: logoff + password reset (+ optional disable) in one shot
     "disable_all_users",  # IR panic: disable every local SAM user (excl. machine IDs)
     "kill_process", "suspend_process", "resume_process", "block_process",
+    "allow_process", "list_allowed_processes",
+    "isolate_host", "lift_isolation",
     "stop_service", "start_service", "restart_service", "disable_service",
     "emergency_lockdown", "lift_lockdown",
     "enable_lockdown", "disable_lockdown",  # aliases
@@ -111,6 +113,8 @@ _STREAM_COMMANDS = frozenset({
 # Incident-response: always fast poll + no rate limit (breach containment)
 _IR_URGENT_COMMANDS = frozenset({
     "kill_process", "suspend_process", "resume_process", "block_process",
+    "allow_process",
+    "isolate_host", "lift_isolation",
     "logoff_user", "contain_user",
     "block_ip", "unblock_ip",
     "disable_account", "disable_all_users", "reset_password",
@@ -162,6 +166,10 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "disable_all_users", "contain_user",
     # Process containment is only sent after explicit operator approval.
     "suspend_process",
+    "allow_process",
+    # Network isolate — P2; always confirm; client hard-rejects unsafe policy
+    "isolate_host",
+    "lift_isolation",
     # Disaster recovery (destructive / reboot) — server confirm + HMAC
     "create_user", "remote_logon", "set_autologon", "reboot",
     # Network Guard — mutating restore only (see network_restore_requires_confirm)
@@ -690,6 +698,7 @@ class RemoteCommandExecutor:
                 log(f"[REMOTE-CMD] ✅ {cmd['command_type']} — {result.get('message', 'OK')} ({source})")
             if cmd_type in (
                 "kill_process", "block_process", "suspend_process", "resume_process",
+                "allow_process", "isolate_host", "lift_isolation",
                 "logoff_user", "contain_user",
                 "reset_password", "disable_account", "enable_account",
                 "disable_all_users", "create_user",
@@ -2291,6 +2300,72 @@ class RemoteCommandExecutor:
                 "process_start_time": process.create_time(),
             },
         }
+
+    def _cmd_allow_process(self, params: dict) -> dict:
+        """Whitelist path/image/hash so matrix contain skips this identity (P0-3)."""
+        from client_defense_policy import allow_process
+        path = (params.get("path") or params.get("expected_path") or "").strip()
+        image = (
+            params.get("image")
+            or params.get("expected_image")
+            or params.get("process_name")
+            or ""
+        ).strip()
+        sha = (params.get("sha256") or params.get("hash") or "").strip()
+        reason = (params.get("reason") or "operator_allow").strip()
+        # Optional: also resume if pid given
+        resumed = None
+        if params.get("pid") is not None:
+            try:
+                resumed = self._cmd_resume_process(params)
+            except Exception as e:
+                resumed = {"success": False, "error": str(e)}
+        result = allow_process(path=path, image=image, sha256=sha, reason=reason)
+        if resumed is not None:
+            result["resume"] = resumed
+        return result
+
+    def _cmd_list_allowed_processes(self, params: dict) -> dict:
+        from client_defense_policy import load_allowlist
+        data = load_allowlist()
+        return {
+            "success": True,
+            "message": f"{len(data.get('entries') or [])} allowlist entries",
+            "data": data,
+        }
+
+    def _cmd_isolate_host(self, params: dict) -> dict:
+        """P2 stub with P0 hard-safety: reject unless paranoid + isolate_armed."""
+        from client_defense_policy import allows_network_isolate, reject_auto_isolate
+        if not allows_network_isolate():
+            return reject_auto_isolate(reason="isolate_host_command")
+        # Full isolate implementation is P2 — refuse until NG isolate path lands
+        return {
+            "success": False,
+            "error": "isolate_not_implemented",
+            "message": (
+                "Policy allows isolate but client P2 isolate_host path "
+                "is not enabled in this build (anti-bait: no partial cut)"
+            ),
+        }
+
+    def _cmd_lift_isolation(self, params: dict) -> dict:
+        """Best-effort lift: restore network baseline if previously isolated."""
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            # Try app attribute via health / lazy
+            return {
+                "success": False,
+                "error": "network_guard_unavailable",
+            }
+        try:
+            # Reuse mutating restore path (operator already confirmed)
+            return self._cmd_network_restore({
+                "dry_run": False,
+                "reason": params.get("reason") or "lift_isolation",
+            })
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _cmd_block_process(self, params: dict) -> dict:
         """Persist a path/name firewall-style block via Software Restriction / netsh is limited.

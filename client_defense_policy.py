@@ -1,0 +1,753 @@
+# -*- coding: utf-8 -*-
+"""Tiered Defense Policy — rule matrix, signed cache, anti-bait hard safety.
+
+Contract: honeypot-contract 1.4.18 · ROADMAP_TIERED_DEFENSE P0 · cloud/DEFENSE_POLICY.md
+Client target: ≥4.9.16
+
+Invariants (never violate):
+  - observe/balanced → never apply auto_isolate_network
+  - tamper / bad sig → LKG or observe (never escalate / never isolate)
+  - protected images never suspend/kill via matrix
+  - single canary ≠ network isolate
+  - N alerts ≠ auto-escalate to isolate
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import shutil
+import threading
+import time
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+try:
+    from client_constants import MACHINE_DATA_DIR, TOKEN_FILE
+except Exception:  # pragma: no cover
+    MACHINE_DATA_DIR = os.path.join(
+        os.environ.get("ProgramData", os.path.expanduser("~")),
+        "YesNext",
+        "CloudHoneypotClient",
+    )
+    TOKEN_FILE = os.path.join(MACHINE_DATA_DIR, "token.dat")
+
+try:
+    from client_helpers import log
+except Exception:  # pragma: no cover
+    def log(msg: str) -> None:
+        print(msg)
+
+
+POLICY_FILE = os.path.join(MACHINE_DATA_DIR, "defense_policy.json")
+POLICY_LKG_FILE = os.path.join(MACHINE_DATA_DIR, "defense_policy.lkg.json")
+ALLOWLIST_FILE = os.path.join(MACHINE_DATA_DIR, "defense_allowlist.json")
+SNAPSHOT_DIR = os.path.join(MACHINE_DATA_DIR, "session_snapshots")
+
+POLICY_NAMES = ("observe", "balanced", "paranoid")
+
+ACTIONS = (
+    "alert_only",
+    "inform_only",
+    "ask_operator",
+    "suspend_process",
+    "kill_quarantine",
+    "auto_isolate_network",
+)
+
+# Event keys in the wire matrix
+EVENT_CANARY_WRITE = "canary_write"
+EVENT_VSS_DELETION = "vss_deletion"
+EVENT_RANSOMWARE_CRITICAL = "ransomware_critical_process"
+EVENT_SUSPICIOUS_RDP = "suspicious_rdp"
+EVENT_HIGH_IO = "high_io_rate"
+EVENT_MASS_PASSWORD = "mass_password_change"
+EVENT_SURFACE_ADDITIVE = "network_surface_additive"
+
+PRESET_RULES: Dict[str, Dict[str, str]] = {
+    "observe": {
+        EVENT_CANARY_WRITE: "alert_only",
+        EVENT_VSS_DELETION: "alert_only",
+        EVENT_RANSOMWARE_CRITICAL: "alert_only",
+        EVENT_SUSPICIOUS_RDP: "alert_only",
+        EVENT_HIGH_IO: "alert_only",
+        EVENT_MASS_PASSWORD: "alert_only",
+        EVENT_SURFACE_ADDITIVE: "inform_only",
+    },
+    "balanced": {
+        EVENT_CANARY_WRITE: "kill_quarantine",
+        EVENT_VSS_DELETION: "kill_quarantine",
+        EVENT_RANSOMWARE_CRITICAL: "suspend_process",
+        EVENT_SUSPICIOUS_RDP: "alert_only",
+        EVENT_HIGH_IO: "alert_only",
+        EVENT_MASS_PASSWORD: "alert_only",
+        EVENT_SURFACE_ADDITIVE: "inform_only",
+    },
+    "paranoid": {
+        EVENT_CANARY_WRITE: "kill_quarantine",
+        EVENT_VSS_DELETION: "kill_quarantine",
+        EVENT_RANSOMWARE_CRITICAL: "kill_quarantine",
+        EVENT_SUSPICIOUS_RDP: "ask_operator",
+        EVENT_HIGH_IO: "alert_only",
+        EVENT_MASS_PASSWORD: "alert_only",
+        EVENT_SURFACE_ADDITIVE: "inform_only",
+    },
+}
+
+# Images that matrix actions must never touch (blast radius hard deny)
+PROTECTED_IMAGES: Set[str] = {
+    "system", "system idle process", "smss.exe", "csrss.exe", "wininit.exe",
+    "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe", "explorer.exe",
+    "dwm.exe", "fontdrvhost.exe", "spoolsv.exe", "taskhostw.exe",
+    "honeypot-client.exe", "python.exe", "pythonw.exe",
+    "msmpeng.exe", "mssense.exe", "sense.exe",
+    "vssvc.exe", "wbengine.exe",
+}
+
+SNAPSHOT_DEDUPE_SEC = 300.0  # ≥5 min per trigger family
+
+_lock = threading.RLock()
+_state: Dict[str, Any] = {
+    "policy_name": "balanced",
+    "policy_version": "",
+    "isolate_armed": False,
+    "rules": dict(PRESET_RULES["balanced"]),
+    "sig_ok": True,
+    "source": "builtin_balanced",
+    "updated_at": "",
+    "tamper_alerted": False,
+}
+_allowlist: Dict[str, Any] = {"entries": []}
+_snapshot_last: Dict[str, float] = {}
+_on_tamper_alert: Optional[Callable[[dict], None]] = None
+
+
+def set_tamper_alert_callback(cb: Optional[Callable[[dict], None]]) -> None:
+    global _on_tamper_alert
+    _on_tamper_alert = cb
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _read_token() -> str:
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            return (f.read() or "").strip()
+    except Exception:
+        return ""
+
+
+def _signing_secret(token: Optional[str] = None) -> bytes:
+    token = _read_token() if token is None else (token or "")
+    machine = os.environ.get("COMPUTERNAME", "unknown")
+    material = f"{token}|{machine}|yesnext-chp-v1"
+    return hashlib.sha256(material.encode("utf-8")).digest()
+
+
+def _strip_sig(payload: dict) -> dict:
+    return {k: v for k, v in payload.items() if k not in ("sig", "defense_rules_sig")}
+
+
+def sign_payload(payload: dict, token: Optional[str] = None) -> str:
+    body = json.dumps(_strip_sig(payload), sort_keys=True, ensure_ascii=False)
+    return hmac.new(
+        _signing_secret(token), body.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def verify_payload(payload: dict, token: Optional[str] = None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    sig = payload.get("sig") or payload.get("defense_rules_sig") or ""
+    if not sig:
+        return False
+    try:
+        return hmac.compare_digest(str(sig), sign_payload(payload, token=token))
+    except Exception:
+        return False
+
+
+def _normalize_action(raw: Any) -> Optional[str]:
+    s = str(raw or "").strip().lower()
+    if s in ACTIONS:
+        return s
+    # aliases
+    aliases = {
+        "kill": "kill_quarantine",
+        "quarantine": "kill_quarantine",
+        "suspend": "suspend_process",
+        "alert": "alert_only",
+        "inform": "inform_only",
+        "ask": "ask_operator",
+        "isolate": "auto_isolate_network",
+        "auto_isolate": "auto_isolate_network",
+    }
+    return aliases.get(s)
+
+
+def _normalize_rules(raw: Any, policy_name: str) -> Dict[str, str]:
+    base = dict(PRESET_RULES.get(policy_name) or PRESET_RULES["balanced"])
+    if not isinstance(raw, dict):
+        return base
+    out = dict(base)
+    for key, val in raw.items():
+        k = str(key or "").strip()
+        act = _normalize_action(val)
+        if k and act:
+            out[k] = act
+    return out
+
+
+def _hard_safety_rules(
+    rules: Dict[str, str],
+    policy_name: str,
+    isolate_armed: bool,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Strip / rewrite unsafe actions. Returns (safe_rules, warnings)."""
+    out = dict(rules)
+    warnings: List[str] = []
+    allow_isolate = (
+        policy_name == "paranoid" and bool(isolate_armed)
+    )
+    for key, act in list(out.items()):
+        if act == "auto_isolate_network" and not allow_isolate:
+            # Balanced/observe (and unarmed paranoid) — process-first fallback
+            fallback = PRESET_RULES.get(policy_name, PRESET_RULES["balanced"]).get(
+                key, "alert_only"
+            )
+            if fallback == "auto_isolate_network":
+                fallback = "kill_quarantine"
+            out[key] = fallback
+            warnings.append(
+                f"stripped auto_isolate_network for {key} "
+                f"(policy={policy_name} armed={isolate_armed}) -> {fallback}"
+            )
+        # High-FP signals never auto-suspend/kill even if custom override
+        if key in (EVENT_HIGH_IO, EVENT_SURFACE_ADDITIVE) and act in (
+            "suspend_process",
+            "kill_quarantine",
+            "auto_isolate_network",
+        ):
+            out[key] = "alert_only" if key == EVENT_HIGH_IO else "inform_only"
+            warnings.append(f"forced soft action for bait-prone {key}")
+    return out, warnings
+
+
+def build_effective(
+    *,
+    policy_name: str = "balanced",
+    policy_version: str = "",
+    rules: Optional[dict] = None,
+    isolate_armed: bool = False,
+    source: str = "",
+) -> dict:
+    name = str(policy_name or "balanced").strip().lower()
+    if name not in POLICY_NAMES:
+        name = "balanced"
+    armed = bool(isolate_armed) if name == "paranoid" else False
+    norm = _normalize_rules(rules, name)
+    safe, warnings = _hard_safety_rules(norm, name, armed)
+    payload = {
+        "policy_name": name,
+        "policy_version": str(policy_version or ""),
+        "isolate_armed": armed,
+        "rules": safe,
+        "updated_at": _utc_now(),
+        "source": source or "local",
+        "warnings": warnings,
+    }
+    return payload
+
+
+def extract_from_config(config: Optional[dict]) -> Optional[dict]:
+    """Pull defense fields from threats/config or nested protection{}."""
+    if not isinstance(config, dict):
+        return None
+    prot = config.get("protection") if isinstance(config.get("protection"), dict) else {}
+    # Prefer nested protection.*, fall back to root
+    name = (
+        prot.get("defense_policy")
+        or config.get("defense_policy")
+        or ""
+    )
+    version = (
+        prot.get("defense_policy_version")
+        or config.get("defense_policy_version")
+        or prot.get("policy_version")
+        or ""
+    )
+    rules = prot.get("defense_rules") or config.get("defense_rules") or prot.get("rules")
+    armed = prot.get("isolate_armed")
+    if armed is None:
+        armed = config.get("isolate_armed")
+    sig = (
+        prot.get("defense_rules_sig")
+        or prot.get("sig")
+        or config.get("defense_rules_sig")
+        or config.get("sig")
+        or ""
+    )
+    # Nothing defense-related → None (keep cache)
+    if not name and not version and not isinstance(rules, dict) and not sig:
+        return None
+    if not name:
+        name = get_state().get("policy_name") or "balanced"
+    return {
+        "policy_name": name,
+        "policy_version": str(version or ""),
+        "isolate_armed": bool(armed) if armed is not None else False,
+        "rules": rules if isinstance(rules, dict) else None,
+        "sig": str(sig or ""),
+    }
+
+
+def _atomic_write_json(path: str, payload: dict) -> bool:
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        log(f"[DEFENSE-POLICY] write error {path}: {e}")
+        return False
+
+
+def _read_json(path: str) -> Optional[dict]:
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        log(f"[DEFENSE-POLICY] read error {path}: {e}")
+        return None
+
+
+def save_signed_cache(effective: dict, *, promote_lkg: bool = True) -> dict:
+    """Sign + persist cache; optionally promote previous good file to LKG."""
+    payload = dict(effective)
+    payload.pop("warnings", None)
+    payload["sig"] = sign_payload(payload)
+    if promote_lkg and os.path.isfile(POLICY_FILE):
+        try:
+            prev = _read_json(POLICY_FILE)
+            if prev and verify_payload(prev):
+                shutil.copy2(POLICY_FILE, POLICY_LKG_FILE)
+        except Exception:
+            pass
+    _atomic_write_json(POLICY_FILE, payload)
+    return payload
+
+
+def _emit_tamper(reason: str) -> None:
+    global _state
+    with _lock:
+        if _state.get("tamper_alerted"):
+            return
+        _state["tamper_alerted"] = True
+    log(f"[DEFENSE-POLICY] tamper/fail-safe: {reason}")
+    cb = _on_tamper_alert
+    if not cb:
+        return
+    try:
+        cb({
+            "event_type": "defense_policy_tamper",
+            "threat_type": "defense_policy_tamper",
+            "severity": "high",
+            "threat_score": 70,
+            "force_urgent": True,
+            "title": "Defense policy cache integrity failure",
+            "description": (
+                f"İmzalı savunma politikası doğrulanamadı ({reason}). "
+                "LKG/observe fail-safe uygulandı — ağ kesilmedi, escalate yok."
+            ),
+            "recommended_action": "review_policy",
+            "auto_response_taken": ["fail_safe_observe_or_lkg"],
+            "details": {"reason": reason, "isolate": False},
+            "suppress_local_notify": False,
+        })
+    except Exception as e:
+        log(f"[DEFENSE-POLICY] tamper alert error: {e}")
+
+
+def _apply_state(effective: dict, *, sig_ok: bool, source: str) -> dict:
+    with _lock:
+        _state["policy_name"] = effective["policy_name"]
+        _state["policy_version"] = effective.get("policy_version") or ""
+        _state["isolate_armed"] = bool(effective.get("isolate_armed"))
+        _state["rules"] = dict(effective.get("rules") or {})
+        _state["sig_ok"] = bool(sig_ok)
+        _state["source"] = source
+        _state["updated_at"] = effective.get("updated_at") or _utc_now()
+        if sig_ok and source not in ("tamper_observe", "tamper_lkg"):
+            _state["tamper_alerted"] = False
+        return dict(_state)
+
+
+def get_state() -> dict:
+    with _lock:
+        return {
+            "policy_name": _state["policy_name"],
+            "policy_version": _state["policy_version"],
+            "isolate_armed": _state["isolate_armed"],
+            "rules": dict(_state["rules"]),
+            "sig_ok": _state["sig_ok"],
+            "source": _state["source"],
+            "updated_at": _state["updated_at"],
+        }
+
+
+def status_summary() -> dict:
+    st = get_state()
+    return {
+        "present": True,
+        "defense_policy": st["policy_name"],
+        "defense_policy_version": st["policy_version"],
+        "isolate_armed": st["isolate_armed"],
+        "sig_ok": st["sig_ok"],
+        "source": st["source"],
+        "updated_at": st["updated_at"],
+        "rules": dict(st["rules"]),
+        "allowlist_entries": len(load_allowlist().get("entries") or []),
+    }
+
+
+def action_for(event_type: str) -> str:
+    """Lookup matrix action with hard safety already applied in state."""
+    key = str(event_type or "").strip()
+    with _lock:
+        name = _state["policy_name"]
+        rules = _state["rules"]
+        armed = _state["isolate_armed"]
+    act = rules.get(key) or PRESET_RULES.get(name, PRESET_RULES["balanced"]).get(
+        key, "alert_only"
+    )
+    if act == "auto_isolate_network" and not (
+        name == "paranoid" and armed
+    ):
+        return "kill_quarantine"
+    return act
+
+
+def allows_network_isolate() -> bool:
+    st = get_state()
+    return (
+        st["policy_name"] == "paranoid"
+        and bool(st["isolate_armed"])
+        and "auto_isolate_network" in (st["rules"] or {}).values()
+    )
+
+
+def reject_auto_isolate(reason: str = "") -> dict:
+    """Standard rejection for isolate attempts under unsafe policy."""
+    st = get_state()
+    return {
+        "success": False,
+        "error": "isolate_rejected_policy",
+        "message": (
+            "auto_isolate_network rejected — observe/balanced never isolate; "
+            "paranoid requires isolate_armed"
+        ),
+        "data": {
+            "defense_policy": st["policy_name"],
+            "isolate_armed": st["isolate_armed"],
+            "reason": reason or "hard_safety",
+        },
+    }
+
+
+def is_protected_image(image: str) -> bool:
+    name = (image or "").strip().lower()
+    if not name:
+        return True
+    if not name.endswith(".exe") and " " not in name:
+        # bare name — still check
+        pass
+    base = os.path.basename(name)
+    return base in PROTECTED_IMAGES or name in PROTECTED_IMAGES
+
+
+# ── Allowlist (resume / allow_process exit door) ───────────────────
+
+def load_allowlist() -> dict:
+    global _allowlist
+    with _lock:
+        data = _read_json(ALLOWLIST_FILE)
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            _allowlist = data
+        return deepcopy(_allowlist)
+
+
+def save_allowlist(data: dict) -> bool:
+    global _allowlist
+    payload = {
+        "entries": list(data.get("entries") or []),
+        "updated_at": _utc_now(),
+    }
+    ok = _atomic_write_json(ALLOWLIST_FILE, payload)
+    if ok:
+        with _lock:
+            _allowlist = payload
+    return ok
+
+
+def allow_process(
+    *,
+    path: str = "",
+    image: str = "",
+    sha256: str = "",
+    reason: str = "",
+) -> dict:
+    """Add path and/or image (+ optional hash) to process allowlist."""
+    path_n = os.path.normpath(path).lower() if path else ""
+    image_n = (image or (os.path.basename(path_n) if path_n else "")).lower()
+    sha = (sha256 or "").strip().lower()
+    if not path_n and not image_n and not sha:
+        return {"success": False, "error": "path_or_image_required"}
+    if image_n and is_protected_image(image_n):
+        return {"success": False, "error": f"protected_image:{image_n}"}
+    data = load_allowlist()
+    entries = list(data.get("entries") or [])
+    for e in entries:
+        if path_n and (e.get("path") or "").lower() == path_n:
+            return {
+                "success": True,
+                "message": "already_allowed",
+                "data": e,
+            }
+        if sha and (e.get("sha256") or "").lower() == sha:
+            return {
+                "success": True,
+                "message": "already_allowed",
+                "data": e,
+            }
+    entry = {
+        "path": path_n,
+        "image": image_n,
+        "sha256": sha,
+        "reason": (reason or "")[:200],
+        "at": _utc_now(),
+    }
+    entries.append(entry)
+    # Cap growth
+    if len(entries) > 200:
+        entries = entries[-200:]
+    save_allowlist({"entries": entries})
+    log(f"[DEFENSE-POLICY] allow_process image={image_n} path={path_n[:80]}")
+    return {"success": True, "message": "allowed", "data": entry}
+
+
+def is_process_allowed(
+    *,
+    path: str = "",
+    image: str = "",
+    sha256: str = "",
+) -> bool:
+    path_n = os.path.normpath(path).lower() if path else ""
+    image_n = (image or "").lower()
+    sha = (sha256 or "").strip().lower()
+    for e in (load_allowlist().get("entries") or []):
+        if not isinstance(e, dict):
+            continue
+        if sha and (e.get("sha256") or "").lower() == sha:
+            return True
+        if path_n and (e.get("path") or "").lower() == path_n:
+            return True
+        if image_n and (e.get("image") or "").lower() == image_n and not e.get("path"):
+            # image-only allow is intentional for known-good tools
+            return True
+        if image_n and path_n and (e.get("image") or "").lower() == image_n:
+            ep = (e.get("path") or "").lower()
+            if not ep or ep == path_n:
+                return True
+    return False
+
+
+# ── Session snapshot (P0-4) ────────────────────────────────────────
+
+def maybe_capture_session_snapshot(
+    trigger_family: str,
+    *,
+    alert_attach: Optional[dict] = None,
+) -> Optional[dict]:
+    """Capture ≤1 JPEG / 5 min / trigger family. Best-effort; never raises."""
+    family = str(trigger_family or "red").strip().lower() or "red"
+    now = time.time()
+    with _lock:
+        last = float(_snapshot_last.get(family) or 0.0)
+        if now - last < SNAPSHOT_DEDUPE_SEC:
+            return None
+        _snapshot_last[family] = now
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(SNAPSHOT_DIR, f"{family}_{stamp}.jpg")
+        from client_remote_desktop import capture_once_to_file
+        ok = capture_once_to_file(path)
+        if not ok or not os.path.isfile(path):
+            return None
+        meta = {
+            "path": path,
+            "family": family,
+            "at": _utc_now(),
+            "bytes": int(os.path.getsize(path)),
+        }
+        if isinstance(alert_attach, dict):
+            ctx = alert_attach.setdefault("system_context", {})
+            if not isinstance(ctx, dict):
+                ctx = {}
+                alert_attach["system_context"] = ctx
+            ctx["session_snapshot"] = {
+                "family": family,
+                "path": path,
+                "bytes": meta["bytes"],
+                "at": meta["at"],
+            }
+        log(f"[DEFENSE-POLICY] session snapshot {family} → {path}")
+        return meta
+    except Exception as e:
+        log(f"[DEFENSE-POLICY] session snapshot skipped: {e}")
+        return None
+
+
+# ── Apply / hydrate ────────────────────────────────────────────────
+
+def apply_from_config(config: Optional[dict], *, token: Optional[str] = None) -> dict:
+    """Apply threats/config defense fields; persist signed cache.
+
+    Cloud may omit sig until C-P0-4 ships — client then locally resigns for integrity.
+    If cloud sends sig and it fails verification → keep LKG/observe (anti-bait).
+    """
+    extracted = extract_from_config(config)
+    if extracted is None:
+        return get_state()
+
+    cloud_sig = extracted.get("sig") or ""
+    effective = build_effective(
+        policy_name=extracted.get("policy_name") or "balanced",
+        policy_version=extracted.get("policy_version") or "",
+        rules=extracted.get("rules"),
+        isolate_armed=bool(extracted.get("isolate_armed")),
+        source="threats/config",
+    )
+    for w in effective.get("warnings") or []:
+        log(f"[DEFENSE-POLICY] hard-safety: {w}")
+
+    verify_body = {
+        "policy_name": effective["policy_name"],
+        "policy_version": effective["policy_version"],
+        "isolate_armed": effective["isolate_armed"],
+        "rules": effective["rules"],
+    }
+    # Cloud may sign a slightly different shape; try extracted envelope too
+    if cloud_sig:
+        candidates = [
+            {**verify_body, "sig": cloud_sig},
+            {
+                "policy_version": effective["policy_version"],
+                "policy_name": effective["policy_name"],
+                "rules": effective["rules"],
+                "sig": cloud_sig,
+            },
+            {
+                "defense_policy": effective["policy_name"],
+                "defense_policy_version": effective["policy_version"],
+                "defense_rules": effective["rules"],
+                "isolate_armed": effective["isolate_armed"],
+                "sig": cloud_sig,
+            },
+        ]
+        ok = any(verify_payload(c, token=token) for c in candidates)
+        if not ok:
+            log("[DEFENSE-POLICY] cloud sig verify FAILED — fail-safe LKG/observe")
+            return fail_safe_load(reason="cloud_sig_mismatch")
+        effective["source"] = "threats/config_signed"
+    else:
+        effective["source"] = "threats/config_unsigned"
+
+    saved = save_signed_cache(effective, promote_lkg=True)
+    return _apply_state(effective, sig_ok=True, source=saved.get("source") or effective["source"])
+
+
+def fail_safe_load(*, reason: str = "unknown") -> dict:
+    """Tamper path: LKG if valid, else observe. Never isolate / never escalate."""
+    _emit_tamper(reason)
+    lkg = _read_json(POLICY_LKG_FILE)
+    if lkg and verify_payload(lkg):
+        effective = build_effective(
+            policy_name=lkg.get("policy_name") or "observe",
+            policy_version=lkg.get("policy_version") or "",
+            rules=lkg.get("rules"),
+            isolate_armed=False,  # never carry armed across tamper
+            source="tamper_lkg",
+        )
+        # Re-sign as current cache without promoting broken file as LKG
+        save_signed_cache(effective, promote_lkg=False)
+        return _apply_state(effective, sig_ok=True, source="tamper_lkg")
+
+    effective = build_effective(
+        policy_name="observe",
+        policy_version="",
+        rules=PRESET_RULES["observe"],
+        isolate_armed=False,
+        source="tamper_observe",
+    )
+    save_signed_cache(effective, promote_lkg=False)
+    return _apply_state(effective, sig_ok=False, source="tamper_observe")
+
+
+def hydrate_from_disk() -> dict:
+    """Boot: load signed cache or LKG/observe."""
+    load_allowlist()
+    data = _read_json(POLICY_FILE)
+    if data:
+        if verify_payload(data):
+            effective = build_effective(
+                policy_name=data.get("policy_name") or "balanced",
+                policy_version=data.get("policy_version") or "",
+                rules=data.get("rules"),
+                isolate_armed=bool(data.get("isolate_armed")),
+                source="programdata",
+            )
+            return _apply_state(effective, sig_ok=True, source="programdata")
+        return fail_safe_load(reason="cache_sig_invalid")
+    # First boot — balanced defaults, signed locally
+    effective = build_effective(
+        policy_name="balanced",
+        policy_version="",
+        rules=PRESET_RULES["balanced"],
+        isolate_armed=False,
+        source="builtin_balanced",
+    )
+    save_signed_cache(effective, promote_lkg=False)
+    return _apply_state(effective, sig_ok=True, source="builtin_balanced")
+
+
+def process_action_plan(event_type: str) -> dict:
+    """Convenience for RS/NG: what to do for this event."""
+    act = action_for(event_type)
+    st = get_state()
+    return {
+        "event": event_type,
+        "action": act,
+        "policy_name": st["policy_name"],
+        "alert": True,
+        "force_urgent": act in ("kill_quarantine", "suspend_process", "auto_isolate_network"),
+        "contain": act in ("kill_quarantine", "suspend_process"),
+        "kill": act == "kill_quarantine",
+        "suspend": act == "suspend_process",
+        "isolate_network": act == "auto_isolate_network" and allows_network_isolate(),
+        "inform_only": act == "inform_only",
+        "ask_operator": act == "ask_operator",
+        "alert_only": act == "alert_only",
+    }

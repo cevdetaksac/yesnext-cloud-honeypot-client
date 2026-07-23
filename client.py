@@ -306,6 +306,21 @@ class CloudHoneypotClient:
                         log(f"[PROTECTION] boot hydrate block_rules={n}")
                 except Exception as pe:
                     log(f"[PROTECTION] boot hydrate skip: {pe}")
+                try:
+                    from client_defense_policy import hydrate_from_disk as _dp_hydrate
+                    from client_defense_policy import set_tamper_alert_callback as _dp_cb
+                    _dp_cb(
+                        self.alert_pipeline.handle_alert
+                        if self.alert_pipeline
+                        else None
+                    )
+                    st = _dp_hydrate()
+                    log(
+                        f"[DEFENSE-POLICY] boot hydrate "
+                        f"policy={st.get('policy_name')} src={st.get('source')}"
+                    )
+                except Exception as dpe:
+                    log(f"[DEFENSE-POLICY] boot hydrate skip: {dpe}")
                 # Wire ThreatEngine into ServiceManager for honeypot credential scoring
                 self.service_manager._threat_engine = self.threat_engine
                 log("✅ Threat detection modules initialized (v4.0)")
@@ -1109,6 +1124,26 @@ class CloudHoneypotClient:
                     except Exception as sre:
                         log(f"[CONFIG-SYNC] system_recovery start error: {sre}")
 
+                # Defense Policy matrix (contract 1.4.18 / client ≥4.9.16)
+                try:
+                    from client_defense_policy import apply_from_config as _dp_apply
+                    from client_defense_policy import set_tamper_alert_callback as _dp_cb
+                    _dp_cb(
+                        self.alert_pipeline.handle_alert
+                        if self.alert_pipeline
+                        else None
+                    )
+                    dp_st = _dp_apply(config, token=token)
+                    log(
+                        "[CONFIG-SYNC] defense_policy="
+                        f"{dp_st.get('policy_name')} "
+                        f"ver={dp_st.get('policy_version') or '-'} "
+                        f"src={dp_st.get('source')} "
+                        f"sig_ok={dp_st.get('sig_ok')}"
+                    )
+                except Exception as dpe:
+                    log(f"[CONFIG-SYNC] defense_policy apply error: {dpe}")
+
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
             # Contract SoT: protection.block_rules (register + threats/config)
@@ -1253,6 +1288,16 @@ class CloudHoneypotClient:
                 ctx["ransomware_shield_status"] = "disabled"
         except Exception:
             ctx["ransomware_shield_status"] = "error"
+
+        # Defense Policy version (cloud stale-policy pull)
+        try:
+            from client_defense_policy import get_state as _dp_state
+            dp = _dp_state()
+            ctx["defense_policy"] = dp.get("policy_name")
+            ctx["defense_policy_version"] = dp.get("policy_version") or ""
+            ctx["isolate_armed"] = bool(dp.get("isolate_armed"))
+        except Exception:
+            pass
 
         return ctx
 
@@ -1510,6 +1555,7 @@ class CloudHoneypotClient:
             "ransomware_running": self._ipc_rs_running(),
             "resilience": self._ipc_resilience_summary(),
             "resources": self._ipc_resources_summary(),
+            "defense_policy": self._ipc_defense_policy_summary(),
         }
 
     def _ipc_rs_running(self) -> bool:
@@ -1520,6 +1566,13 @@ class CloudHoneypotClient:
             return bool(rs.get_stats().get("running"))
         except Exception:
             return False
+
+    def _ipc_defense_policy_summary(self) -> dict:
+        try:
+            from client_defense_policy import status_summary
+            return status_summary()
+        except Exception:
+            return {"present": False}
 
     def _ipc_network_guard_summary(self) -> dict:
         ng = getattr(self, "network_guard", None)

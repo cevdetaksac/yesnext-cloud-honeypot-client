@@ -873,15 +873,37 @@ class RansomwareShield:
             "trigger": f"canary {change_type}: {canary.path}",
             "suspects": [],
             "actions": [],
-            "quarantine": {"active": True, "entries": 0, "kills": 0},
+            "quarantine": {"active": False, "entries": 0, "kills": 0},
         }
+        plan = {"action": "kill_quarantine", "contain": True, "kill": True,
+                "alert_only": False, "force_urgent": True}
         try:
-            containment = self._contain_after_hit(
-                trigger=containment["trigger"],
-                focus_path=canary.path,
+            from client_defense_policy import process_action_plan
+            plan = process_action_plan("canary_write")
+        except Exception:
+            pass
+
+        if plan.get("contain") and not plan.get("alert_only"):
+            try:
+                containment = self._contain_after_hit(
+                    trigger=containment["trigger"],
+                    focus_path=canary.path,
+                    mode="suspend" if plan.get("suspend") and not plan.get("kill") else "kill",
+                )
+            except Exception as e:
+                log(f"[RANSOMWARE-SHIELD] containment error before urgent: {e}")
+        else:
+            # observe / alert_only — find suspects for context but do not kill
+            try:
+                suspects_only = self._find_suspect_processes(canary.path)
+                containment["suspects"] = suspects_only
+                containment["actions"] = ["alert_only"]
+            except Exception:
+                pass
+            log(
+                f"[RANSOMWARE-SHIELD] canary matrix action={plan.get('action')} "
+                f"— skip kill/quarantine"
             )
-        except Exception as e:
-            log(f"[RANSOMWARE-SHIELD] containment error before urgent: {e}")
 
         suspects = list(containment.get("suspects") or [])
         has_suspect = bool(suspects)
@@ -930,7 +952,13 @@ class RansomwareShield:
         else:
             severity = "critical"
             threat_score = 100
-            recommended = "isolate_host"
+            # Anti-bait: never recommend isolate_host from single canary (P0)
+            if plan.get("alert_only"):
+                recommended = "review_canary"
+            elif plan.get("suspend"):
+                recommended = "resume_or_allow_process"
+            else:
+                recommended = "review_quarantine"
 
         detection["threat_score"] = threat_score
         ransomware_context = {
@@ -997,6 +1025,7 @@ class RansomwareShield:
             "recommended_action": recommended,
             "auto_response_taken": (
                 (["alert_only"] if soft else ["emergency_alert"])
+                + ([f"matrix:{plan.get('action')}"] if plan.get("action") else [])
                 + list(containment.get("actions") or [])
             ),
             "raw_events": raw_events,
@@ -1006,13 +1035,20 @@ class RansomwareShield:
                 "change_type": change_type,
                 "full_path": canary.path,
                 "soft": soft,
+                "defense_action": plan.get("action"),
             },
             "suppress_local_notify": True,
-            "force_urgent": not soft,
+            "force_urgent": (not soft) and bool(plan.get("force_urgent", True)),
         }
         try:
-            if soft:
-                # Soft: never hit /api/alerts/urgent (30 dk loop spam)
+            if not soft and plan.get("contain"):
+                from client_defense_policy import maybe_capture_session_snapshot
+                maybe_capture_session_snapshot("canary_write", alert_attach=urgent)
+        except Exception:
+            pass
+        try:
+            if soft or plan.get("alert_only"):
+                # Soft / observe: never hit /api/alerts/urgent (30 dk loop spam)
                 if self.on_alert:
                     self.on_alert(urgent)
                 elif self.alert_pipeline and hasattr(
@@ -1026,7 +1062,7 @@ class RansomwareShield:
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] urgent alert delivery error: {e}")
 
-        if not soft:
+        if not soft and not plan.get("alert_only"):
             self._block_suspicious_ips(f"canary {change_type}: {filename}")
 
     # ── Katman 3: Suspicious Process Detection ────────────────────
@@ -1217,23 +1253,166 @@ class RansomwareShield:
             or "backup deletion" in (reason or "").lower()
         ):
             try:
-                self._respond_vss_delete_intent(pname, pid, cmdline, reason, score)
-            except Exception as e:
-                log(f"[RANSOMWARE-SHIELD] vss_delete_intent response failed: {e}")
-        elif score >= 95:
-            # Other critical cmdline — best-effort kill only
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True, timeout=5,
-                    creationflags=CREATE_NO_WINDOW,
+                from client_defense_policy import (
+                    is_process_allowed,
+                    process_action_plan,
                 )
+                plan = process_action_plan("vss_deletion")
             except Exception:
-                pass
+                plan = {"action": "kill_quarantine", "contain": True, "kill": True,
+                        "alert_only": False}
+                is_process_allowed = lambda **_kw: False  # type: ignore
+
+            if is_process_allowed(image=pname, path=""):
+                log(
+                    f"[RANSOMWARE-SHIELD] VSS intent skipped — allowlisted "
+                    f"image={pname}"
+                )
+                return
+
+            if plan.get("alert_only") or not plan.get("contain"):
+                log(
+                    f"[DEFENSE-POLICY] VSS intent matrix={plan.get('action')} "
+                    f"— alert only (no kill)"
+                )
+                if self.on_alert:
+                    self.on_alert({
+                        "event_type": "vss_delete_intent",
+                        "threat_type": "ransomware_vss_delete_intent",
+                        "severity": "high",
+                        "threat_score": min(100, max(int(score), 95)),
+                        "force_urgent": False,
+                        "recommended_action": "review_process",
+                        "auto_response_taken": [f"matrix:{plan.get('action')}"],
+                        "details": {
+                            "process": pname,
+                            "pid": pid,
+                            "cmdline": (cmdline or "")[:300],
+                            "reason": reason,
+                            "defense_action": plan.get("action"),
+                        },
+                        "description": (
+                            f"VSS silme girişimi gözlemlendi (policy="
+                            f"{plan.get('action')}). Süreç: {pname} PID={pid}."
+                        ),
+                    })
+                return
+
+            try:
+                self._respond_vss_delete_intent(
+                    pname, pid, cmdline, reason, score,
+                    mode="suspend" if plan.get("suspend") and not plan.get("kill") else "kill",
+                )
+            except Exception as e:
+                log(f"[RANSOMWARE-SHIELD] VSS intent response error: {e}")
+            return
+
+        # Non-VSS critical ransomware process — matrix may suspend
+        try:
+            from client_defense_policy import (
+                is_process_allowed,
+                is_protected_image,
+                process_action_plan,
+            )
+            if score >= 90 and not is_vss_delete_cmdline(cmdline):
+                plan = process_action_plan("ransomware_critical_process")
+                if is_protected_image(pname) or is_process_allowed(image=pname):
+                    pass
+                elif plan.get("suspend") or plan.get("kill"):
+                    self._apply_matrix_process_action(
+                        pname, pid, cmdline, reason, score, plan
+                    )
+                elif score >= 95 and plan.get("alert_only"):
+                    pass
+                elif score >= 95:
+                    # Legacy fallback when matrix missing — kill only
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True, timeout=5,
+                            creationflags=CREATE_NO_WINDOW,
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            log(f"[RANSOMWARE-SHIELD] critical process matrix error: {e}")
 
         # Yüksek skorlu tespit — aktif şüpheli IP'leri engelle (firewall HP-BLOCK)
         if score >= 90:
             self._block_suspicious_ips(f"suspicious process: {pname} — {reason}")
+
+    def _apply_matrix_process_action(
+        self,
+        pname: str,
+        pid: int,
+        cmdline: str,
+        reason: str,
+        score: int,
+        plan: dict,
+    ) -> None:
+        """Suspend or kill a non-VSS critical process per defense matrix."""
+        try:
+            from client_defense_policy import is_protected_image
+            if is_protected_image(pname):
+                return
+        except Exception:
+            pass
+        actions = [f"matrix:{plan.get('action')}"]
+        suspended = False
+        killed = False
+        if plan.get("suspend") and not plan.get("kill"):
+            try:
+                import psutil
+                psutil.Process(int(pid)).suspend()
+                suspended = True
+                actions.append(f"suspend:{pid}")
+            except Exception as e:
+                log(f"[RANSOMWARE-SHIELD] suspend failed pid={pid}: {e}")
+        elif plan.get("kill"):
+            try:
+                r = subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    capture_output=True, timeout=5,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                killed = r.returncode == 0
+                if killed:
+                    actions.append(f"kill:{pid}")
+            except Exception:
+                pass
+        alert = {
+            "event_type": "ransomware_critical_process",
+            "threat_type": "ransomware_process",
+            "severity": "critical" if score >= 90 else "high",
+            "threat_score": score,
+            "force_urgent": bool(plan.get("force_urgent", True)),
+            "recommended_action": (
+                "resume_or_allow_process" if suspended else "review_quarantine"
+            ),
+            "auto_response_taken": actions,
+            "details": {
+                "process": pname,
+                "pid": pid,
+                "cmdline": (cmdline or "")[:300],
+                "reason": reason,
+                "suspended": suspended,
+                "killed": killed,
+                "defense_action": plan.get("action"),
+            },
+            "description": (
+                f"Kritik ransomware süreci — matrix={plan.get('action')}. "
+                f"{pname} PID={pid}. suspended={suspended} killed={killed}."
+            ),
+        }
+        try:
+            from client_defense_policy import maybe_capture_session_snapshot
+            maybe_capture_session_snapshot(
+                "ransomware_critical_process", alert_attach=alert
+            )
+        except Exception:
+            pass
+        if self.on_alert:
+            self.on_alert(alert)
 
     def _respond_vss_delete_intent(
         self,
@@ -1242,26 +1421,41 @@ class RansomwareShield:
         cmdline: str,
         reason: str,
         score: int,
+        mode: str = "kill",
     ) -> None:
         """Immediate response to VSS wipe TTP — contract ≥1.4.16.
 
-        1) taskkill the delete process
+        1) taskkill (or suspend) the delete process
         2) arm ransomware quarantine (dashboard/GUI) without waiting for count drop
         3) never IFEO admin tools (vssadmin/wmic/powershell/cmd/wbadmin)
         """
         killed = False
-        try:
-            r = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
-                capture_output=True, timeout=5,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            killed = r.returncode == 0
-        except Exception:
-            killed = False
+        suspended = False
+        if mode == "suspend":
+            try:
+                import psutil
+                psutil.Process(int(pid)).suspend()
+                suspended = True
+            except Exception:
+                suspended = False
+        if not suspended:
+            try:
+                r = subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    capture_output=True, timeout=5,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                killed = r.returncode == 0
+            except Exception:
+                killed = False
 
         image = (pname or "").lower()
-        allow_ifeo = bool(image) and image not in _PROTECTED_IMAGES and image not in _NO_IFEO_ADMIN_TOOLS
+        allow_ifeo = (
+            bool(image)
+            and image not in _PROTECTED_IMAGES
+            and image not in _NO_IFEO_ADMIN_TOOLS
+            and mode != "suspend"
+        )
 
         with self._quarantine_lock:
             entries = list(self._quarantine.get("entries") or [])
@@ -1306,47 +1500,61 @@ class RansomwareShield:
 
         log(
             f"[RANSOMWARE-SHIELD] VSS delete intent: kill={killed} "
-            f"pid={pid} image={image} quarantine=armed ifeo={allow_ifeo}"
+            f"suspend={suspended} pid={pid} image={image} "
+            f"quarantine=armed ifeo={allow_ifeo}"
         )
 
+        alert = {
+            "event_type": "vss_delete_intent",
+            "threat_type": "ransomware_vss_delete_intent",
+            "severity": "critical",
+            "threat_score": min(100, max(int(score), 95)),
+            "force_urgent": True,
+            "suppress_local_notify": False,
+            "recommended_action": (
+                "resume_or_allow_process" if suspended else "review_quarantine"
+            ),
+            "auto_response_taken": (
+                (["suspend"] if suspended else ["taskkill"])
+                + ["quarantine_arm"]
+                + (["ifeo"] if allow_ifeo else [])
+            ),
+            "details": {
+                "process": pname,
+                "pid": pid,
+                "cmdline": (cmdline or "")[:300],
+                "reason": reason,
+                "killed": bool(killed),
+                "suspended": bool(suspended),
+                "quarantine_active": True,
+            },
+            "description": (
+                f"VSS silme girişimi (intent) — gölge kopya sayısı beklenmeden "
+                f"müdahale. Süreç: {pname} PID={pid}. Sebep: {reason}. "
+                f"killed={killed} suspended={suspended}."
+            ),
+            "system_context": {
+                "ransomware": {
+                    "trigger": "vss_delete_intent",
+                    "suspects": [{
+                        "pid": pid,
+                        "image": pname,
+                        "cmdline": (cmdline or "")[:300],
+                        "state": (
+                            "suspended" if suspended
+                            else ("killed" if killed else "observed")
+                        ),
+                    }],
+                }
+            },
+        }
+        try:
+            from client_defense_policy import maybe_capture_session_snapshot
+            maybe_capture_session_snapshot("vss_deletion", alert_attach=alert)
+        except Exception:
+            pass
         if self.on_alert:
-            self.on_alert({
-                "event_type": "vss_delete_intent",
-                "threat_type": "ransomware_vss_delete_intent",
-                "severity": "critical",
-                "threat_score": min(100, max(int(score), 95)),
-                "force_urgent": True,
-                "suppress_local_notify": False,
-                "recommended_action": "review_quarantine",
-                "auto_response_taken": (
-                    ["taskkill", "quarantine_arm"]
-                    + (["ifeo"] if allow_ifeo else [])
-                ),
-                "details": {
-                    "process": pname,
-                    "pid": pid,
-                    "cmdline": (cmdline or "")[:300],
-                    "reason": reason,
-                    "killed": bool(killed),
-                    "quarantine_active": True,
-                },
-                "description": (
-                    f"VSS silme girişimi (intent) — gölge kopya sayısı beklenmeden "
-                    f"müdahale. Süreç: {pname} PID={pid}. Sebep: {reason}. "
-                    f"killed={killed}."
-                ),
-                "system_context": {
-                    "ransomware": {
-                        "trigger": "vss_delete_intent",
-                        "suspects": [{
-                            "pid": pid,
-                            "image": pname,
-                            "cmdline": (cmdline or "")[:300],
-                            "state": "killed" if killed else "observed",
-                        }],
-                    }
-                },
-            })
+            self.on_alert(alert)
 
     # ── Katman 4: VSS Monitor ─────────────────────────────────────
 
@@ -1559,14 +1767,16 @@ class RansomwareShield:
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] quarantine persist error: {e}")
 
-    def _contain_after_hit(self, trigger: str, focus_path: str = "") -> dict:
-        """Kill writers of canary path + IFEO-block their images until unlock.
+    def _contain_after_hit(
+        self, trigger: str, focus_path: str = "", mode: str = "kill"
+    ) -> dict:
+        """Kill or suspend writers of canary path + IFEO-block their images until unlock.
 
         Arms quarantine immediately (STATUS/GUI), then best-effort attribution.
         Full open_files() scans can take tens of seconds on busy hosts — must not
         delay the lockdown flag.
         """
-        # 1) Arm lock immediately
+        # 1) Arm lock immediately (skip arm when observe already decided alert_only upstream)
         with self._quarantine_lock:
             entries = list(self._quarantine.get("entries") or [])
             self._quarantine = {
@@ -1579,7 +1789,7 @@ class RansomwareShield:
             self._stats["quarantine_active"] = True
             self._stats["quarantine_entries"] = len(entries)
             self._persist_quarantine()
-        log(f"[RANSOMWARE-SHIELD] Quarantine ARMED trigger={trigger}")
+        log(f"[RANSOMWARE-SHIELD] Quarantine ARMED trigger={trigger} mode={mode}")
 
         # 2) Attribute writers (time-boxed)
         suspects: List[dict] = []
@@ -1601,6 +1811,29 @@ class RansomwareShield:
                 suspects = holder[0] or []
         except Exception as e:
             log(f"[RANSOMWARE-SHIELD] suspect scan setup error: {e}")
+
+        # Filter allowlisted / protected before action
+        try:
+            from client_defense_policy import is_process_allowed, is_protected_image
+        except Exception:
+            def is_process_allowed(**_kw):
+                return False
+
+            def is_protected_image(image):
+                return (image or "").lower() in _PROTECTED_IMAGES
+
+        filtered = []
+        for s in suspects:
+            image = (s.get("image") or "").lower()
+            path = s.get("path") or ""
+            sha = s.get("sha256") or ""
+            if is_protected_image(image):
+                continue
+            if is_process_allowed(path=path, image=image, sha256=sha):
+                log(f"[RANSOMWARE-SHIELD] skip allowlisted suspect {image}")
+                continue
+            filtered.append(s)
+        suspects = filtered
 
         actions = []
         with self._quarantine_lock:
@@ -1629,23 +1862,29 @@ class RansomwareShield:
                 image = (s.get("image") or "").lower()
                 if not image or image in _PROTECTED_IMAGES:
                     continue
-                if image in _NO_IFEO_ADMIN_TOOLS:
-                    # Kill only — never IFEO admin VSS tools
-                    pid = s.get("pid")
-                    if pid and self._kill_pid(int(pid)):
-                        actions.append(f"kill:{pid}:{image}")
-                        self._stats["quarantine_kills"] = (
-                            int(self._stats.get("quarantine_kills") or 0) + 1
-                        )
-                    continue
                 pid = s.get("pid")
+                if image in _NO_IFEO_ADMIN_TOOLS:
+                    # Kill/suspend only — never IFEO admin VSS tools
+                    if pid:
+                        if mode == "suspend":
+                            if self._suspend_pid(int(pid)):
+                                actions.append(f"suspend:{pid}:{image}")
+                        elif self._kill_pid(int(pid)):
+                            actions.append(f"kill:{pid}:{image}")
+                            self._stats["quarantine_kills"] = (
+                                int(self._stats.get("quarantine_kills") or 0) + 1
+                            )
+                    continue
                 if pid:
-                    if self._kill_pid(int(pid)):
+                    if mode == "suspend":
+                        if self._suspend_pid(int(pid)):
+                            actions.append(f"suspend:{pid}:{image}")
+                    elif self._kill_pid(int(pid)):
                         actions.append(f"kill:{pid}:{image}")
                         self._stats["quarantine_kills"] = (
                             int(self._stats.get("quarantine_kills") or 0) + 1
                         )
-                if image not in known:
+                if mode != "suspend" and image not in known:
                     ifeo_ok = self._apply_ifeo(image)
                     entries.append({
                         "image": image,
@@ -1660,6 +1899,20 @@ class RansomwareShield:
                     known.add(image)
                     self._quarantine_images.add(image)
                     actions.append(f"ifeo:{image}")
+                elif mode == "suspend" and image not in known:
+                    entries.append({
+                        "image": image,
+                        "path": s.get("path") or "",
+                        "pid": pid,
+                        "cmdline": s.get("cmdline") or "",
+                        "sha256": s.get("sha256") or "",
+                        "ifeo": False,
+                        "suspended": True,
+                        "at": datetime.now().isoformat(),
+                        "trigger": trigger,
+                    })
+                    known.add(image)
+                    actions.append(f"track_suspend:{image}")
             self._quarantine["entries"] = entries
             self._quarantine["trigger"] = trigger
             self._stats["quarantine_entries"] = len(entries)
@@ -1691,6 +1944,14 @@ class RansomwareShield:
                 "kills": int(self._stats.get("quarantine_kills") or 0),
             },
         }
+
+    def _suspend_pid(self, pid: int) -> bool:
+        try:
+            import psutil
+            psutil.Process(int(pid)).suspend()
+            return True
+        except Exception:
+            return False
 
     def _find_suspect_processes(self, focus_path: str) -> List[dict]:
         """Best-effort: processes with open handles under canary root / file.

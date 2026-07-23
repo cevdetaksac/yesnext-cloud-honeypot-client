@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.15"  # Soft network surface inform (contract 1.4.17)
+VERSION = "4.9.16"  # Defense Policy matrix + signed cache (contract 1.4.18)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

@@ -183,6 +183,9 @@ class RemoteDesktopStreamer:
         self._helper_frame_misses = 0
         self._input_desktop = None
         self._desktop_attached = False
+        self._desktop_name = ""
+        self._winlogon_mode = False
+        self._desktop_reattach_every = 45  # frames — pick up Default after logon
         self._tscon_attempted = False
         self._last_good_jpeg: Optional[bytes] = None
         self._last_good_wh: Tuple[int, int] = (0, 0)
@@ -279,6 +282,8 @@ class RemoteDesktopStreamer:
             self._stats["frames_failed"] = 0
             self._stats["black_frames"] = 0
             self._desktop_attached = False
+            self._desktop_name = ""
+            self._winlogon_mode = False
             self._tscon_attempted = False
             self._last_good_jpeg = None
             self._last_good_wh = (0, 0)
@@ -295,6 +300,16 @@ class RemoteDesktopStreamer:
                 if int(s.get("session_id") or 0) > 0
                 and str(s.get("protocol") or "").lower() != "services"
             ]
+            if not interactive:
+                # Pre-logon: query user is empty, but console Winlogon still exists.
+                try:
+                    from client_rd_winlogon import synthesize_console_session
+                    synth = synthesize_console_session(sessions)
+                    if synth:
+                        interactive = [synth]
+                        sessions = list(sessions) + [synth]
+                except Exception as exc:
+                    log(f"[REMOTE-DESKTOP] console synthesize failed: {exc}")
             if not interactive:
                 err = "NO_INTERACTIVE_SESSION"
                 msg = "No interactive desktop to mirror"
@@ -344,16 +359,32 @@ class RemoteDesktopStreamer:
                     or str(picked.get("username") or "")
                 )
 
+            match_meta = next(
+                (
+                    s for s in interactive
+                    if int(s.get("session_id") or 0) == int(self._target_session_id or 0)
+                ),
+                {},
+            )
+            self._winlogon_mode = bool(
+                match_meta.get("pre_logon")
+                or not str(self._target_username or "").strip()
+                or str(match_meta.get("desktop") or "").lower() == "winlogon"
+            )
+
             pid_sid, csid = self._session_ids()
-            # Capture other user's desktop via helper when not already in that session
+            # Capture other user's desktop via helper when not already in that session.
+            # Pre-logon / Winlogon must stay in-process (WinSta0 attach) — no user helper.
             need_helper = (
-                self._target_session_id is not None
+                not self._winlogon_mode
+                and self._target_session_id is not None
                 and (pid_sid is None or int(pid_sid) != int(self._target_session_id))
             )
             log(
                 f"[REMOTE-DESKTOP] start — target_session={self._target_session_id} "
                 f"user={self._target_username!r} monitor={self._monitor_index} "
-                f"pid_session={pid_sid} console={csid} helper={need_helper}"
+                f"pid_session={pid_sid} console={csid} helper={need_helper} "
+                f"winlogon={self._winlogon_mode}"
             )
 
             if self._running and self._thread and self._thread.is_alive():
@@ -603,6 +634,8 @@ class RemoteDesktopStreamer:
             "username": self._target_username or "",
             "monitor": self._monitor_index,
             "capture_method": self._capture_method,
+            "desktop": self._desktop_name or "",
+            "winlogon_mode": bool(self._winlogon_mode),
             "screen": {
                 "x": self._screen_x,
                 "y": self._screen_y,
@@ -673,7 +706,7 @@ class RemoteDesktopStreamer:
                     self._stats["inputs_applied"] += 1
                     return result({"success": True, "message": f"input {event} forwarded"})
                 return result({"success": False, "error": f"input {event} not forwarded"})
-            if self._use_user_helper:
+            if self._use_user_helper and not self._winlogon_mode:
                 # Never inject from Session 0 after a cross-session helper failure.
                 return result({"success": False, "error": "target session helper is unavailable"})
 
@@ -730,6 +763,11 @@ class RemoteDesktopStreamer:
         return normalized
 
     def _inject_local(self, event: str, params: dict) -> bool:
+        # Ensure CAD/key/mouse land on Winlogon when pre-logon.
+        self._attach_input_desktop()
+        return self._inject_local_after_attach(event, params)
+
+    def _inject_local_after_attach(self, event: str, params: dict) -> bool:
         """Local SendInput/SetCursorPos injection (same session or helper side)."""
         mode = str(params.get("mode") or params.get("pointer_mode") or "direct").lower()
         if event == "tap":
@@ -1627,13 +1665,44 @@ class RemoteDesktopStreamer:
         return self._mean_brightness(img) < BLACK_MEAN_THRESHOLD
 
     def _attach_input_desktop(self) -> bool:
-        """Bind capture thread to the interactive input desktop.
+        """Bind capture/input thread to the interactive (or Winlogon) desktop.
 
         Elevated / tray processes often BitBlt a black screen when not on
-        the input desktop (classic RDP remote-desktop black frame cause).
+        the input desktop. Pre-logon requires WinSta0 + Winlogon attach.
         """
-        if self._desktop_attached:
+        # Periodically re-open so we pick up Default after a successful logon.
+        force = False
+        try:
+            if (
+                self._winlogon_mode
+                and self._seq
+                and int(self._seq) % max(1, int(self._desktop_reattach_every)) == 0
+            ):
+                force = True
+        except Exception:
+            force = False
+        if self._desktop_attached and not force:
             return True
+        try:
+            from client_rd_winlogon import attach_console_desktop
+            prefer_wl = bool(self._winlogon_mode) or force
+            ok, name, hdesk = attach_console_desktop(
+                prefer_winlogon=prefer_wl,
+                close_previous=self._input_desktop if force else None,
+            )
+            if ok and hdesk:
+                self._input_desktop = hdesk
+                self._desktop_attached = True
+                self._desktop_name = name
+                if name.lower() == "default" and self._winlogon_mode:
+                    # User completed interactive logon — switch to normal desktop path.
+                    self._winlogon_mode = False
+                    log("[REMOTE-DESKTOP] desktop switched Winlogon→Default (post-logon)")
+                return True
+        except Exception as e:
+            log(f"[REMOTE-DESKTOP] winlogon attach error: {e}")
+
+        # Legacy fallback (same session / already on WinSta0)
         try:
             import ctypes
             user32 = ctypes.windll.user32
@@ -1655,6 +1724,7 @@ class RemoteDesktopStreamer:
                 return False
             self._input_desktop = hdesk
             self._desktop_attached = True
+            self._desktop_name = "Input"
             log("[REMOTE-DESKTOP] attached to input desktop")
             return True
         except Exception as e:
@@ -1813,6 +1883,13 @@ class RemoteDesktopStreamer:
                 })
         except Exception as e:
             log(f"[REMOTE-DESKTOP] enumerate sessions failed: {e}")
+        try:
+            from client_rd_winlogon import synthesize_console_session
+            synth = synthesize_console_session(out)
+            if synth:
+                out.append(synth)
+        except Exception:
+            pass
         return out
 
     @staticmethod

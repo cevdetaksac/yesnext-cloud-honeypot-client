@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.20"  # RD WebRTC: raw RGB, HW H.264, input fluidity
+VERSION = "4.9.21"  # RD console Winlogon / pre-logon mirror
 
 
 CLIENT_VERSION = VERSION  # Main version constant

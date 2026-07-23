@@ -189,11 +189,16 @@ def list_local_users(*, include_disabled: bool = True) -> List[Dict[str, Any]]:
     return users
 
 
-def _can_capture(status: str, session_id: int, protocol: str) -> bool:
+def _can_capture(status: str, session_id: int, protocol: str, *, pre_logon: bool = False) -> bool:
     if session_id <= 0:
         return False
     if str(protocol or "").lower() in ("services",):
         return False
+    if pre_logon:
+        return True
+    if str(protocol or "").lower() == "console":
+        st = str(status or "").lower()
+        return st in ("active", "connected", "listen", "")
     return str(status or "").lower() == "active"
 
 
@@ -207,7 +212,9 @@ def enumerate_sessions_rich() -> List[Dict[str, Any]]:
         status = str(s.get("status") or "")
         protocol = str(s.get("protocol") or "")
         item = dict(s)
-        item["can_capture"] = _can_capture(status, sid, protocol)
+        item["can_capture"] = _can_capture(
+            status, sid, protocol, pre_logon=bool(item.get("pre_logon"))
+        )
         item.setdefault("client_name", None)
         item.setdefault("client_ip", None)
         item.setdefault("login_time", None)
@@ -226,7 +233,9 @@ def enrich_sessions_can_capture(sessions: List[dict]) -> List[dict]:
             sid = 0
         status = str(item.get("status") or "")
         protocol = str(item.get("protocol") or "")
-        item["can_capture"] = _can_capture(status, sid, protocol)
+        item["can_capture"] = _can_capture(
+            status, sid, protocol, pre_logon=bool(item.get("pre_logon"))
+        )
         out.append(item)
     return out
 
@@ -286,8 +295,20 @@ def prepare_remote_session(
     """Make target user desktop Active + capturable before remote_stream_start.
 
     password: one-shot from dashboard — never written to disk/logs.
+    prefer:
+      - existing_then_logon (default): existing session, else console Winlogon
+      - existing: require an existing interactive session
+      - winlogon: console pre-logon UI (type credentials on stream)
     """
     user = (username or "").strip()
+    prefer_l = str(prefer or "existing_then_logon").strip().lower()
+    if prefer_l in ("winlogon", "console", "pre_logon", "pre-logon"):
+        return _prepare_winlogon(progress_cb=progress_cb)
+
+    if not user and prefer_l != "existing":
+        # Empty username → operator wants the logon screen itself.
+        return _prepare_winlogon(progress_cb=progress_cb)
+
     if not user:
         return {
             "success": False,
@@ -341,7 +362,10 @@ def prepare_remote_session(
             }
     else:
         ul = user.lower()
-        cands = [s for s in sessions if str(s.get("username") or "").lower() == ul]
+        cands = [
+            s for s in sessions
+            if str(s.get("username") or "").lower() == ul and not s.get("pre_logon")
+        ]
         if cands:
             # Prefer Active then highest session id
             cands.sort(
@@ -353,25 +377,33 @@ def prepare_remote_session(
             target = cands[0]
 
     if target is None:
-        # Fresh interactive logon from Session 0 is not reliably creatable without
-        # autologon/RDP. Password was validated if provided — ask operator to RDP once.
-        return {
-            "success": False,
-            "error": "UNSUPPORTED",
-            "message": (
-                "No existing interactive session for this user. "
-                "Log on once via console/RDP, then retry prepare "
-                "(fresh Session-0 logon is not supported without autologon)."
-            ),
-            "data": {
-                "username": user,
-                "ready_for_stream": False,
-                "prefer": prefer,
-            },
-        }
+        if prefer_l == "existing":
+            return {
+                "success": False,
+                "error": "UNSUPPORTED",
+                "message": (
+                    "No existing interactive session for this user. "
+                    "Use prefer=winlogon to mirror the console logon UI, "
+                    "or log on once via console/RDP / remote_logon."
+                ),
+                "data": {
+                    "username": user,
+                    "ready_for_stream": False,
+                    "prefer": prefer,
+                },
+            }
+        # Default: fall through to console Winlogon so credentials can be typed.
+        _progress("winlogon", "no user session — console logon UI")
+        wl = _prepare_winlogon(progress_cb=progress_cb)
+        if wl.get("success"):
+            wl.setdefault("data", {})["username"] = user
+            wl["message"] = "ready_for_stream (winlogon — type credentials on stream)"
+        return wl
 
     sid = int(target.get("session_id") or 0)
     status = str(target.get("status") or "")
+    if target.get("pre_logon"):
+        return _prepare_winlogon(progress_cb=progress_cb)
 
     # 3) Activate Disconnected
     if status.lower() != "active":
@@ -456,3 +488,55 @@ def prepare_remote_session(
             "message": str(e),
             "data": {"username": user, "session_id": sid},
         }
+
+
+def _prepare_winlogon(*, progress_cb=None) -> Dict[str, Any]:
+    """Probe console Winlogon / input desktop for pre-logon remote desktop."""
+    def _progress(phase: str, msg: str = ""):
+        if callable(progress_cb):
+            try:
+                progress_cb(phase, msg)
+            except Exception:
+                pass
+
+    _progress("winlogon", "probing console desktop")
+    try:
+        from client_rd_winlogon import probe_winlogon_capture, console_session_id
+        probe = probe_winlogon_capture()
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "NO_WINLOGON_DESKTOP",
+            "message": str(exc),
+            "data": {"ready_for_stream": False, "method": "winlogon"},
+        }
+    sid = int(probe.get("session_id") or console_session_id() or 0)
+    if not probe.get("ok"):
+        return {
+            "success": False,
+            "error": probe.get("error") or "NO_WINLOGON_DESKTOP",
+            "message": probe.get("message") or "console Winlogon not capturable",
+            "data": {
+                "ready_for_stream": False,
+                "session_id": sid or None,
+                "desktop": probe.get("desktop") or "",
+                "method": "winlogon",
+            },
+        }
+    return {
+        "success": True,
+        "message": "ready_for_stream (winlogon)",
+        "data": {
+            "ready_for_stream": True,
+            "session_id": sid,
+            "username": "",
+            "session_status": "Connected",
+            "screen": {
+                "w": int(probe.get("width") or 0),
+                "h": int(probe.get("height") or 0),
+            },
+            "desktop": probe.get("desktop") or "Winlogon",
+            "method": "winlogon",
+            "pre_logon": True,
+        },
+    }

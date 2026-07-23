@@ -1,3 +1,6 @@
+# v4.9.21
+- **Remote Desktop Winlogon / pre-logon (contract 1.4.21):** When no interactive user is logged on, mirror console `WinSta0`/`Winlogon` so operators can type credentials on the stream. `list_sessions` synthesizes `pre_logon` console row; `remote_session_prepare` defaults to Winlogon probe instead of `UNSUPPORTED` (`prefer=existing` keeps old gate). Input attaches to Winlogon; switches to Default after logon.
+
 # v4.9.20
 - **Remote Desktop smoothness (contract 1.4.20):** WebRTC path uses raw RGB mailbox (no JPEG double-encode); HW H.264 when FFmpeg exposes nvenc/qsv/amf else x264 ultrafast+zerolatency; idle unchanged-frame skip; capture ~45 fps on media; move rate 120/s; critical ACK 80 ms; adaptive JPEG knobs do not thrash helper while WebRTC connected; `media.encoder` / `target_bitrate_bps` telemetry.
 

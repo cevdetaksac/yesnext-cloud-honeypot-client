@@ -1,3 +1,6 @@
+# v4.9.17
+- **Defense Policy onboarding (contract 1.4.19):** Fresh install / empty cache defaults to **observe** (alerts on, no auto kill). Configurable auto-promote observe?balanced (default 3 days; lockable). GUI education for ?zleme/Denge/Tetikte + CTA. Never auto-opens paranoid/isolate. Cloud POST backup on promote.
+
 # v4.9.16
 - **Defense Policy P0 (contract 1.4.18):** `protection.defense_policy` / `defense_rules` / `defense_policy_version` / `isolate_armed` apply via CONFIG-SYNC + boot hydrate. Signed `defense_policy.json` + LKG; tamper -> LKG/observe (never isolate/escalate). Matrix gates canary/VSS/critical process (`alert_only` | `suspend_process` | `kill_quarantine`). Hard-reject `auto_isolate_network` on observe/balanced (and unarmed paranoid). `allow_process` / `list_allowed_processes`; `isolate_host` rejected unless paranoid+armed (P2 path not yet enabled). Session JPEG snapshot on red events (dedupe >=5 min). STATUS/health: `defense_policy{}`. Anti-bait unit tests.
 

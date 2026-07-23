@@ -111,15 +111,75 @@ SNAPSHOT_DEDUPE_SEC = 300.0  # ≥5 min per trigger family
 
 _lock = threading.RLock()
 _state: Dict[str, Any] = {
-    "policy_name": "balanced",
+    "policy_name": "observe",
     "policy_version": "",
     "isolate_armed": False,
-    "rules": dict(PRESET_RULES["balanced"]),
+    "rules": dict(PRESET_RULES["observe"]),
     "sig_ok": True,
-    "source": "builtin_balanced",
+    "source": "builtin_observe",
     "updated_at": "",
     "tamper_alerted": False,
+    "observe_started_at": "",
+    "observe_auto_promote_days": 3,
+    "observe_auto_promote_enabled": True,
+    "defense_policy_locked": False,
+    "policy_user_set": False,
+    "cta_dismissed": False,
 }
+
+MODE_EDUCATION = {
+    "observe": {
+        "tr": {
+            "title": "İzleme",
+            "blurb": (
+                "Tüm uyarıları görürsünüz; süreç otomatik öldürülmez ve ağ "
+                "kesilmez. Kurulum sonrası önerilen ilk moddur."
+            ),
+        },
+        "en": {
+            "title": "Observe",
+            "blurb": (
+                "You see every alert; processes are not auto-killed and the "
+                "network stays up. Recommended first mode after install."
+            ),
+        },
+    },
+    "balanced": {
+        "tr": {
+            "title": "Denge",
+            "blurb": (
+                "Kırmızı tehditte şüpheli süreç durdurulur veya karantinaya "
+                "alınır; RDP ve internet ayakta kalır. Çoğu sunucu için önerilir."
+            ),
+        },
+        "en": {
+            "title": "Balanced",
+            "blurb": (
+                "On confirmed red threats the suspect process is stopped or "
+                "quarantined; RDP and internet stay up. Recommended for most hosts."
+            ),
+        },
+    },
+    "paranoid": {
+        "tr": {
+            "title": "Tetikte",
+            "blurb": (
+                "Daha agresif süreç tepkisi. Ağ izolasyonu ayrı onay ister "
+                "(RDP kesilebilir — brick riski)."
+            ),
+        },
+        "en": {
+            "title": "Paranoid",
+            "blurb": (
+                "More aggressive process response. Network isolation needs a "
+                "separate arm (RDP may drop — brick risk)."
+            ),
+        },
+    },
+}
+
+DEFAULT_PROMOTE_DAYS = 3
+
 _allowlist: Dict[str, Any] = {"entries": []}
 _snapshot_last: Dict[str, float] = {}
 _on_tamper_alert: Optional[Callable[[dict], None]] = None
@@ -240,18 +300,28 @@ def _hard_safety_rules(
 
 def build_effective(
     *,
-    policy_name: str = "balanced",
+    policy_name: str = "observe",
     policy_version: str = "",
     rules: Optional[dict] = None,
     isolate_armed: bool = False,
     source: str = "",
+    observe_started_at: str = "",
+    observe_auto_promote_days: int = DEFAULT_PROMOTE_DAYS,
+    observe_auto_promote_enabled: bool = True,
+    defense_policy_locked: bool = False,
+    policy_user_set: bool = False,
 ) -> dict:
-    name = str(policy_name or "balanced").strip().lower()
+    name = str(policy_name or "observe").strip().lower()
     if name not in POLICY_NAMES:
-        name = "balanced"
+        name = "observe"
     armed = bool(isolate_armed) if name == "paranoid" else False
     norm = _normalize_rules(rules, name)
     safe, warnings = _hard_safety_rules(norm, name, armed)
+    try:
+        days = int(observe_auto_promote_days)
+    except (TypeError, ValueError):
+        days = DEFAULT_PROMOTE_DAYS
+    days = max(0, min(14, days))
     payload = {
         "policy_name": name,
         "policy_version": str(policy_version or ""),
@@ -260,8 +330,24 @@ def build_effective(
         "updated_at": _utc_now(),
         "source": source or "local",
         "warnings": warnings,
+        "observe_started_at": str(observe_started_at or ""),
+        "observe_auto_promote_days": days,
+        "observe_auto_promote_enabled": bool(observe_auto_promote_enabled),
+        "defense_policy_locked": bool(defense_policy_locked),
+        "policy_user_set": bool(policy_user_set),
     }
     return payload
+
+
+def education_for(policy_name: str, lang: str = "tr") -> dict:
+    name = str(policy_name or "observe").lower()
+    block = MODE_EDUCATION.get(name) or MODE_EDUCATION["observe"]
+    loc = block.get(lang) or block.get("tr") or {}
+    return {"policy": name, "title": loc.get("title") or name, "blurb": loc.get("blurb") or ""}
+
+
+def all_education(lang: str = "tr") -> List[dict]:
+    return [education_for(n, lang) for n in POLICY_NAMES]
 
 
 def extract_from_config(config: Optional[dict]) -> Optional[dict]:
@@ -269,7 +355,6 @@ def extract_from_config(config: Optional[dict]) -> Optional[dict]:
     if not isinstance(config, dict):
         return None
     prot = config.get("protection") if isinstance(config.get("protection"), dict) else {}
-    # Prefer nested protection.*, fall back to root
     name = (
         prot.get("defense_policy")
         or config.get("defense_policy")
@@ -292,18 +377,31 @@ def extract_from_config(config: Optional[dict]) -> Optional[dict]:
         or config.get("sig")
         or ""
     )
-    # Nothing defense-related → None (keep cache)
-    if not name and not version and not isinstance(rules, dict) and not sig:
+    onboard_keys = (
+        "observe_started_at",
+        "observe_auto_promote_days",
+        "observe_auto_promote_enabled",
+        "defense_policy_locked",
+        "policy_user_set",
+    )
+    has_onboard = any((k in prot) or (k in config) for k in onboard_keys)
+    if not name and not version and not isinstance(rules, dict) and not sig and not has_onboard:
         return None
     if not name:
-        name = get_state().get("policy_name") or "balanced"
-    return {
+        name = get_state().get("policy_name") or "observe"
+    out = {
         "policy_name": name,
         "policy_version": str(version or ""),
         "isolate_armed": bool(armed) if armed is not None else False,
         "rules": rules if isinstance(rules, dict) else None,
         "sig": str(sig or ""),
     }
+    for k in onboard_keys:
+        if k in prot:
+            out[k] = prot.get(k)
+        elif k in config:
+            out[k] = config.get(k)
+    return out
 
 
 def _atomic_write_json(path: str, payload: dict) -> bool:
@@ -389,6 +487,25 @@ def _apply_state(effective: dict, *, sig_ok: bool, source: str) -> dict:
         _state["sig_ok"] = bool(sig_ok)
         _state["source"] = source
         _state["updated_at"] = effective.get("updated_at") or _utc_now()
+        if "observe_started_at" in effective:
+            _state["observe_started_at"] = str(effective.get("observe_started_at") or "")
+        if "observe_auto_promote_days" in effective:
+            try:
+                _state["observe_auto_promote_days"] = max(
+                    0, min(14, int(effective.get("observe_auto_promote_days")))
+                )
+            except (TypeError, ValueError):
+                pass
+        if "observe_auto_promote_enabled" in effective:
+            _state["observe_auto_promote_enabled"] = bool(
+                effective.get("observe_auto_promote_enabled")
+            )
+        if "defense_policy_locked" in effective:
+            _state["defense_policy_locked"] = bool(effective.get("defense_policy_locked"))
+        if "policy_user_set" in effective:
+            _state["policy_user_set"] = bool(effective.get("policy_user_set"))
+        if _state["policy_name"] == "observe" and not _state.get("observe_started_at"):
+            _state["observe_started_at"] = _utc_now()
         if sig_ok and source not in ("tamper_observe", "tamper_lkg"):
             _state["tamper_alerted"] = False
         return dict(_state)
@@ -404,11 +521,22 @@ def get_state() -> dict:
             "sig_ok": _state["sig_ok"],
             "source": _state["source"],
             "updated_at": _state["updated_at"],
+            "observe_started_at": _state.get("observe_started_at") or "",
+            "observe_auto_promote_days": int(
+                _state.get("observe_auto_promote_days") or 0
+            ),
+            "observe_auto_promote_enabled": bool(
+                _state.get("observe_auto_promote_enabled", True)
+            ),
+            "defense_policy_locked": bool(_state.get("defense_policy_locked")),
+            "policy_user_set": bool(_state.get("policy_user_set")),
+            "cta_dismissed": bool(_state.get("cta_dismissed")),
         }
 
 
 def status_summary() -> dict:
     st = get_state()
+    due = promote_due_info()
     return {
         "present": True,
         "defense_policy": st["policy_name"],
@@ -419,6 +547,14 @@ def status_summary() -> dict:
         "updated_at": st["updated_at"],
         "rules": dict(st["rules"]),
         "allowlist_entries": len(load_allowlist().get("entries") or []),
+        "observe_started_at": st["observe_started_at"],
+        "observe_auto_promote_days": st["observe_auto_promote_days"],
+        "observe_auto_promote_enabled": st["observe_auto_promote_enabled"],
+        "defense_policy_locked": st["defense_policy_locked"],
+        "policy_user_set": st["policy_user_set"],
+        "promote_due": bool(due.get("due")),
+        "promote_in_sec": due.get("in_sec"),
+        "education": all_education("tr"),
     }
 
 
@@ -613,7 +749,7 @@ def maybe_capture_session_snapshot(
                 "bytes": meta["bytes"],
                 "at": meta["at"],
             }
-        log(f"[DEFENSE-POLICY] session snapshot {family} → {path}")
+        log(f"[DEFENSE-POLICY] session snapshot {family} -> {path}")
         return meta
     except Exception as e:
         log(f"[DEFENSE-POLICY] session snapshot skipped: {e}")
@@ -632,13 +768,35 @@ def apply_from_config(config: Optional[dict], *, token: Optional[str] = None) ->
     if extracted is None:
         return get_state()
 
+    prev = get_state()
     cloud_sig = extracted.get("sig") or ""
+    started = extracted.get("observe_started_at")
+    if started is None:
+        started = prev.get("observe_started_at") or ""
+    days = extracted.get("observe_auto_promote_days")
+    if days is None:
+        days = prev.get("observe_auto_promote_days", DEFAULT_PROMOTE_DAYS)
+    enabled = extracted.get("observe_auto_promote_enabled")
+    if enabled is None:
+        enabled = prev.get("observe_auto_promote_enabled", True)
+    locked = extracted.get("defense_policy_locked")
+    if locked is None:
+        locked = prev.get("defense_policy_locked", False)
+    user_set = extracted.get("policy_user_set")
+    if user_set is None:
+        user_set = prev.get("policy_user_set", False)
+
     effective = build_effective(
-        policy_name=extracted.get("policy_name") or "balanced",
+        policy_name=extracted.get("policy_name") or "observe",
         policy_version=extracted.get("policy_version") or "",
         rules=extracted.get("rules"),
         isolate_armed=bool(extracted.get("isolate_armed")),
         source="threats/config",
+        observe_started_at=str(started or ""),
+        observe_auto_promote_days=int(days) if days is not None else DEFAULT_PROMOTE_DAYS,
+        observe_auto_promote_enabled=bool(enabled),
+        defense_policy_locked=bool(locked),
+        policy_user_set=bool(user_set),
     )
     for w in effective.get("warnings") or []:
         log(f"[DEFENSE-POLICY] hard-safety: {w}")
@@ -649,7 +807,6 @@ def apply_from_config(config: Optional[dict], *, token: Optional[str] = None) ->
         "isolate_armed": effective["isolate_armed"],
         "rules": effective["rules"],
     }
-    # Cloud may sign a slightly different shape; try extracted envelope too
     if cloud_sig:
         candidates = [
             {**verify_body, "sig": cloud_sig},
@@ -688,10 +845,18 @@ def fail_safe_load(*, reason: str = "unknown") -> dict:
             policy_name=lkg.get("policy_name") or "observe",
             policy_version=lkg.get("policy_version") or "",
             rules=lkg.get("rules"),
-            isolate_armed=False,  # never carry armed across tamper
+            isolate_armed=False,
             source="tamper_lkg",
+            observe_started_at=lkg.get("observe_started_at") or _utc_now(),
+            observe_auto_promote_days=int(
+                lkg.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+            ),
+            observe_auto_promote_enabled=bool(
+                lkg.get("observe_auto_promote_enabled", True)
+            ),
+            defense_policy_locked=False,
+            policy_user_set=False,
         )
-        # Re-sign as current cache without promoting broken file as LKG
         save_signed_cache(effective, promote_lkg=False)
         return _apply_state(effective, sig_ok=True, source="tamper_lkg")
 
@@ -701,36 +866,56 @@ def fail_safe_load(*, reason: str = "unknown") -> dict:
         rules=PRESET_RULES["observe"],
         isolate_armed=False,
         source="tamper_observe",
+        observe_started_at=_utc_now(),
     )
     save_signed_cache(effective, promote_lkg=False)
     return _apply_state(effective, sig_ok=False, source="tamper_observe")
 
 
 def hydrate_from_disk() -> dict:
-    """Boot: load signed cache or LKG/observe."""
+    """Boot: load signed cache or first-boot observe."""
     load_allowlist()
     data = _read_json(POLICY_FILE)
     if data:
         if verify_payload(data):
             effective = build_effective(
-                policy_name=data.get("policy_name") or "balanced",
+                policy_name=data.get("policy_name") or "observe",
                 policy_version=data.get("policy_version") or "",
                 rules=data.get("rules"),
                 isolate_armed=bool(data.get("isolate_armed")),
                 source="programdata",
+                observe_started_at=data.get("observe_started_at") or "",
+                observe_auto_promote_days=int(
+                    data.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+                ),
+                observe_auto_promote_enabled=bool(
+                    data.get("observe_auto_promote_enabled", True)
+                ),
+                defense_policy_locked=bool(data.get("defense_policy_locked")),
+                policy_user_set=bool(data.get("policy_user_set")),
             )
-            return _apply_state(effective, sig_ok=True, source="programdata")
+            st = _apply_state(effective, sig_ok=True, source="programdata")
+            # Persist observe clock if newly stamped
+            if st.get("observe_started_at") and not data.get("observe_started_at"):
+                effective["observe_started_at"] = st["observe_started_at"]
+                save_signed_cache(effective, promote_lkg=False)
+            return st
         return fail_safe_load(reason="cache_sig_invalid")
-    # First boot — balanced defaults, signed locally
+    # First boot — observe defaults (contract 1.4.19)
     effective = build_effective(
-        policy_name="balanced",
+        policy_name="observe",
         policy_version="",
-        rules=PRESET_RULES["balanced"],
+        rules=PRESET_RULES["observe"],
         isolate_armed=False,
-        source="builtin_balanced",
+        source="builtin_observe",
+        observe_started_at=_utc_now(),
+        observe_auto_promote_days=DEFAULT_PROMOTE_DAYS,
+        observe_auto_promote_enabled=True,
+        defense_policy_locked=False,
+        policy_user_set=False,
     )
     save_signed_cache(effective, promote_lkg=False)
-    return _apply_state(effective, sig_ok=True, source="builtin_balanced")
+    return _apply_state(effective, sig_ok=True, source="builtin_observe")
 
 
 def process_action_plan(event_type: str) -> dict:
@@ -750,4 +935,161 @@ def process_action_plan(event_type: str) -> dict:
         "inform_only": act == "inform_only",
         "ask_operator": act == "ask_operator",
         "alert_only": act == "alert_only",
+    }
+
+
+def _parse_iso(ts: str) -> Optional[float]:
+    if not ts:
+        return None
+    try:
+        s = str(ts).strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def promote_due_info() -> dict:
+    st = get_state()
+    if st["policy_name"] != "observe":
+        return {"due": False, "reason": "not_observe"}
+    if st.get("defense_policy_locked"):
+        return {"due": False, "reason": "locked"}
+    if not st.get("observe_auto_promote_enabled", True):
+        return {"due": False, "reason": "disabled"}
+    days = int(st.get("observe_auto_promote_days") or 0)
+    if days <= 0:
+        return {"due": False, "reason": "days_zero"}
+    started = _parse_iso(st.get("observe_started_at") or "")
+    if started is None:
+        return {"due": False, "reason": "no_start", "in_sec": None}
+    deadline = started + (days * 86400)
+    remaining = deadline - time.time()
+    return {
+        "due": remaining <= 0,
+        "in_sec": max(0, int(remaining)),
+        "days": days,
+        "reason": "elapsed" if remaining <= 0 else "waiting",
+    }
+
+
+def set_observe_locked(locked: bool = True) -> dict:
+    st = get_state()
+    effective = build_effective(
+        policy_name=st["policy_name"],
+        policy_version=st.get("policy_version") or "",
+        rules=st.get("rules"),
+        isolate_armed=bool(st.get("isolate_armed")),
+        source="user_lock",
+        observe_started_at=st.get("observe_started_at") or _utc_now(),
+        observe_auto_promote_days=int(
+            st.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+        ),
+        observe_auto_promote_enabled=not locked if locked else st.get(
+            "observe_auto_promote_enabled", True
+        ),
+        defense_policy_locked=bool(locked),
+        policy_user_set=True,
+    )
+    if locked:
+        effective["observe_auto_promote_enabled"] = False
+    save_signed_cache(effective, promote_lkg=True)
+    return _apply_state(effective, sig_ok=True, source="user_lock")
+
+
+def set_policy_user(
+    policy_name: str,
+    *,
+    isolate_armed: bool = False,
+) -> dict:
+    """Operator/GUI chose a preset explicitly."""
+    name = str(policy_name or "observe").lower()
+    if name not in POLICY_NAMES:
+        name = "observe"
+    st = get_state()
+    effective = build_effective(
+        policy_name=name,
+        policy_version=st.get("policy_version") or "",
+        rules=PRESET_RULES[name],
+        isolate_armed=bool(isolate_armed) if name == "paranoid" else False,
+        source="user_set",
+        observe_started_at=(
+            st.get("observe_started_at") or _utc_now()
+            if name == "observe"
+            else st.get("observe_started_at") or ""
+        ),
+        observe_auto_promote_days=int(
+            st.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+        ),
+        observe_auto_promote_enabled=False if name != "observe" else st.get(
+            "observe_auto_promote_enabled", True
+        ),
+        defense_policy_locked=bool(st.get("defense_policy_locked")),
+        policy_user_set=True,
+    )
+    save_signed_cache(effective, promote_lkg=True)
+    return _apply_state(effective, sig_ok=True, source="user_set")
+
+
+def promote_to_balanced(*, source: str = "auto_promote") -> dict:
+    """Observe → balanced only. Never paranoid / never isolate_armed."""
+    st = get_state()
+    if st["policy_name"] != "observe":
+        return st
+    effective = build_effective(
+        policy_name="balanced",
+        policy_version=st.get("policy_version") or "",
+        rules=PRESET_RULES["balanced"],
+        isolate_armed=False,
+        source=source,
+        observe_started_at=st.get("observe_started_at") or "",
+        observe_auto_promote_days=int(
+            st.get("observe_auto_promote_days") or DEFAULT_PROMOTE_DAYS
+        ),
+        observe_auto_promote_enabled=False,
+        defense_policy_locked=False,
+        policy_user_set=False,
+    )
+    save_signed_cache(effective, promote_lkg=True)
+    st2 = _apply_state(effective, sig_ok=True, source=source)
+    log(f"[DEFENSE-POLICY] promoted observe -> balanced ({source})")
+    cb = _on_tamper_alert  # reuse alert pipeline callback
+    if cb:
+        try:
+            cb({
+                "event_type": "defense_policy_promoted",
+                "threat_type": "defense_policy_promoted",
+                "severity": "info",
+                "threat_score": 10,
+                "force_urgent": False,
+                "title": "Savunma dengesi açıldı",
+                "description": (
+                    "İzleme süresi doldu — Denge moduna geçildi. "
+                    "Kırmızı tehditlerde süreç korunur; ağ kesilmez."
+                ),
+                "recommended_action": "none",
+                "auto_response_taken": ["auto_promote_balanced"],
+                "details": {"from": "observe", "to": "balanced", "source": source},
+            })
+        except Exception:
+            pass
+    return st2
+
+
+def maybe_auto_promote() -> Optional[dict]:
+    """If observe window elapsed, promote to balanced. Returns new state or None."""
+    info = promote_due_info()
+    if not info.get("due"):
+        return None
+    return promote_to_balanced(source="client_auto_promote")
+
+
+def cloud_promote_patch() -> dict:
+    """Body for POST /api/threats/config when client backups cloud job."""
+    return {
+        "protection": {
+            "defense_policy": "balanced",
+            "isolate_armed": False,
+            "observe_auto_promote_enabled": False,
+            "defense_rules": dict(PRESET_RULES["balanced"]),
+        }
     }

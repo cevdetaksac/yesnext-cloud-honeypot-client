@@ -1343,6 +1343,9 @@ class ModernGUI:
             text_color=COLORS["orange"],
         ).pack(anchor="w", padx=12, pady=9)
 
+        # Defense Policy education + mode actions (contract 1.4.19)
+        self._build_defense_policy_card(shell)
+
         self._layer_switches = {}
         self._layer_values = {}
         definitions = [
@@ -1402,6 +1405,141 @@ class ModernGUI:
             command=lambda: self._show_page("settings"),
         ).pack(side="right")
         self._load_security_layers()
+
+    def _build_defense_policy_card(self, parent):
+        """Observe / Balanced / Paranoid education + CTA (contract 1.4.19)."""
+        card = ctk.CTkFrame(
+            parent, fg_color=COLORS["bg"], corner_radius=8,
+            border_width=1, border_color=COLORS["border"],
+        )
+        card.pack(fill="x", padx=18, pady=(0, 12))
+        self._dp_card = card
+        self._dp_title = ctk.CTkLabel(
+            card, text=self.t("dp_title"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLORS["text_bright"],
+        )
+        self._dp_title.pack(anchor="w", padx=12, pady=(10, 2))
+        self._dp_status = ctk.CTkLabel(
+            card, text="", justify="left", wraplength=720,
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+        )
+        self._dp_status.pack(anchor="w", padx=12, pady=(0, 6))
+        edu = ctk.CTkFrame(card, fg_color="transparent")
+        edu.pack(fill="x", padx=8, pady=(0, 6))
+        try:
+            from client_defense_policy import all_education
+            lang = "tr"
+            try:
+                lang = "en" if str(getattr(self, "lang", "tr")).lower().startswith("en") else "tr"
+            except Exception:
+                pass
+            for item in all_education(lang):
+                row = ctk.CTkFrame(edu, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=2)
+                ctk.CTkLabel(
+                    row, text=f"• {item.get('title')}:",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["text"],
+                ).pack(anchor="w")
+                ctk.CTkLabel(
+                    row, text=item.get("blurb") or "",
+                    justify="left", wraplength=700,
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
+                ).pack(anchor="w")
+        except Exception:
+            pass
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=(4, 12))
+        ctk.CTkButton(
+            btns, text=self.t("dp_btn_balanced"),
+            font=ctk.CTkFont(size=11), height=28, width=160,
+            fg_color=COLORS.get("green", "#2d6a4f"),
+            command=lambda: self._set_defense_policy_gui("balanced"),
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btns, text=self.t("dp_btn_observe_lock"),
+            font=ctk.CTkFont(size=11), height=28, width=160,
+            fg_color="transparent", border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self._lock_observe_gui,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btns, text=self.t("dp_btn_paranoid"),
+            font=ctk.CTkFont(size=11), height=28, width=140,
+            fg_color="transparent", border_width=1, border_color=COLORS["orange"],
+            text_color=COLORS["orange"],
+            command=lambda: self._set_defense_policy_gui("paranoid"),
+        ).pack(side="left", padx=4)
+        self._refresh_defense_policy_card()
+
+    def _refresh_defense_policy_card(self):
+        try:
+            from client_defense_policy import education_for, get_state, promote_due_info
+            st = get_state()
+            due = promote_due_info()
+            edu = education_for(st.get("policy_name") or "observe", "tr")
+            days = int(st.get("observe_auto_promote_days") or 3)
+            extra = ""
+            if st.get("policy_name") == "observe" and not st.get("defense_policy_locked"):
+                if due.get("due"):
+                    extra = " — " + self.t("dp_promote_due")
+                elif due.get("in_sec") is not None:
+                    extra = f" — {self.t('dp_promote_in')} ~{max(1, int(due['in_sec']) // 86400)}g / {days}g"
+            text = (
+                f"{self.t('dp_current')}: {edu.get('title')} "
+                f"({st.get('policy_name')}){extra}\n{edu.get('blurb')}"
+            )
+            if getattr(self, "_dp_status", None):
+                self._dp_status.configure(text=text)
+        except Exception:
+            pass
+
+    def _set_defense_policy_gui(self, policy_name: str):
+        token = self.app.state.get("token", "")
+
+        def _worker():
+            try:
+                from client_defense_policy import set_policy_user
+                st = set_policy_user(policy_name)
+                if token and self.app.api_client:
+                    self.app.api_client.update_threat_config(token, {
+                        "protection": {
+                            "defense_policy": policy_name,
+                            "isolate_armed": False,
+                            "policy_user_set": True,
+                            "observe_auto_promote_enabled": policy_name == "observe",
+                            "defense_rules": dict(st.get("rules") or {}),
+                        }
+                    })
+            except Exception as e:
+                log(f"[GUI] defense_policy set error: {e}")
+            self._gui_safe(self._refresh_defense_policy_card)
+
+        threading.Thread(target=_worker, name="GUI-DefensePolicy", daemon=True).start()
+
+    def _lock_observe_gui(self):
+        token = self.app.state.get("token", "")
+
+        def _worker():
+            try:
+                from client_defense_policy import set_observe_locked, set_policy_user
+                set_policy_user("observe")
+                set_observe_locked(True)
+                if token and self.app.api_client:
+                    self.app.api_client.update_threat_config(token, {
+                        "protection": {
+                            "defense_policy": "observe",
+                            "defense_policy_locked": True,
+                            "observe_auto_promote_enabled": False,
+                            "policy_user_set": True,
+                        }
+                    })
+            except Exception as e:
+                log(f"[GUI] observe lock error: {e}")
+            self._gui_safe(self._refresh_defense_policy_card)
+
+        threading.Thread(target=_worker, name="GUI-ObserveLock", daemon=True).start()
 
     @staticmethod
     def _effective_threat_config(payload: dict) -> dict:

@@ -60,13 +60,53 @@ class TestDefensePolicyMatrix(unittest.TestCase):
         dp.set_tamper_alert_callback(None)
 
     def test_balanced_defaults_kill_canary_no_isolate(self):
-        st = dp.hydrate_from_disk()
-        self.assertEqual(st["policy_name"], "balanced")
+        dp.apply_from_config({
+            "protection": {
+                "defense_policy": "balanced",
+                "defense_rules": dict(dp.PRESET_RULES["balanced"]),
+            }
+        })
         plan = dp.process_action_plan("canary_write")
         self.assertEqual(plan["action"], "kill_quarantine")
         self.assertTrue(plan["kill"])
         self.assertFalse(plan["isolate_network"])
         self.assertFalse(dp.allows_network_isolate())
+
+    def test_fresh_hydrate_is_observe(self):
+        st = dp.hydrate_from_disk()
+        self.assertEqual(st["policy_name"], "observe")
+        self.assertEqual(dp.process_action_plan("canary_write")["action"], "alert_only")
+        self.assertTrue(st.get("observe_auto_promote_enabled"))
+        self.assertEqual(int(st.get("observe_auto_promote_days") or 0), 3)
+
+    def test_auto_promote_observe_to_balanced(self):
+        dp.apply_from_config({
+            "protection": {
+                "defense_policy": "observe",
+                "observe_started_at": "2020-01-01T00:00:00Z",
+                "observe_auto_promote_days": 3,
+                "observe_auto_promote_enabled": True,
+                "defense_policy_locked": False,
+                "defense_rules": dict(dp.PRESET_RULES["observe"]),
+            }
+        })
+        self.assertTrue(dp.promote_due_info().get("due"))
+        st = dp.maybe_auto_promote()
+        self.assertEqual(st["policy_name"], "balanced")
+        self.assertEqual(dp.process_action_plan("canary_write")["action"], "kill_quarantine")
+        self.assertFalse(dp.allows_network_isolate())
+
+    def test_locked_observe_skips_promote(self):
+        dp.apply_from_config({
+            "protection": {
+                "defense_policy": "observe",
+                "observe_started_at": "2020-01-01T00:00:00Z",
+                "observe_auto_promote_days": 1,
+                "defense_policy_locked": True,
+            }
+        })
+        self.assertFalse(dp.promote_due_info().get("due"))
+        self.assertIsNone(dp.maybe_auto_promote())
 
     def test_observe_alert_only_canary(self):
         dp.apply_from_config({

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.16"  # Defense Policy matrix + signed cache (contract 1.4.18)
+VERSION = "4.9.17"  # Observe default + auto-promote + education (contract 1.4.19)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

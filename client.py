@@ -1141,6 +1141,23 @@ class CloudHoneypotClient:
                         f"src={dp_st.get('source')} "
                         f"sig_ok={dp_st.get('sig_ok')}"
                     )
+                    # Client backup: observe window elapsed → balanced
+                    try:
+                        from client_defense_policy import (
+                            cloud_promote_patch,
+                            maybe_auto_promote,
+                            promote_due_info,
+                        )
+                        due = promote_due_info()
+                        if due.get("due"):
+                            patch = cloud_promote_patch()
+                            try:
+                                self.api_client.update_threat_config(token, patch)
+                            except Exception as pe:
+                                log(f"[DEFENSE-POLICY] cloud promote POST: {pe}")
+                            maybe_auto_promote()
+                    except Exception as pme:
+                        log(f"[DEFENSE-POLICY] auto-promote check: {pme}")
                 except Exception as dpe:
                     log(f"[CONFIG-SYNC] defense_policy apply error: {dpe}")
 

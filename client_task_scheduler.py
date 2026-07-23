@@ -247,6 +247,14 @@ def ensure_memory_restart_script_on_disk() -> str:
     src = next((p for p in sources if p and os.path.isfile(p)), None)
     try:
         os.makedirs(scripts_dir, exist_ok=True)
+        # Remove installer-only helpers if an older build left them world-readable.
+        for name in ("kill-honeypot.ps1", "prepare-install-dir.ps1", "update-and-install.ps1"):
+            try:
+                stale = os.path.join(scripts_dir, name)
+                if os.path.isfile(stale):
+                    os.remove(stale)
+            except OSError:
+                pass
         if src:
             need_copy = True
             if os.path.isfile(dest):
@@ -257,9 +265,42 @@ def ensure_memory_restart_script_on_disk() -> str:
             if need_copy:
                 import shutil
                 shutil.copy2(src, dest)
+        _harden_scripts_dir_acl(scripts_dir)
         return dest if os.path.isfile(dest) else (src or dest)
     except Exception:
         return src or dest
+
+
+def _harden_scripts_dir_acl(scripts_dir: str) -> None:
+    """SYSTEM + Administrators only — block standard Users from running helpers."""
+    if not scripts_dir or not os.path.isdir(scripts_dir):
+        return
+    try:
+        subprocess.run(
+            [
+                "icacls",
+                scripts_dir,
+                "/inheritance:r",
+                "/grant:r",
+                "NT AUTHORITY\\SYSTEM:(OI)(CI)F",
+                "/grant:r",
+                "BUILTIN\\Administrators:(OI)(CI)F",
+                "/remove:g",
+                "BUILTIN\\Users",
+                "/remove:g",
+                "Everyone",
+                "/remove:g",
+                "NT AUTHORITY\\Authenticated Users",
+                "/T",
+                "/C",
+                "/Q",
+            ],
+            capture_output=True,
+            timeout=20,
+            creationflags=0x08000000,
+        )
+    except Exception:
+        pass
 
 
 def _build_memory_restart_action() -> str:

@@ -2049,12 +2049,34 @@ def stage_update_install_helper(*, allow_emergency: bool = True) -> Optional[str
     dst = os.path.join(_update_helper_staging_dir(), "update-and-install.ps1")
     src = next((p for p in resolve_helper_source_candidates() if os.path.isfile(p)), None)
 
+    def _harden_update_staging(path: str) -> None:
+        folder = os.path.dirname(path)
+        try:
+            subprocess.run(
+                [
+                    "icacls", folder,
+                    "/inheritance:r",
+                    "/grant:r", "NT AUTHORITY\\SYSTEM:(OI)(CI)F",
+                    "/grant:r", "BUILTIN\\Administrators:(OI)(CI)F",
+                    "/remove:g", "BUILTIN\\Users",
+                    "/remove:g", "Everyone",
+                    "/remove:g", "NT AUTHORITY\\Authenticated Users",
+                    "/T", "/C", "/Q",
+                ],
+                capture_output=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+
     def _try_stage_text(raw: str, tag: str) -> Optional[str]:
         ascii_body = normalize_ps1_to_ascii(raw)
         if not write_ascii_ps1(dst, ascii_body):
             return None
         ok, detail = validate_powershell_parse(dst)
         if ok:
+            _harden_update_staging(dst)
             return dst
         try:
             log_path = os.path.join(

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.23"  # Installer: per-file relocate when _internal dir locked
+VERSION = "4.9.24"  # Harden scripts ACL; no kill/update ps1 in Program Files
 
 
 CLIENT_VERSION = VERSION  # Main version constant

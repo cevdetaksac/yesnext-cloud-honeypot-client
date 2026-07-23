@@ -12,7 +12,7 @@ OutFile "cloud-client-installer.exe"
 !define DESCRIPTION "Cloud Honeypot Client - System Security Monitor"
 !define VERSIONMAJOR 4
 !define VERSIONMINOR 9
-!define VERSIONBUILD 23
+!define VERSIONBUILD 24
 
 InstallDir "$PROGRAMFILES64\${COMPANYNAME}\${APPNAME}"
 
@@ -252,6 +252,23 @@ Function PreInstallKillFast
     DetailPrint "[PRE-KILL] kill-honeypot.ps1 exit code: $0"
 FunctionEnd
 
+; Restrict scripts\ to SYSTEM + Administrators (deny interactive Users RX).
+Function HardenInstallScriptsAcl
+    DetailPrint "[ACL] Hardening helper script folders ..."
+    ; $INSTDIR\scripts (memory_restart) + onedir datas scripts (update helper in _internal)
+    nsExec::ExecToLog 'icacls "$INSTDIR\scripts" /inheritance:r /grant:r "NT AUTHORITY\SYSTEM:(OI)(CI)F" /grant:r "BUILTIN\Administrators:(OI)(CI)F" /remove:g "BUILTIN\Users" /remove:g "Everyone" /remove:g "NT AUTHORITY\Authenticated Users" /T /C /Q'
+    Pop $0
+    DetailPrint "[ACL] scripts icacls exit: $0"
+    IfFileExists "$INSTDIR\_internal\scripts" 0 HardenAclDone
+        nsExec::ExecToLog 'icacls "$INSTDIR\_internal\scripts" /inheritance:r /grant:r "NT AUTHORITY\SYSTEM:(OI)(CI)F" /grant:r "BUILTIN\Administrators:(OI)(CI)F" /remove:g "BUILTIN\Users" /remove:g "Everyone" /remove:g "NT AUTHORITY\Authenticated Users" /T /C /Q'
+        Pop $0
+        DetailPrint "[ACL] _internal\scripts icacls exit: $0"
+        ; Remove kill helper from onedir datas if present (installer-only tool)
+        Delete "$INSTDIR\_internal\scripts\kill-honeypot.ps1"
+        Delete "$INSTDIR\_internal\scripts\prepare-install-dir.ps1"
+    HardenAclDone:
+FunctionEnd
+
 ; Move locked onedir trees aside so File /r never hits Abort/Retry/Ignore.
 Function PrepareInstallDirForOverwrite
     DetailPrint "[PREP-DIR] Making install dir writable (rename locked _internal)..."
@@ -427,11 +444,16 @@ Section "Cloud Honeypot Client (Required)" SEC_MAIN
     File /oname=LICENSE "dist\LICENSE"
     File /oname=README.md "dist\README.md"
     CreateDirectory "$INSTDIR\scripts"
-    File /oname=scripts\kill-honeypot.ps1 "scripts\kill-honeypot.ps1"
-    File /oname=scripts\prepare-install-dir.ps1 "scripts\prepare-install-dir.ps1"
-    File /oname=scripts\update-and-install.ps1 "scripts\update-and-install.ps1"
+    ; Do NOT install kill/update helpers into Program Files — any local user can
+    ; read+execute them there. Installer embeds them in $PLUGINSDIR only.
+    ; Self-update stages update-and-install.ps1 under ProgramData (ACL'd).
+    ; Delete leftovers from older builds that shipped these scripts.
+    Delete "$INSTDIR\scripts\kill-honeypot.ps1"
+    Delete "$INSTDIR\scripts\prepare-install-dir.ps1"
+    Delete "$INSTDIR\scripts\update-and-install.ps1"
     File /oname=scripts\memory_restart.ps1 "memory_restart.ps1"
     !insertmacro LOG "[FILES] Application files installed (exe + _internal)."
+    Call HardenInstallScriptsAcl
 
     ; =================================================================
     ; PHASE 3: POST-INSTALLATION CONFIGURATION

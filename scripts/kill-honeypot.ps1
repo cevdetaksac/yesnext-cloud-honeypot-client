@@ -14,6 +14,22 @@ param(
 
 $ErrorActionPreference = "SilentlyContinue"
 
+# Refuse non-elevated runs — blocks casual double-click / standard-user abuse.
+try {
+    $principal = New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+    if (-not $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )) {
+        Write-Host "[KILL] Refusing - Administrator elevation required"
+        exit 5
+    }
+} catch {
+    Write-Host "[KILL] Refusing - elevation check failed"
+    exit 5
+}
+
 function Test-UpdateLockBlocksKill {
     if ($Force) { return $false }
     $candidates = @(

@@ -8,6 +8,22 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+
+# Scheduled task runs as SYSTEM; refuse interactive standard-user launches.
+try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($id)
+    $isAdmin = $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+    $isSystem = ($id.User.Value -eq "S-1-5-18")
+    if (-not ($isAdmin -or $isSystem)) {
+        Write-Host "[MEM-RESTART] Refusing - SYSTEM/Administrator required"
+        exit 5
+    }
+} catch {
+    exit 5
+}
 $ProgramDataDir = Join-Path $env:ProgramData "YesNext\CloudHoneypotClient"
 $LogDate = Get-Date -Format "yyyy-MM-dd"
 $LifecycleLog = Join-Path $ProgramDataDir "lifecycle-$LogDate.log"

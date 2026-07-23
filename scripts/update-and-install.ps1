@@ -37,6 +37,21 @@ param(
 $ErrorActionPreference = "SilentlyContinue"
 $ProgressPreference = "SilentlyContinue"
 
+try {
+    $principal = New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+    if (-not $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )) {
+        Write-Host "[UPDATE] Refusing - Administrator elevation required"
+        exit 5
+    }
+} catch {
+    Write-Host "[UPDATE] Refusing - elevation check failed"
+    exit 5
+}
+
 function Write-UpLog([string]$Message) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts] $Message"

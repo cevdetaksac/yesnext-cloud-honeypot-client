@@ -1,3 +1,6 @@
+# v4.9.24
+- **Scripts ACL / attack surface:** Do not install `kill-honeypot.ps1` / `update-and-install.ps1` / `prepare-install-dir.ps1` under Program Files (installer embeds them in `$PLUGINSDIR` only). On upgrade, delete leftovers. `scripts\` (+ `_internal\scripts`) ACL = SYSTEM+Administrators only. Kill/update/memory_restart refuse non-elevated runs. Motor QUIT was already gated by operator_stop/update-lock.
+
 # v4.9.23
 - **Installer FileInUse (hardened):** If `_internal` directory rename fails (Session-0 cwd lock), relocate each file individually (frees paths like `servicemanager.pyd` for overwrite). Stronger terminate (`Terminate` access + WMI) and longer post-QUIT grace for DACL disarm.
 

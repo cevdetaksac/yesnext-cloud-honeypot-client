@@ -1687,7 +1687,7 @@ class CloudHoneypotClient:
                     continue
 
                 if cmd_u in ("NG_MAINT_START", "NG_MAINT_END", "NG_MAINT_END_SNAPSHOT",
-                             "NG_SNAPSHOT"):
+                             "NG_SNAPSHOT", "NG_ACCEPT_SURFACE"):
                     try:
                         ng = getattr(self, "network_guard", None)
                         if ng is None:
@@ -1707,6 +1707,8 @@ class CloudHoneypotClient:
                             out = ng.exit_maintenance(
                                 snapshot=False, paused_by="gui",
                             )
+                        elif cmd_u == "NG_ACCEPT_SURFACE":
+                            out = ng.accept_surface()
                         else:
                             saved = ng.snapshot_now()
                             out = {

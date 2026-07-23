@@ -308,11 +308,14 @@ class TestCommandWhitelist(unittest.TestCase):
         )
         for c in ("network_snapshot", "network_restore", "list_network_baseline",
                   "network_diff", "network_maintenance_start",
-                  "network_maintenance_end"):
+                  "network_maintenance_end", "network_accept_surface",
+                  "network_disable_adapter"):
             self.assertIn(c, ALLOWED_COMMANDS)
         self.assertIn("network_restore", REQUIRES_CONFIRMATION)
+        self.assertIn("network_disable_adapter", REQUIRES_CONFIRMATION)
         # read-only snapshot/list must NOT require confirmation
         self.assertNotIn("network_snapshot", REQUIRES_CONFIRMATION)
+        self.assertNotIn("network_accept_surface", REQUIRES_CONFIRMATION)
         self.assertNotIn("list_network_baseline", REQUIRES_CONFIRMATION)
         self.assertNotIn("network_diff", REQUIRES_CONFIRMATION)
 
@@ -321,8 +324,96 @@ class TestCommandWhitelist(unittest.TestCase):
         ex = RemoteCommandExecutor(token_getter=lambda: "")
         for c in ("network_snapshot", "network_restore", "list_network_baseline",
                   "network_diff", "network_maintenance_start",
-                  "network_maintenance_end"):
+                  "network_maintenance_end", "network_accept_surface",
+                  "network_disable_adapter"):
             self.assertTrue(hasattr(ex, f"_cmd_{c}"), c)
+
+
+class TestSurfaceInform(unittest.TestCase):
+    """Contract 1.4.17 — additive inform must not feed auto_restore."""
+
+    def test_ethernet_up_is_inform_not_drift(self):
+        base = {
+            "adapters": [
+                {"name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.30",
+                 "dhcp": True, "dns": ["1.1.1.1"]},
+                {"name": "Ethernet", "state": "disconnected",
+                 "ipv4": "169.254.1.1", "dhcp": True, "dns": []},
+            ],
+            "mapped_drives": [],
+            "firewall": {"domain": "on", "private": "on", "public": "on"},
+        }
+        live = [
+            {"name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.30",
+             "dhcp": True, "dns": ["1.1.1.1"]},
+            {"name": "Ethernet", "state": "up", "ipv4": "192.168.1.21",
+             "dhcp": True, "dns": ["1.1.1.1"]},
+        ]
+        drift = ng.diff_network_surface(
+            base, live_adapters=live, live_drives=[], live_firewall=base["firewall"],
+        )
+        inform = ng.diff_network_surface_inform(base, live_adapters=live)
+        self.assertEqual(drift, [])
+        self.assertTrue(any(c.get("kind") == "adapter_enabled" for c in inform))
+        self.assertTrue(any(c.get("interface") == "Ethernet" for c in inform))
+
+    def test_dhcp_lease_change_inform_only(self):
+        base = {
+            "adapters": [
+                {"name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.30",
+                 "dhcp": True, "dns": ["1.1.1.1"]},
+            ],
+            "mapped_drives": [],
+            "firewall": {"private": "on"},
+        }
+        live = [
+            {"name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.55",
+             "dhcp": True, "dns": ["1.1.1.1"]},
+        ]
+        drift = ng.diff_network_surface(
+            base, live_adapters=live, live_drives=[], live_firewall=base["firewall"],
+        )
+        inform = ng.diff_network_surface_inform(base, live_adapters=live)
+        self.assertEqual(drift, [])
+        self.assertTrue(any(c.get("kind") == "dhcp_lease" for c in inform))
+
+    def test_adapter_down_still_subtractive_drift(self):
+        base = {
+            "adapters": [
+                {"name": "Ethernet", "state": "up", "ipv4": "192.168.1.21",
+                 "dhcp": True, "dns": ["1.1.1.1"]},
+            ],
+            "mapped_drives": [],
+            "firewall": {"private": "on"},
+        }
+        live = [
+            {"name": "Ethernet", "state": "disconnected", "ipv4": "169.254.1.1",
+             "dhcp": True, "dns": ["1.1.1.1"]},
+        ]
+        drift = ng.diff_network_surface(
+            base, live_adapters=live, live_drives=[], live_firewall=base["firewall"],
+        )
+        inform = ng.diff_network_surface_inform(base, live_adapters=live)
+        self.assertTrue(any(c.get("id") == "adapter.Ethernet" for c in drift))
+        self.assertEqual(inform, [])
+
+    def test_inform_alert_is_soft(self):
+        sent = []
+
+        class _Pipe:
+            def handle_alert(self, a):
+                sent.append(a)
+
+        guard = ng.NetworkGuard(alert_pipeline=_Pipe(), config=ng.load_config(None))
+        guard._emit_surface_inform([
+            {"id": "adapter_up.Ethernet", "kind": "adapter_enabled",
+             "interface": "Ethernet", "ipv4": "192.168.1.21"},
+        ])
+        self.assertEqual(len(sent), 1)
+        a = sent[0]
+        self.assertEqual(a["threat_type"], "network_surface_changed")
+        self.assertEqual(a["severity"], "info")
+        self.assertFalse(a.get("force_urgent"))
 
 
 class TestTriggerFlow(unittest.TestCase):

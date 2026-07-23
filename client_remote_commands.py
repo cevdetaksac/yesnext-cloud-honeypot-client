@@ -92,6 +92,7 @@ ALLOWED_COMMANDS: Set[str] = {
     "network_snapshot", "network_restore", "list_network_baseline",
     "network_diff",
     "network_maintenance_start", "network_maintenance_end",
+    "network_accept_surface", "network_disable_adapter",
     # System Recovery (contract ≥1.4.13 — agent/system-recovery.md)
     "system_recovery_snapshot", "list_system_recovery",
     "system_recovery_diff", "system_recovery_restore",
@@ -128,6 +129,7 @@ _IR_URGENT_COMMANDS = frozenset({
     "network_snapshot", "network_restore", "list_network_baseline",
     "network_diff",
     "network_maintenance_start", "network_maintenance_end",
+    "network_accept_surface", "network_disable_adapter",
     # System Recovery — attack-surface restore
     "system_recovery_snapshot", "list_system_recovery",
     "system_recovery_diff", "system_recovery_restore",
@@ -164,6 +166,7 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "create_user", "remote_logon", "set_autologon", "reboot",
     # Network Guard — mutating restore only (see network_restore_requires_confirm)
     "network_restore",
+    "network_disable_adapter",
     # System Recovery — mutating restore (dry_run exempt via helper)
     "system_recovery_restore",
     # GUI PIN — overwrite/reset local anti-tamper PIN needs operator confirm
@@ -173,6 +176,12 @@ REQUIRES_CONFIRMATION: Set[str] = {
 
 def network_restore_requires_confirm(params: Optional[dict] = None) -> bool:
     """True for mutating restore; False for dry-run plan-only (contract 1.4.5)."""
+    params = params or {}
+    return not bool(params.get("dry_run", False))
+
+
+def network_disable_adapter_requires_confirm(params: Optional[dict] = None) -> bool:
+    """True for mutating disable; False for dry-run (contract 1.4.17)."""
     params = params or {}
     return not bool(params.get("dry_run", False))
 
@@ -2632,6 +2641,47 @@ class RemoteCommandExecutor:
                 "message": (
                     "Network Guard resumed (baseline refreshed)"
                     if snapshot else "Network Guard resumed"
+                ),
+                "data": out,
+                "error": out.get("error"),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_accept_surface(self, params: dict) -> dict:
+        """Accept live additive surface as new golden (Bu bendim / 1.4.17)."""
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"success": False, "error": "NetworkGuard not available"}
+        try:
+            out = ng.accept_surface()
+            return {
+                "success": bool(out.get("ok", True)),
+                "message": "Live network surface accepted as golden baseline",
+                "data": {
+                    "version": out.get("version"),
+                    "captured_at": out.get("captured_at"),
+                    "surface_inform": out.get("surface_inform"),
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_disable_adapter(self, params: dict) -> dict:
+        """Operator-only disable of one adapter (never automatic)."""
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"success": False, "error": "NetworkGuard not available"}
+        name = str(params.get("name") or params.get("interface") or "").strip()
+        dry_run = bool(params.get("dry_run", False))
+        try:
+            out = ng.disable_adapter(name, dry_run=dry_run)
+            ok = bool(out.get("ok", False))
+            return {
+                "success": ok,
+                "message": (
+                    "Adapter disable planned" if dry_run
+                    else ("Adapter disabled" if ok else "Adapter disable failed")
                 ),
                 "data": out,
                 "error": out.get("error"),

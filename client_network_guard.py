@@ -511,13 +511,26 @@ def _adapter_by_name(adapters: List[dict], name: str) -> Optional[dict]:
     return None
 
 
+def _is_link_local(ipv4: Optional[str]) -> bool:
+    ip = (ipv4 or "").strip()
+    return ip.startswith("169.254.")
+
+
+def _adapter_is_up(adapter: Optional[dict]) -> bool:
+    return str((adapter or {}).get("state") or "").lower() == "up"
+
+
 def diff_network_surface(
     baseline: Optional[dict],
     live_adapters: Optional[List[dict]] = None,
     live_drives: Optional[List[dict]] = None,
     live_firewall: Optional[dict] = None,
 ) -> List[dict]:
-    """Compare golden baseline vs live network surface (pure)."""
+    """Subtractive drift vs golden — feeds auto_restore_network only.
+
+    Additive enrichment (adapter up / DHCP lease) belongs in
+    ``diff_network_surface_inform`` and must never trigger restore (1.4.17).
+    """
     if not baseline:
         return []
     live_adapters = live_adapters if live_adapters is not None else collect_adapters()
@@ -600,6 +613,74 @@ def diff_network_surface(
                 "profile": prof,
             })
     return changes
+
+
+def diff_network_surface_inform(
+    baseline: Optional[dict],
+    live_adapters: Optional[List[dict]] = None,
+) -> List[dict]:
+    """Additive / benign enrichment vs golden — inform only, never restore.
+
+    Examples: Ethernet cable plug-in, new NIC, DHCP lease change while online.
+    Contract 1.4.17: while internet stays up, soft notify — no panic / no brick.
+    """
+    if not baseline:
+        return []
+    live_adapters = live_adapters if live_adapters is not None else collect_adapters()
+    base_by = {
+        a.get("name"): a for a in (baseline.get("adapters") or []) if a.get("name")
+    }
+    changes: List[dict] = []
+
+    for la in live_adapters or []:
+        name = la.get("name")
+        if not name or not _adapter_is_up(la):
+            continue
+        live_ip = (la.get("ipv4") or "").strip()
+        ba = base_by.get(name)
+        if ba is None:
+            changes.append({
+                "id": f"adapter_new.{name}",
+                "kind": "adapter_appeared",
+                "target": "inform",
+                "interface": name,
+                "from": None,
+                "to": "up",
+                "ipv4": live_ip or None,
+            })
+            continue
+        if not _adapter_is_up(ba):
+            changes.append({
+                "id": f"adapter_up.{name}",
+                "kind": "adapter_enabled",
+                "target": "inform",
+                "interface": name,
+                "from": str(ba.get("state") or "disconnected").lower(),
+                "to": "up",
+                "ipv4": live_ip or None,
+            })
+            continue
+        # Both up: DHCP lease churn is inform-only (never auto_restore).
+        if bool(ba.get("dhcp", True)) and bool(la.get("dhcp", True)):
+            base_ip = (ba.get("ipv4") or "").strip()
+            if (
+                base_ip and live_ip and base_ip != live_ip
+                and not (_is_link_local(base_ip) and _is_link_local(live_ip))
+            ):
+                changes.append({
+                    "id": f"dhcp_lease.{name}",
+                    "kind": "dhcp_lease",
+                    "target": "inform",
+                    "interface": name,
+                    "from": base_ip,
+                    "to": live_ip,
+                    "ipv4": live_ip,
+                })
+    return changes
+
+
+def inform_fingerprint(changes: List[dict]) -> str:
+    return "|".join(sorted(str(c.get("id") or "") for c in (changes or []) if c.get("id")))
 
 
 def refresh_baseline_connectivity(baseline: dict) -> dict:
@@ -715,6 +796,11 @@ class NetworkGuard:
         self._NET_CUT_PERSIST_SEC = 15
         self._last_auto_restore_mono = 0.0
         self._AUTO_RESTORE_DEDUPE_SEC = 300
+        # Additive surface inform (contract 1.4.17) — soft, never auto-disable
+        self._inform_changes: List[dict] = []
+        self._inform_fp: str = ""
+        self._last_inform_emit_mono = 0.0
+        self._INFORM_DEDUPE_SEC = 900
         # Cached live surface for STATUS — never block the single-threaded
         # control socket with PowerShell Get-NetIPConfiguration.
         self._cached_live: Dict[str, Any] = {}
@@ -774,6 +860,10 @@ class NetworkGuard:
     def snapshot_now(self) -> dict:
         saved = save_baseline(capture_baseline())
         self._last_baseline = saved
+        # Accepting live as golden clears soft-inform pending state.
+        self._inform_changes = []
+        self._inform_fp = ""
+        self._last_inform_emit_mono = 0.0
         return saved
 
     # -- A: baseline loop (golden — no poison) --
@@ -847,8 +937,10 @@ class NetworkGuard:
         netdiff = dict(netdiff)
         netdiff["net_cut"] = bool(net_cut)
 
-        # Network-surface auto restore (contract 1.4.14) — independent of bomb score
+        # Network-surface auto restore (contract 1.4.14) — subtractive only
         self._maybe_auto_restore_network(baseline, live_adapters)
+        # Additive soft inform while internet stays up (contract 1.4.17)
+        self._maybe_surface_inform(baseline, live_adapters, conn)
 
         storm_suspects = self._fs_storm_suspects(interval)
         fs_storm = bool(storm_suspects)
@@ -890,6 +982,123 @@ class NetworkGuard:
         self._last_auto_restore_mono = now
         out = self.restore_network(baseline=baseline, targets=list(targets))
         self._emit_surface_restored(changes, out)
+
+    def _maybe_surface_inform(
+        self,
+        baseline: Optional[dict],
+        live_adapters: Optional[List[dict]],
+        conn: Optional[dict],
+    ) -> None:
+        """Soft-notify additive enrichment; never disable / never restore."""
+        if get_maintenance().get("active"):
+            self._inform_changes = []
+            self._inform_fp = ""
+            return
+        if not baseline:
+            return
+        # Panic path is internet loss — soft inform only while reachable.
+        if conn is not None and conn.get("internet_ok") is False:
+            return
+        changes = diff_network_surface_inform(baseline, live_adapters=live_adapters)
+        fp = inform_fingerprint(changes)
+        self._inform_changes = list(changes)
+        if not changes:
+            self._inform_fp = ""
+            return
+        now = time.time()
+        if fp == self._inform_fp and (
+            now - self._last_inform_emit_mono
+        ) < float(self.cfg.get("surface_inform_dedupe_sec", self._INFORM_DEDUPE_SEC)):
+            return
+        self._inform_fp = fp
+        self._last_inform_emit_mono = now
+        log(
+            f"[NET-GUARD] surface_inform n={len(changes)} "
+            f"ids={[c.get('id') for c in changes[:6]]}"
+        )
+        self._emit_surface_inform(changes, internet_ok=True)
+
+    def _emit_surface_inform(
+        self, changes: List[dict], *, internet_ok: bool = True
+    ) -> None:
+        if not self.alert_pipeline:
+            return
+        bits = []
+        for c in changes[:6]:
+            iface = c.get("interface") or "?"
+            kind = c.get("kind") or c.get("id")
+            ip = c.get("ipv4") or c.get("to") or ""
+            bits.append(f"{iface}: {kind}" + (f" · {ip}" if ip else ""))
+        alert = {
+            "severity": "info",
+            "threat_type": "network_surface_changed",
+            "title": "Ağ yüzeyi genişledi (internet açık)",
+            "description": "; ".join(bits) or "network surface changed",
+            "threat_score": 15,
+            "target_service": "SYSTEM",
+            "recommended_action": "review_network",
+            "force_urgent": False,
+            "system_context": {
+                "network_guard": {
+                    "trigger": "surface_inform",
+                    "internet_ok": bool(internet_ok),
+                    "inform_changes": changes[:20],
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        }
+        try:
+            if hasattr(self.alert_pipeline, "handle_alert"):
+                self.alert_pipeline.handle_alert(alert)
+            elif hasattr(self.alert_pipeline, "send_alert"):
+                self.alert_pipeline.send_alert(alert)
+            elif hasattr(self.alert_pipeline, "send_urgent"):
+                # Last resort — still non-urgent payload (force_urgent=false)
+                self.alert_pipeline.send_urgent(alert)
+        except Exception as e:
+            log(f"[NET-GUARD] surface inform alert failed: {e}")
+
+    def accept_surface(self) -> dict:
+        """Operator/user accepted live surface as new golden (Bu bendim)."""
+        saved = self.snapshot_now()
+        self._inform_changes = []
+        self._inform_fp = ""
+        self._last_inform_emit_mono = 0.0
+        log(f"[NET-GUARD] surface accepted → golden v{saved.get('version')}")
+        out = dict(self.status())
+        out["ok"] = True
+        out["version"] = saved.get("version")
+        out["captured_at"] = saved.get("captured_at")
+        return out
+
+    def disable_adapter(self, name: str, *, dry_run: bool = False) -> dict:
+        """Dashboard-only: disable one adapter. Never called automatically."""
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "missing_name"}
+        plan = [{
+            "target": "adapter",
+            "action": "disable",
+            "interface": name,
+        }]
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan}
+        out = _run([
+            "netsh", "interface", "set", "interface",
+            f"name={name}", "admin=DISABLED",
+        ])
+        low = (out or "").lower()
+        ok = "error" not in low and "not found" not in low and "bulunamad" not in low
+        # Empty output usually means success for netsh set interface.
+        if out.strip() == "":
+            ok = True
+        log(f"[NET-GUARD] disable_adapter name={name!r} ok={ok}")
+        return {
+            "ok": bool(ok),
+            "plan": plan,
+            "restore_actions": [f"adapter_disable:{name}"] if ok else [],
+            "error": None if ok else (out.strip() or "disable_failed"),
+        }
 
     def _emit_surface_restored(self, changes: List[dict], restored: dict) -> None:
         if not self.alert_pipeline:
@@ -1275,14 +1484,21 @@ class NetworkGuard:
         live_fw = dict(cached.get("firewall") or {})
         live_conn = dict(cached.get("connectivity") or {})
         changes: List[dict] = []
+        inform: List[dict] = []
         try:
             if base and (live_adapters or live_drives or live_fw):
                 changes = diff_network_surface(
                     base, live_adapters=live_adapters,
                     live_drives=live_drives, live_firewall=live_fw,
                 )
+                inform = diff_network_surface_inform(
+                    base, live_adapters=live_adapters,
+                )
         except Exception:
             pass
+        # Prefer live compute; fall back to last detect-loop cache
+        if not inform and self._inform_changes:
+            inform = list(self._inform_changes)
         with self._lock:
             suspended = len(self._suspended)
         maint = get_maintenance()
@@ -1310,6 +1526,9 @@ class NetworkGuard:
             "last_trigger_ts": self._last_trigger_ts,
             "drift": bool(changes),
             "drift_count": len(changes),
+            "surface_inform": bool(inform),
+            "surface_inform_count": len(inform),
+            "surface_inform_changes": inform[:20],
             "live_cache_age_sec": cache_age,
             "auto_contain": bool(self.cfg.get("auto_contain", False)),
             "auto_restore": bool(self.cfg.get("auto_restore", False)),
@@ -1339,6 +1558,9 @@ class NetworkGuard:
             base, live_adapters=live_adapters,
             live_drives=live_drives, live_firewall=live_fw,
         ) if base else []
+        inform = diff_network_surface_inform(
+            base, live_adapters=live_adapters,
+        ) if base else []
         return {
             "version": base.get("version"),
             "captured_at": base.get("captured_at"),
@@ -1363,6 +1585,8 @@ class NetworkGuard:
             },
             "drift": bool(changes),
             "changes": changes,
+            "surface_inform": bool(inform),
+            "inform_changes": inform,
             "history": list_baseline_history(),
             "auto_restore_network": bool(self.cfg.get("auto_restore_network", True)),
         }
@@ -1380,10 +1604,13 @@ class NetworkGuard:
         if not verify_baseline(baseline):
             return {"error": "baseline_signature_invalid"}
         changes = diff_network_surface(baseline)
+        inform = diff_network_surface_inform(baseline)
         return {
             "baseline_version": baseline.get("version"),
             "changes": changes,
             "drift": bool(changes),
+            "inform_changes": inform,
+            "surface_inform": bool(inform),
             "live": {
                 "adapters": collect_adapters(),
                 "mapped_drives": collect_mapped_drives(),

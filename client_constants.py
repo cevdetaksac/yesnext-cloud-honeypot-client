@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.14"  # VSS delete intent immediate quarantine (contract 1.4.16)
+VERSION = "4.9.15"  # Soft network surface inform (contract 1.4.17)
 
 
 CLIENT_VERSION = VERSION  # Main version constant

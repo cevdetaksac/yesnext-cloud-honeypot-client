@@ -2133,6 +2133,15 @@ class ModernGUI:
                 self._set_prot_chip(
                     "netguard", self.t("ng_chip_maintenance"), COLORS["orange"],
                 )
+            elif ng.get("surface_inform"):
+                n = int(ng.get("surface_inform_count") or 0)
+                label = self.t("ng_chip_surface_inform")
+                if n > 1:
+                    label = f"{label} · {n}"
+                self._set_prot_chip(
+                    "netguard", label, COLORS["orange"],
+                )
+                self._maybe_toast_surface_inform(ng)
             else:
                 ng_on = bool(ng.get("running")) and bool(ng.get("enabled", True))
                 extra = ""
@@ -2144,6 +2153,7 @@ class ModernGUI:
                     COLORS["orange"] if susp else (
                         COLORS["green"] if ng_on else COLORS["red"]),
                 )
+                self._ng_surface_toast_fp = ""
         else:
             local_ng = getattr(self.app, "network_guard", None)
             ng_on = bool(local_ng and getattr(local_ng, "_running", False))
@@ -2196,6 +2206,29 @@ class ModernGUI:
             )
 
     # ── Detail: Network Guard / bakım (VPN-IP) ── #
+    def _maybe_toast_surface_inform(self, ng: dict):
+        """One soft toast per inform fingerprint — no PIN, no blocking modal."""
+        try:
+            changes = ng.get("surface_inform_changes") or []
+            fp = "|".join(
+                sorted(str(c.get("id") or "") for c in changes if c.get("id"))
+            )
+            if not fp or fp == getattr(self, "_ng_surface_toast_fp", ""):
+                return
+            self._ng_surface_toast_fp = fp
+            bits = []
+            for c in changes[:3]:
+                iface = c.get("interface") or "?"
+                ip = c.get("ipv4") or c.get("to") or ""
+                bits.append(f"{iface}" + (f" · {ip}" if ip else ""))
+            detail = ", ".join(bits) if bits else ""
+            msg = self.t("ng_toast_surface_inform")
+            if detail:
+                msg = f"{msg} ({detail})"
+            self.show_toast(self.t("prot_chip_netguard"), msg, "info")
+        except Exception:
+            pass
+
     def _detail_network_guard(self):
         popup = self._show_detail_window(
             f"🌐 {self.t('prot_chip_netguard')}", height=520,
@@ -2270,6 +2303,28 @@ class ModernGUI:
                     text_color=COLORS["text_dim"],
                 ).pack(anchor="w", padx=12, pady=1)
 
+        inform = ng.get("surface_inform_changes") or []
+        if ng.get("surface_inform") and inform:
+            ctk.CTkLabel(
+                content, text=self.t("ng_surface_inform_title"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=COLORS["orange"],
+            ).pack(anchor="w", padx=8, pady=(10, 2))
+            ctk.CTkLabel(
+                content, text=self.t("ng_surface_inform_help"),
+                font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+                wraplength=480, justify="left",
+            ).pack(anchor="w", padx=8, pady=(0, 4))
+            for c in inform[:6]:
+                line = (
+                    f"{c.get('interface') or '?'}: {c.get('kind') or c.get('id')}"
+                    f" · {c.get('ipv4') or c.get('to') or ''}"
+                ).strip(" ·")
+                ctk.CTkLabel(
+                    content, text=line, font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text"],
+                ).pack(anchor="w", padx=12, pady=1)
+
         btns = ctk.CTkFrame(content, fg_color="transparent")
         btns.pack(fill="x", padx=8, pady=(14, 4))
 
@@ -2280,12 +2335,15 @@ class ModernGUI:
                         network_maintenance_start,
                         network_maintenance_end,
                         network_snapshot,
+                        network_accept_surface,
                         get_status,
                     )
                     if action == "pause":
                         out = network_maintenance_start()
                     elif action == "snapshot":
                         out = network_snapshot()
+                    elif action == "accept":
+                        out = network_accept_surface()
                     elif action == "resume":
                         out = network_maintenance_end(snapshot=True)
                     else:
@@ -2309,6 +2367,8 @@ class ModernGUI:
                                 self.t(f"ng_toast_{action}_ok"),
                                 "info",
                             )
+                            if action in ("accept", "snapshot", "resume"):
+                                self._ng_surface_toast_fp = ""
                         else:
                             self.show_toast(
                                 self.t("prot_chip_netguard"),
@@ -2331,6 +2391,14 @@ class ModernGUI:
             threading.Thread(
                 target=_worker, name=f"GUI-NG-{action}", daemon=True,
             ).start()
+
+        if ng.get("surface_inform") and not maint:
+            ctk.CTkButton(
+                btns, text=self.t("ng_btn_accept_surface"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLORS["green"], hover_color=COLORS["green"],
+                height=32, command=lambda: _run("accept"),
+            ).pack(fill="x", pady=3)
 
         if not maint:
             ctk.CTkButton(

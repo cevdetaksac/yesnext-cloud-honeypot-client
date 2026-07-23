@@ -12,6 +12,7 @@ Protocol (newline-terminated, UTF-8):
   RS_STATUS
   THREAT_TOP
   NG_MAINT_START / NG_MAINT_END / NG_MAINT_END_SNAPSHOT / NG_SNAPSHOT
+  NG_ACCEPT_SURFACE
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -156,6 +157,14 @@ def network_maintenance_end(snapshot: bool = True, timeout: float = 30.0) -> Dic
     cmd = "NG_MAINT_END_SNAPSHOT" if snapshot else "NG_MAINT_END"
     try:
         return request_json(cmd, timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def network_accept_surface(timeout: float = 30.0) -> Dict[str, Any]:
+    """Accept live additive surface as new golden (Bu bendim)."""
+    try:
+        return request_json("NG_ACCEPT_SURFACE", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

@@ -183,36 +183,120 @@ class TestSaveBaselineRotation(unittest.TestCase):
 
 class TestConfig(unittest.TestCase):
     def test_defaults_are_safe(self):
-        # SAFETY: auto-actions must be OFF by default (no auto freeze/kill/restore)
+        # SAFETY: process auto-actions OFF; network-surface restore ON (1.4.14)
         c = ng.load_config(None)
         self.assertTrue(c["enabled"])
         self.assertFalse(c["auto_contain"])
         self.assertFalse(c["auto_kill"])
         self.assertFalse(c["auto_restore"])
+        self.assertTrue(c["auto_restore_network"])
         self.assertTrue(c["require_strong_signal"])
 
     def test_override_from_client_config(self):
         c = ng.load_config({"protection": {"network_guard": {
-            "auto_contain": True, "score_threshold": 90, "bogus": 1}}})
+            "auto_contain": True, "score_threshold": 90,
+            "auto_restore_network": False, "bogus": 1}}})
         # Hard safety invariant: cloud config cannot enable auto containment.
         self.assertFalse(c["auto_contain"])
         self.assertEqual(c["score_threshold"], 90)
+        self.assertFalse(c["auto_restore_network"])
         self.assertNotIn("bogus", c)
 
 
 class TestStatus(unittest.TestCase):
     def test_status_shape(self):
         guard = ng.NetworkGuard(config=ng.load_config(None))
-        guard._last_baseline = {"version": 3, "mapped_drives": [{"letter": "Z:"}],
-                                "connectivity": {"internet_ok": True},
-                                "captured_at": "2026-07-21T00:00:00+00:00"}
-        st = guard.status()
+        guard._last_baseline = {
+            "version": 3,
+            "mapped_drives": [{"letter": "Z:"}],
+            "adapters": [],
+            "firewall": {"domain": "on", "private": "on", "public": "on"},
+            "connectivity": {"internet_ok": True},
+            "captured_at": "2026-07-21T00:00:00+00:00",
+            "sig": "x",
+        }
+        with mock.patch.object(ng, "collect_adapters", return_value=[]), \
+             mock.patch.object(ng, "collect_mapped_drives", return_value=[]), \
+             mock.patch.object(ng, "collect_firewall", return_value={
+                 "domain": "on", "private": "on", "public": "on"}), \
+             mock.patch.object(ng, "check_connectivity", return_value={
+                 "internet_ok": True, "dns_ok": True, "gateway_ok": True}), \
+             mock.patch.object(ng, "verify_baseline", return_value=True):
+            st = guard.status()
         self.assertEqual(st["baseline_version"], 3)
-        self.assertEqual(st["mapped_drives"], 1)
         self.assertTrue(st["internet_ok"])
         self.assertFalse(st["auto_kill"])
         self.assertFalse(st["auto_contain"])
+        self.assertTrue(st["auto_restore_network"])
         self.assertEqual(st["suspended_processes"], 0)
+        self.assertIn("live", st)
+        self.assertIn("baseline", st)
+
+
+class TestSurfaceDiff(unittest.TestCase):
+    def test_dns_drift_detected(self):
+        base = {
+            "adapters": [{
+                "name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.30",
+                "dns": ["1.1.1.1"], "dhcp": True,
+            }],
+            "mapped_drives": [],
+            "firewall": {"domain": "on", "private": "on", "public": "on"},
+        }
+        live = [{
+            "name": "Wi-Fi", "state": "up", "ipv4": "192.168.1.30",
+            "dns": ["8.8.8.8"], "dhcp": True,
+        }]
+        changes = ng.diff_network_surface(
+            base, live_adapters=live, live_drives=[],
+            live_firewall=base["firewall"],
+        )
+        self.assertTrue(any(c["target"] == "dns" for c in changes))
+
+    def test_plan_includes_ipv4_dhcp(self):
+        baseline = {
+            "adapters": [{
+                "name": "Wi-Fi", "state": "up", "dns": ["1.1.1.1"], "dhcp": True,
+            }],
+            "firewall": {},
+            "mapped_drives": [],
+        }
+        plan = ng.plan_network_restore(baseline, targets=["ipv4"])
+        self.assertEqual(plan[0]["action"], "dhcp")
+
+
+class TestMaintenance(unittest.TestCase):
+    def test_enter_exit_persists(self):
+        with tempfile.TemporaryDirectory() as d:
+            mfile = os.path.join(d, "maint.json")
+            with mock.patch.object(ng, "MAINTENANCE_FILE", mfile), \
+                 mock.patch.object(ng, "MACHINE_DATA_DIR", d):
+                self.assertFalse(ng.get_maintenance()["active"])
+                ng.set_maintenance(True, reason="test", paused_by="unit")
+                self.assertTrue(ng.get_maintenance()["active"])
+                guard = ng.NetworkGuard(config=ng.load_config(None))
+                with mock.patch.object(guard, "stop") as st:
+                    out = guard.enter_maintenance(reason="vpn", paused_by="gui")
+                st.assert_called()
+                self.assertTrue(out["maintenance"])
+                with mock.patch.object(ng, "save_baseline", return_value={
+                    "version": 99, "captured_at": "t",
+                }), mock.patch.object(ng, "capture_baseline", return_value={}), \
+                     mock.patch.object(guard, "start") as start:
+                    out2 = guard.exit_maintenance(snapshot=True, paused_by="gui")
+                start.assert_called()
+                self.assertFalse(ng.get_maintenance()["active"])
+                self.assertEqual(out2.get("baseline_version"), 99)
+
+    def test_start_blocked_during_maintenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            mfile = os.path.join(d, "maint.json")
+            with mock.patch.object(ng, "MAINTENANCE_FILE", mfile), \
+                 mock.patch.object(ng, "MACHINE_DATA_DIR", d):
+                ng.set_maintenance(True, paused_by="gui")
+                guard = ng.NetworkGuard(config=ng.load_config(None))
+                guard.start()
+                self.assertFalse(guard._running)
 
 
 class TestCommandWhitelist(unittest.TestCase):
@@ -220,17 +304,22 @@ class TestCommandWhitelist(unittest.TestCase):
         from client_remote_commands import (
             ALLOWED_COMMANDS, REQUIRES_CONFIRMATION,
         )
-        for c in ("network_snapshot", "network_restore", "list_network_baseline"):
+        for c in ("network_snapshot", "network_restore", "list_network_baseline",
+                  "network_diff", "network_maintenance_start",
+                  "network_maintenance_end"):
             self.assertIn(c, ALLOWED_COMMANDS)
         self.assertIn("network_restore", REQUIRES_CONFIRMATION)
         # read-only snapshot/list must NOT require confirmation
         self.assertNotIn("network_snapshot", REQUIRES_CONFIRMATION)
         self.assertNotIn("list_network_baseline", REQUIRES_CONFIRMATION)
+        self.assertNotIn("network_diff", REQUIRES_CONFIRMATION)
 
     def test_handlers_exist(self):
         from client_remote_commands import RemoteCommandExecutor
         ex = RemoteCommandExecutor(token_getter=lambda: "")
-        for c in ("network_snapshot", "network_restore", "list_network_baseline"):
+        for c in ("network_snapshot", "network_restore", "list_network_baseline",
+                  "network_diff", "network_maintenance_start",
+                  "network_maintenance_end"):
             self.assertTrue(hasattr(ex, f"_cmd_{c}"), c)
 
 

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.11"  # alert signal hygiene (CLIENT_ALERT_SIGNAL_HYGIENE)
+VERSION = "4.9.12"  # system recovery + NG panel/auto-restore + maintenance
 
 
 CLIENT_VERSION = VERSION  # Main version constant

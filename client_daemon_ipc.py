@@ -11,6 +11,7 @@ Protocol (newline-terminated, UTF-8):
   RS_UNLOCK
   RS_STATUS
   THREAT_TOP
+  NG_MAINT_START / NG_MAINT_END / NG_MAINT_END_SNAPSHOT / NG_SNAPSHOT
   HONEYPOT START <SERVICE> <PORT>
   HONEYPOT STOP <SERVICE>
   HONEYPOT LIST
@@ -138,6 +139,31 @@ def ransomware_unlock(timeout: float = 20.0) -> Dict[str, Any]:
     """Clear ransomware IFEO quarantine on SYSTEM motor."""
     try:
         return request_json("RS_UNLOCK", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def network_maintenance_start(timeout: float = 8.0) -> Dict[str, Any]:
+    """Pause Network Guard detect + auto_restore (VPN/IP work window)."""
+    try:
+        return request_json("NG_MAINT_START", timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def network_maintenance_end(snapshot: bool = True, timeout: float = 30.0) -> Dict[str, Any]:
+    """Resume Network Guard; optionally capture golden baseline first."""
+    cmd = "NG_MAINT_END_SNAPSHOT" if snapshot else "NG_MAINT_END"
+    try:
+        return request_json(cmd, timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def network_snapshot(timeout: float = 30.0) -> Dict[str, Any]:
+    """Capture golden network baseline now (without ending maintenance)."""
+    try:
+        return request_json("NG_SNAPSHOT", timeout=timeout)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

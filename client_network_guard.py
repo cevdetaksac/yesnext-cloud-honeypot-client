@@ -57,6 +57,7 @@ except Exception:  # pragma: no cover
 BASELINE_FILE = os.path.join(MACHINE_DATA_DIR, "network_baseline.json")
 BASELINE_HISTORY_DIR = os.path.join(MACHINE_DATA_DIR, "network_baseline_history")
 BASELINE_KEEP = 10
+MAINTENANCE_FILE = os.path.join(MACHINE_DATA_DIR, "network_guard_maintenance.json")
 
 # Windows CREATE_NO_WINDOW for subprocess (no console flash)
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -98,7 +99,10 @@ DEFAULT_CONFIG = {
     # catastrophic false positives (froze Chrome/Cursor/GameLoop) and are gated.
     "auto_contain": False,                  # do NOT auto-suspend on detection
     "auto_kill": False,                     # never auto-kill
-    "auto_restore": False,                  # do NOT auto-touch adapters/DNS
+    "auto_restore": False,                  # legacy bomb-path; unused / hard-false
+    # Network-surface only (adapters/DNS/IPv4/drives/firewall) — default ON.
+    # Intentional IP change: operator network_snapshot BEFORE changing the host.
+    "auto_restore_network": True,
     # Only these high-confidence signals may drive auto-containment when
     # auto_contain is explicitly enabled by an operator.
     "require_strong_signal": True,
@@ -113,15 +117,54 @@ def load_config(client_config: Optional[dict] = None) -> dict:
             cfg.update({k: v for k, v in ng.items() if k in cfg})
     except Exception:
         pass
-    # Hard safety invariant (client >=4.7.3): detection never performs an
-    # automatic process/network mutation. An authenticated operator must issue
-    # suspend_process / network_restore explicitly after reviewing the alert.
-    # Keep the fields for wire/backward compatibility but never honor remote
-    # attempts to enable them.
+    # Hard safety: never auto process contain/kill. Network-surface restore is
+    # separately gated by auto_restore_network (contract 1.4.14).
     cfg["auto_contain"] = False
     cfg["auto_kill"] = False
     cfg["auto_restore"] = False
+    cfg["auto_restore_network"] = bool(cfg.get("auto_restore_network", True))
     return cfg
+
+
+# ── Operator maintenance mode (pause protect while changing VPN/IP) ──
+
+def get_maintenance() -> dict:
+    """Local persistent maintenance flag — survives restart; cloud enabled≠clear."""
+    try:
+        with open(MAINTENANCE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("active"):
+            return {
+                "active": True,
+                "started_at": data.get("started_at"),
+                "reason": data.get("reason") or "operator",
+                "paused_by": data.get("paused_by") or "unknown",
+            }
+    except Exception:
+        pass
+    return {"active": False}
+
+
+def set_maintenance(
+    active: bool,
+    reason: str = "operator",
+    paused_by: str = "operator",
+) -> dict:
+    os.makedirs(MACHINE_DATA_DIR, exist_ok=True)
+    if active:
+        payload = {
+            "active": True,
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "reason": str(reason or "operator")[:120],
+            "paused_by": str(paused_by or "operator")[:64],
+        }
+    else:
+        payload = {"active": False, "ended_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    tmp = MAINTENANCE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, MAINTENANCE_FILE)
+    return get_maintenance() if active else {"active": False}
 
 
 # ── Signing ────────────────────────────────────────────────────────
@@ -186,6 +229,12 @@ def _run(cmd: List[str], timeout: float = 8.0) -> str:
         return ""
 
 
+def _prefix_to_netmask(prefix: int) -> str:
+    prefix = max(0, min(32, int(prefix or 24)))
+    mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF if prefix else 0
+    return ".".join(str((mask >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
 def collect_mapped_drives() -> List[dict]:
     """Parse `net use` for mapped network drives."""
     out = _run(["net", "use"])
@@ -213,16 +262,24 @@ def collect_shares() -> List[dict]:
 
 
 def collect_adapters() -> List[dict]:
-    """Adapter up/down + IPv4/DNS/gateway via PowerShell Get-NetIPConfiguration."""
+    """Adapter up/down + IPv4/DNS/gateway/DHCP via PowerShell."""
     ps = (
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
         "Get-NetIPConfiguration | ForEach-Object { "
-        "[pscustomobject]@{ name=$_.InterfaceAlias; "
+        "$if=$_.InterfaceAlias; "
+        "$dhcp=$false; $pfx=$null; "
+        "try { $ip=Get-NetIPInterface -InterfaceAlias $if -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+        "if ($ip) { $dhcp=($ip.Dhcp -eq 'Enabled') } } catch {}; "
+        "try { $addr=$_.IPv4Address | Select-Object -First 1; "
+        "if ($addr) { $pfx=$addr.PrefixLength } } catch {}; "
+        "[pscustomobject]@{ name=$if; "
         "state=$_.NetAdapter.Status; "
         "ipv4=($_.IPv4Address.IPAddress -join ','); "
         "gateway=($_.IPv4DefaultGateway.NextHop -join ','); "
         "dns=($_.DNSServer | Where-Object {$_.AddressFamily -eq 2} | "
-        "ForEach-Object {$_.ServerAddresses} ) -join ',' } } | ConvertTo-Json -Compress"
+        "ForEach-Object {$_.ServerAddresses} ) -join ','; "
+        "dhcp=$dhcp; prefix_length=$pfx } } | ConvertTo-Json -Compress"
     )
     out = _run(["powershell", "-NoProfile", "-Command", ps], timeout=15.0)
     adapters: List[dict] = []
@@ -231,12 +288,19 @@ def collect_adapters() -> List[dict]:
         if isinstance(data, dict):
             data = [data]
         for a in data:
+            pfx = a.get("prefix_length")
+            try:
+                pfx = int(pfx) if pfx is not None and str(pfx) != "" else None
+            except (TypeError, ValueError):
+                pfx = None
             adapters.append({
                 "name": a.get("name", ""),
                 "state": str(a.get("state", "")).lower(),
-                "ipv4": a.get("ipv4", ""),
-                "gateway": a.get("gateway", ""),
+                "ipv4": a.get("ipv4", "") or "",
+                "gateway": a.get("gateway", "") or "",
                 "dns": [d for d in str(a.get("dns", "")).split(",") if d],
+                "dhcp": bool(a.get("dhcp")),
+                "prefix_length": pfx,
             })
     except Exception:
         pass
@@ -387,6 +451,27 @@ def plan_network_restore(
                     "action": "enable",
                     "interface": adapter["name"],
                 })
+    if do("ipv4"):
+        for adapter in baseline.get("adapters", []):
+            if not adapter.get("name"):
+                continue
+            if str(adapter.get("state")).lower() != "up":
+                continue
+            if adapter.get("dhcp", True):
+                plan.append({
+                    "target": "ipv4",
+                    "action": "dhcp",
+                    "interface": adapter["name"],
+                })
+            elif adapter.get("ipv4"):
+                plan.append({
+                    "target": "ipv4",
+                    "action": "static",
+                    "interface": adapter["name"],
+                    "ipv4": adapter.get("ipv4"),
+                    "prefix_length": adapter.get("prefix_length") or 24,
+                    "gateway": adapter.get("gateway") or "",
+                })
     if do("dns"):
         for adapter in baseline.get("adapters", []):
             dns = adapter.get("dns") or []
@@ -417,6 +502,146 @@ def plan_network_restore(
                     "unc": drive["unc"],
                 })
     return plan[:128]
+
+
+def _adapter_by_name(adapters: List[dict], name: str) -> Optional[dict]:
+    for a in adapters or []:
+        if a.get("name") == name:
+            return a
+    return None
+
+
+def diff_network_surface(
+    baseline: Optional[dict],
+    live_adapters: Optional[List[dict]] = None,
+    live_drives: Optional[List[dict]] = None,
+    live_firewall: Optional[dict] = None,
+) -> List[dict]:
+    """Compare golden baseline vs live network surface (pure)."""
+    if not baseline:
+        return []
+    live_adapters = live_adapters if live_adapters is not None else collect_adapters()
+    live_drives = live_drives if live_drives is not None else collect_mapped_drives()
+    live_firewall = live_firewall if live_firewall is not None else collect_firewall()
+    changes: List[dict] = []
+
+    for ba in baseline.get("adapters") or []:
+        name = ba.get("name")
+        if not name:
+            continue
+        la = _adapter_by_name(live_adapters, name)
+        if str(ba.get("state")).lower() == "up":
+            live_state = str((la or {}).get("state") or "").lower()
+            if live_state in ("disconnected", "disabled", "down", "not present", ""):
+                changes.append({
+                    "id": f"adapter.{name}",
+                    "target": "adapter",
+                    "from": "up",
+                    "to": live_state or "missing",
+                    "interface": name,
+                })
+        if la is None:
+            continue
+        base_dns = [str(x) for x in (ba.get("dns") or [])]
+        live_dns = [str(x) for x in (la.get("dns") or [])]
+        if base_dns and set(base_dns) != set(live_dns):
+            changes.append({
+                "id": f"dns.{name}",
+                "target": "dns",
+                "from": base_dns,
+                "to": live_dns,
+                "interface": name,
+            })
+        if "dhcp" in ba and ba.get("dhcp") is not None:
+            base_dhcp = bool(ba.get("dhcp"))
+            live_dhcp = bool(la.get("dhcp", True))
+            if base_dhcp != live_dhcp:
+                changes.append({
+                    "id": f"ipv4_mode.{name}",
+                    "target": "ipv4",
+                    "from": "dhcp" if base_dhcp else "static",
+                    "to": "dhcp" if live_dhcp else "static",
+                    "interface": name,
+                })
+            elif not base_dhcp:
+                if (ba.get("ipv4") or "") and (la.get("ipv4") or "") != (ba.get("ipv4") or ""):
+                    changes.append({
+                        "id": f"ipv4.{name}",
+                        "target": "ipv4",
+                        "from": ba.get("ipv4"),
+                        "to": la.get("ipv4"),
+                        "interface": name,
+                    })
+
+    live_letters = {
+        str(d.get("letter") or "").upper()
+        for d in (live_drives or [])
+        if d.get("letter")
+    }
+    for d in baseline.get("mapped_drives") or []:
+        letter = str(d.get("letter") or "").upper()
+        if letter and letter not in live_letters:
+            changes.append({
+                "id": f"drive.{letter}",
+                "target": "mapped_drive",
+                "from": d.get("unc"),
+                "to": None,
+                "letter": letter,
+            })
+
+    fw_base = baseline.get("firewall") or {}
+    for prof in ("domain", "private", "public"):
+        if fw_base.get(prof) == "on" and (live_firewall or {}).get(prof) == "off":
+            changes.append({
+                "id": f"firewall.{prof}",
+                "target": "firewall",
+                "from": "on",
+                "to": "off",
+                "profile": prof,
+            })
+    return changes
+
+
+def refresh_baseline_connectivity(baseline: dict) -> dict:
+    """Update connectivity probe only — never poison golden adapters/IP/DNS."""
+    if not baseline:
+        return baseline
+    row = dict(baseline)
+    row["connectivity"] = check_connectivity()
+    # Keep captured_at as golden timestamp; probe time is separate.
+    row["last_probe_at"] = datetime.now(timezone.utc).isoformat()
+    row["sig"] = _sign_baseline(row)
+    try:
+        _atomic_write(BASELINE_FILE, row)
+    except Exception as e:
+        log(f"[NET-GUARD] connectivity refresh write failed: {e}")
+    return row
+
+
+def list_baseline_history() -> List[dict]:
+    history: List[dict] = []
+    try:
+        if not os.path.isdir(BASELINE_HISTORY_DIR):
+            return history
+        files = sorted(
+            (os.path.join(BASELINE_HISTORY_DIR, f)
+             for f in os.listdir(BASELINE_HISTORY_DIR)
+             if f.startswith("network_baseline.") and f.endswith(".json")),
+        )
+        for path in files[-BASELINE_KEEP:]:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    row = json.load(fh)
+                history.append({
+                    "version": row.get("version"),
+                    "captured_at": row.get("captured_at"),
+                    "verified": verify_baseline(row),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return history
 
 
 # ── Detection scoring (pure, testable) ───────────────────────────────
@@ -488,10 +713,16 @@ class NetworkGuard:
         self._trigger_dedupe: Dict[str, float] = {}
         self._TRIGGER_DEDUPE_SEC = 300
         self._NET_CUT_PERSIST_SEC = 15
+        self._last_auto_restore_mono = 0.0
+        self._AUTO_RESTORE_DEDUPE_SEC = 300
 
     # -- lifecycle --
 
     def start(self):
+        if get_maintenance().get("active"):
+            log("[NET-GUARD] maintenance active — detect/auto-restore paused")
+            self._running = False
+            return
         if self._running or not self.cfg.get("enabled", True):
             return
         self._running = True
@@ -504,12 +735,54 @@ class NetworkGuard:
     def stop(self):
         self._running = False
 
-    # -- A: baseline loop --
+    def enter_maintenance(self, reason: str = "operator", paused_by: str = "operator") -> dict:
+        """Pause detect + auto_restore while operator changes VPN/IP/drives."""
+        maint = set_maintenance(True, reason=reason, paused_by=paused_by)
+        self.stop()
+        log(f"[NET-GUARD] maintenance ON by={paused_by} reason={reason}")
+        out = dict(self.status())
+        out["ok"] = True
+        return out
+
+    def exit_maintenance(self, snapshot: bool = True, paused_by: str = "operator") -> dict:
+        """End maintenance; optionally capture golden baseline then resume."""
+        set_maintenance(False)
+        saved = None
+        if snapshot:
+            try:
+                saved = save_baseline(capture_baseline())
+                self._last_baseline = saved
+                log(f"[NET-GUARD] golden baseline v{saved.get('version')} after maintenance")
+            except Exception as e:
+                log(f"[NET-GUARD] post-maintenance snapshot failed: {e}")
+                return {"ok": False, "error": f"snapshot_failed:{e}", **self.status()}
+        # Resume if layer still enabled
+        if self.cfg.get("enabled", True):
+            self.start()
+        log(f"[NET-GUARD] maintenance OFF by={paused_by} snapshot={bool(snapshot)}")
+        out = dict(self.status())
+        out["ok"] = True
+        if saved:
+            out["baseline_version"] = saved.get("version")
+            out["captured_at"] = saved.get("captured_at")
+        return out
+
+    def snapshot_now(self) -> dict:
+        saved = save_baseline(capture_baseline())
+        self._last_baseline = saved
+        return saved
+
+    # -- A: baseline loop (golden — no poison) --
 
     def _baseline_loop(self):
         try:
-            self._last_baseline = save_baseline(capture_baseline())
-            log(f"[NET-GUARD] baseline v{self._last_baseline.get('version')} captured")
+            existing = load_baseline()
+            if existing and verify_baseline(existing):
+                self._last_baseline = existing
+                log(f"[NET-GUARD] golden baseline v{existing.get('version')} loaded")
+            else:
+                self._last_baseline = save_baseline(capture_baseline())
+                log(f"[NET-GUARD] baseline v{self._last_baseline.get('version')} captured")
         except Exception as e:
             log(f"[NET-GUARD] baseline capture error: {e}")
         interval = float(self.cfg.get("baseline_interval_sec", 1800))
@@ -517,12 +790,14 @@ class NetworkGuard:
             time.sleep(min(interval, 60))
             if not self._running:
                 break
-            # Only re-capture on the full interval boundary
+            # Connectivity probe only — never adopt attacker IP/DNS into golden.
             if int(time.time()) % max(int(interval), 60) < 60:
                 try:
-                    self._last_baseline = save_baseline(capture_baseline())
+                    base = self._last_baseline or load_baseline()
+                    if base:
+                        self._last_baseline = refresh_baseline_connectivity(base)
                 except Exception as e:
-                    log(f"[NET-GUARD] baseline refresh error: {e}")
+                    log(f"[NET-GUARD] connectivity refresh error: {e}")
 
     # -- B: detection loop --
 
@@ -536,11 +811,13 @@ class NetworkGuard:
                 log(f"[NET-GUARD] detect error: {e}")
 
     def _evaluate(self, interval: float):
+        if get_maintenance().get("active"):
+            return
         baseline = self._last_baseline or load_baseline()
         conn = check_connectivity()
-        # Only bother enumerating adapters when internet reachability actually
-        # dropped — and even then adapter churn is informational, not a trigger.
-        conn["_adapters"] = collect_adapters() if self._maybe_net_change(baseline, conn) else None
+        # Surface watch always needs adapters for auto_restore_network + dashboard.
+        live_adapters = collect_adapters()
+        conn["_adapters"] = live_adapters if self._maybe_net_change(baseline, conn) else None
         netdiff = diff_connectivity(baseline, conn)
 
         # Short Wi-Fi flaps: require sustained internet_lost before net_cut scores
@@ -557,6 +834,9 @@ class NetworkGuard:
         netdiff = dict(netdiff)
         netdiff["net_cut"] = bool(net_cut)
 
+        # Network-surface auto restore (contract 1.4.14) — independent of bomb score
+        self._maybe_auto_restore_network(baseline, live_adapters)
+
         storm_suspects = self._fs_storm_suspects(interval)
         fs_storm = bool(storm_suspects)
         suspicious_origin = any(s.get("suspicious_origin") for s in storm_suspects)
@@ -571,13 +851,67 @@ class NetworkGuard:
                 t for t, on in (("network_cut", netdiff["net_cut"]),
                                 ("fs_storm", fs_storm)) if on
             ) or "fs_storm"
-            # net_cut + fs_storm are corroborating-but-weak signals: a real
-            # encryptor also renames en masse / changes extensions / drops
-            # ransom notes. Without such a strong signal we treat this as
-            # suspicious and ALERT only — we never freeze processes on it.
             strong = self._has_strong_signal()
             self._trigger(trigger, score, netdiff, storm_suspects, baseline,
                           strong=strong)
+
+    def _maybe_auto_restore_network(
+        self,
+        baseline: Optional[dict],
+        live_adapters: Optional[List[dict]],
+    ) -> None:
+        if not bool(self.cfg.get("auto_restore_network", True)):
+            return
+        if get_maintenance().get("active"):
+            return
+        if not baseline or not verify_baseline(baseline):
+            return
+        now = time.time()
+        if now - self._last_auto_restore_mono < self._AUTO_RESTORE_DEDUPE_SEC:
+            return
+        changes = diff_network_surface(baseline, live_adapters=live_adapters)
+        if not changes:
+            return
+        targets = sorted({c.get("target") for c in changes if c.get("target")})
+        log(f"[NET-GUARD] auto_restore_network targets={targets} n={len(changes)}")
+        self._last_auto_restore_mono = now
+        out = self.restore_network(baseline=baseline, targets=list(targets))
+        self._emit_surface_restored(changes, out)
+
+    def _emit_surface_restored(self, changes: List[dict], restored: dict) -> None:
+        if not self.alert_pipeline:
+            return
+        actions = restored.get("restore_actions") or []
+        alert = {
+            "severity": "warning",
+            "threat_type": "network_surface_restored",
+            "title": "Ağ yüzeyi golden baseline'dan geri yüklendi",
+            "description": "; ".join(
+                f"{c.get('id')}->{c.get('to')}" for c in changes[:8]
+            ),
+            "threat_score": 55,
+            "target_service": "SYSTEM",
+            "recommended_action": "review_network",
+            "force_urgent": False,
+            "system_context": {
+                "network_guard": {
+                    "trigger": "network_surface_drift",
+                    "network": {
+                        "restored": bool(actions),
+                        "restore_actions": actions,
+                        "changes": changes[:20],
+                    },
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        }
+        try:
+            if hasattr(self.alert_pipeline, "handle_alert"):
+                self.alert_pipeline.handle_alert(alert)
+            elif hasattr(self.alert_pipeline, "send_urgent"):
+                self.alert_pipeline.send_urgent(alert)
+        except Exception as e:
+            log(f"[NET-GUARD] surface restore alert failed: {e}")
 
     def _has_strong_signal(self) -> bool:
         """High-confidence ransomware proof from the shield (canary / VSS)."""
@@ -780,6 +1114,27 @@ class NetworkGuard:
                     _run(["netsh", "interface", "set", "interface",
                           f'name={a["name"]}', "admin=enable"])
                     actions.append(f"adapter_enable:{a['name']}")
+        if do("ipv4"):
+            for a in baseline.get("adapters", []):
+                name = a.get("name")
+                if not name or str(a.get("state")).lower() != "up":
+                    continue
+                if a.get("dhcp", True):
+                    _run(["netsh", "interface", "ip", "set", "address",
+                          f"name={name}", "dhcp"])
+                    actions.append(f"ipv4_dhcp:{name}")
+                elif a.get("ipv4"):
+                    ip = str(a.get("ipv4") or "").split(",")[0].strip()
+                    pfx = int(a.get("prefix_length") or 24)
+                    # netsh wants dotted mask; derive from prefix
+                    mask = _prefix_to_netmask(pfx)
+                    gw = str(a.get("gateway") or "").split(",")[0].strip()
+                    cmd = ["netsh", "interface", "ip", "set", "address",
+                           f"name={name}", "static", ip, mask]
+                    if gw:
+                        cmd.append(gw)
+                    _run(cmd)
+                    actions.append(f"ipv4_static:{name}")
         if do("dns"):
             for a in baseline.get("adapters", []):
                 dns = a.get("dns") or []
@@ -897,31 +1252,120 @@ class NetworkGuard:
                 age = int((datetime.now(timezone.utc) - dt).total_seconds())
         except Exception:
             pass
-        conn = (base.get("connectivity") or {})
+        live_adapters = []
+        live_drives = []
+        live_fw = {}
+        live_conn = {}
+        changes: List[dict] = []
+        try:
+            live_adapters = collect_adapters()
+            live_drives = collect_mapped_drives()
+            live_fw = collect_firewall()
+            live_conn = check_connectivity()
+            changes = diff_network_surface(
+                base, live_adapters=live_adapters,
+                live_drives=live_drives, live_firewall=live_fw,
+            ) if base else []
+        except Exception:
+            pass
         with self._lock:
             suspended = len(self._suspended)
+        maint = get_maintenance()
         return {
+            "present": True,
             "enabled": bool(self.cfg.get("enabled", True)),
+            "maintenance": bool(maint.get("active")),
+            "maintenance_started_at": maint.get("started_at"),
+            "maintenance_reason": maint.get("reason"),
+            "maintenance_paused_by": maint.get("paused_by"),
             "baseline_version": base.get("version"),
             "baseline_age_sec": age,
-            "internet_ok": conn.get("internet_ok"),
-            "mapped_drives": len(base.get("mapped_drives") or []),
+            "baseline_captured_at": base.get("captured_at"),
+            "verified": verify_baseline(base) if base else False,
+            "internet_ok": live_conn.get("internet_ok",
+                                         (base.get("connectivity") or {}).get("internet_ok")),
+            "mapped_drives": len(live_drives if live_drives is not None
+                                 else (base.get("mapped_drives") or [])),
             "suspended_processes": suspended,
             "last_trigger_ts": self._last_trigger_ts,
+            "drift": bool(changes),
+            "drift_count": len(changes),
             "auto_contain": bool(self.cfg.get("auto_contain", False)),
             "auto_restore": bool(self.cfg.get("auto_restore", False)),
             "auto_kill": bool(self.cfg.get("auto_kill", False)),
+            "auto_restore_network": bool(self.cfg.get("auto_restore_network", True))
+            and not bool(maint.get("active")),
+            "live": {
+                "adapters": live_adapters,
+                "mapped_drives": live_drives,
+                "firewall": live_fw,
+                "connectivity": live_conn,
+            },
+            "baseline": {
+                "adapters": base.get("adapters") or [],
+                "mapped_drives": base.get("mapped_drives") or [],
+                "firewall": base.get("firewall") or {},
+            },
         }
 
     def list_baseline(self) -> dict:
         base = self._last_baseline or load_baseline() or {}
+        live_adapters = collect_adapters()
+        live_drives = collect_mapped_drives()
+        live_fw = collect_firewall()
+        live_conn = check_connectivity()
+        changes = diff_network_surface(
+            base, live_adapters=live_adapters,
+            live_drives=live_drives, live_firewall=live_fw,
+        ) if base else []
         return {
             "version": base.get("version"),
             "captured_at": base.get("captured_at"),
+            "verified": verify_baseline(base) if base else False,
+            "baseline": {
+                "adapters": base.get("adapters") or [],
+                "mapped_drives": base.get("mapped_drives") or [],
+                "shares": base.get("shares") or [],
+                "firewall": base.get("firewall") or {},
+                "connectivity": base.get("connectivity") or {},
+            },
+            # Backward-compatible flat keys
             "mapped_drives": base.get("mapped_drives") or [],
             "shares": base.get("shares") or [],
-            "adapters": [{"name": a.get("name"), "state": a.get("state"),
-                          "dns": a.get("dns")} for a in (base.get("adapters") or [])],
+            "adapters": base.get("adapters") or [],
             "firewall": base.get("firewall") or {},
-            "verified": verify_baseline(base) if base else False,
+            "live": {
+                "adapters": live_adapters,
+                "mapped_drives": live_drives,
+                "firewall": live_fw,
+                "connectivity": live_conn,
+            },
+            "drift": bool(changes),
+            "changes": changes,
+            "history": list_baseline_history(),
+            "auto_restore_network": bool(self.cfg.get("auto_restore_network", True)),
+        }
+
+    def diff_now(self, version: Optional[int] = None) -> dict:
+        baseline = None
+        if version is not None:
+            baseline = load_baseline_version(int(version))
+            if not baseline:
+                return {"error": "rollback_baseline_not_found_or_invalid"}
+        else:
+            baseline = self._last_baseline or load_baseline()
+        if not baseline:
+            return {"error": "no_baseline"}
+        if not verify_baseline(baseline):
+            return {"error": "baseline_signature_invalid"}
+        changes = diff_network_surface(baseline)
+        return {
+            "baseline_version": baseline.get("version"),
+            "changes": changes,
+            "drift": bool(changes),
+            "live": {
+                "adapters": collect_adapters(),
+                "mapped_drives": collect_mapped_drives(),
+                "connectivity": check_connectivity(),
+            },
         }

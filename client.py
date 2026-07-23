@@ -410,6 +410,16 @@ class CloudHoneypotClient:
                 except Exception as nge:
                     log(f"⚠️ NetworkGuard init failed: {nge}")
                     self.network_guard = None
+                # System Recovery — policy/service/firewall allowlist (≥4.9.12)
+                try:
+                    from client_system_recovery import SystemRecoveryGuard
+                    self.system_recovery = SystemRecoveryGuard(
+                        alert_pipeline=self.alert_pipeline,
+                        enabled=True,
+                    )
+                except Exception as sre:
+                    log(f"⚠️ SystemRecovery init failed: {sre}")
+                    self.system_recovery = None
                 self.health_monitor = SystemHealthMonitor(
                     api_client=self.api_client,
                     token_getter=lambda: self.state.get("token", ""),
@@ -445,6 +455,7 @@ class CloudHoneypotClient:
                 self.ransomware_shield = None
                 self.health_monitor = None
                 self.process_protection = None
+                self.system_recovery = None
 
         # Wire ransomware shield into remote command executor (created earlier)
         if getattr(self, "remote_commands", None) is not None and self.ransomware_shield is not None:
@@ -452,6 +463,10 @@ class CloudHoneypotClient:
         # Wire network guard into remote command executor + health monitor
         if getattr(self, "remote_commands", None) is not None and self.network_guard is not None:
             self.remote_commands.network_guard = self.network_guard
+        if getattr(self, "remote_commands", None) is not None and getattr(
+            self, "system_recovery", None
+        ) is not None:
+            self.remote_commands.system_recovery = self.system_recovery
         if getattr(self, "health_monitor", None) is not None and self.network_guard is not None:
             self.health_monitor.network_guard = self.network_guard
         if getattr(self, "health_monitor", None) is not None:
@@ -1069,19 +1084,30 @@ class CloudHoneypotClient:
                 if self.network_guard:
                     try:
                         from client_network_guard import load_config as _ng_load_config
+                        from client_network_guard import get_maintenance as _ng_maint
                         ng_cfg = _ng_load_config(config)
                         self.network_guard.cfg.update(ng_cfg)
-                        if ng_cfg.get("enabled", True):
+                        if _ng_maint().get("active"):
+                            self.network_guard.stop()
+                            log("[CONFIG-SYNC] network_guard maintenance — stay paused")
+                        elif ng_cfg.get("enabled", True):
                             self.network_guard.start()
                         else:
                             self.network_guard.stop()
                         log(
                             "[CONFIG-SYNC] network_guard "
                             f"enabled={bool(ng_cfg.get('enabled', True))} "
+                            f"maintenance={bool(_ng_maint().get('active'))} "
                             "mode=alert_only"
                         )
                     except Exception as nge:
                         log(f"[CONFIG-SYNC] network_guard apply error: {nge}")
+
+                if getattr(self, "system_recovery", None):
+                    try:
+                        self.system_recovery.start()
+                    except Exception as sre:
+                        log(f"[CONFIG-SYNC] system_recovery start error: {sre}")
 
                 log("[CONFIG-SYNC] Threat config refreshed from backend")
 
@@ -1480,6 +1506,7 @@ class CloudHoneypotClient:
             "rs_quarantine": self._ipc_rs_quarantine_summary(),
             "persistence": self._ipc_persistence_summary(),
             "network_guard": self._ipc_network_guard_summary(),
+            "system_recovery": self._ipc_system_recovery_summary(),
             "ransomware_running": self._ipc_rs_running(),
             "resilience": self._ipc_resilience_summary(),
             "resources": self._ipc_resources_summary(),
@@ -1500,16 +1527,20 @@ class CloudHoneypotClient:
             return {"present": False}
         try:
             st = ng.status() or {}
-            return {
-                "present": True,
-                "enabled": bool(st.get("enabled", True)),
-                "running": bool(getattr(ng, "_running", False)),
-                "suspended_processes": int(st.get("suspended_processes") or 0),
-                "baseline_age_sec": st.get("baseline_age_sec"),
-                "internet_ok": st.get("internet_ok"),
-            }
+            st["present"] = True
+            st["running"] = bool(getattr(ng, "_running", False))
+            return st
         except Exception:
             return {"present": True}
+
+    def _ipc_system_recovery_summary(self) -> dict:
+        sr = getattr(self, "system_recovery", None)
+        if sr is None:
+            return {"present": False}
+        try:
+            return sr.status()
+        except Exception:
+            return {"present": True, "enabled": True}
 
     def _ipc_persistence_summary(self) -> dict:
         try:
@@ -1652,6 +1683,42 @@ class CloudHoneypotClient:
                         _send(json.dumps(payload, ensure_ascii=False))
                     except Exception as e:
                         log(f"[CTRL] CLEAR_FIREWALL error: {e}")
+                        _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+                    continue
+
+                if cmd_u in ("NG_MAINT_START", "NG_MAINT_END", "NG_MAINT_END_SNAPSHOT",
+                             "NG_SNAPSHOT"):
+                    try:
+                        ng = getattr(self, "network_guard", None)
+                        if ng is None:
+                            _send(json.dumps({
+                                "ok": False, "error": "no_network_guard",
+                            }, ensure_ascii=False))
+                            continue
+                        if cmd_u == "NG_MAINT_START":
+                            out = ng.enter_maintenance(
+                                reason="gui_maintenance", paused_by="gui",
+                            )
+                        elif cmd_u == "NG_MAINT_END_SNAPSHOT":
+                            out = ng.exit_maintenance(
+                                snapshot=True, paused_by="gui",
+                            )
+                        elif cmd_u == "NG_MAINT_END":
+                            out = ng.exit_maintenance(
+                                snapshot=False, paused_by="gui",
+                            )
+                        else:
+                            saved = ng.snapshot_now()
+                            out = {
+                                "ok": True,
+                                "version": saved.get("version"),
+                                "captured_at": saved.get("captured_at"),
+                            }
+                        if "ok" not in out:
+                            out = {"ok": True, **out}
+                        _send(json.dumps(out, ensure_ascii=False))
+                    except Exception as e:
+                        log(f"[CTRL] NG_MAINT error: {e}")
                         _send(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
                     continue
 
@@ -2951,6 +3018,8 @@ class CloudHoneypotClient:
                 self.ransomware_shield.start()
             if getattr(self, "network_guard", None):
                 self.network_guard.start()
+            if getattr(self, "system_recovery", None):
+                self.system_recovery.start()
             if getattr(self, "health_monitor", None):
                 self.health_monitor.start()
                 # Push sessions/processes immediately so dashboard is not empty for ~60s

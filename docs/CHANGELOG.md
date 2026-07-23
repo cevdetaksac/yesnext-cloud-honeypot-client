@@ -1,3 +1,8 @@
+# v4.9.12
+- **System Recovery (contract 1.4.13):** saldırı yüzeyi allowlist — TaskMgr/Regedit/CMD policy, kritik servisler (VSS/wscsvc/EventLog/…), firewall profil state. İmzalı snapshot + drift watch (`system_recovery_drift`) + dashboard komutları `system_recovery_snapshot` / `list_system_recovery` / `system_recovery_diff` / `system_recovery_restore` (dry_run + confirm). Full registry dump yok. STATUS `system_recovery{}`. HKCU policy okuma/yazma SYSTEM daemon’da `HKEY_USERS\<interactive-SID>` üzerinden (saldırganın kilitlediği kullanıcı hive’ı).
+- **Network Guard dashboard panel (contract 1.4.14):** STATUS/`list_network_baseline` full live+golden adapters (IPv4/DNS/dhcp); `network_diff`; golden baseline zehirlenmez (periyodik yalnız connectivity); `auto_restore_network` default on (süreç contain hâlâ hard-off); IPv4 dhcp/static restore; bilinçli IP değişiminde önce `network_snapshot`.
+- **Network Guard bakım modu (contract 1.4.15):** GUI chip → duraklat / yedekle / başlat; IPC `NG_MAINT_*`; komutlar `network_maintenance_start` / `network_maintenance_end` (`snapshot` default true); local `network_guard_maintenance.json` cloud sync ile silinmez.
+
 # v4.9.11
 - **Alert sinyal hijyeni** ([CLIENT_ALERT_SIGNAL_HYGIENE.md](CLIENT_ALERT_SIGNAL_HYGIENE.md), cloud hedef ≥4.9.9):
   - `vssadmin list shadows` → `ransomware_process` yok; AlertPipeline urgent drop; yalnız delete/wbadmin delete critical

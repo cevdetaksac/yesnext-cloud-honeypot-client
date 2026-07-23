@@ -90,6 +90,11 @@ ALLOWED_COMMANDS: Set[str] = {
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
     # Network Guard (contract ≥4.7.0 — agent/network-guard.md)
     "network_snapshot", "network_restore", "list_network_baseline",
+    "network_diff",
+    "network_maintenance_start", "network_maintenance_end",
+    # System Recovery (contract ≥1.4.13 — agent/system-recovery.md)
+    "system_recovery_snapshot", "list_system_recovery",
+    "system_recovery_diff", "system_recovery_restore",
     # GUI PIN management from dashboard (contract ≥4.8.3)
     "set_gui_pin", "clear_gui_pin",
 }
@@ -121,6 +126,11 @@ _IR_URGENT_COMMANDS = frozenset({
     "create_user", "remote_logon", "set_autologon", "clear_autologon", "reboot",
     # Network Guard — offline bomb response must reach host instantly
     "network_snapshot", "network_restore", "list_network_baseline",
+    "network_diff",
+    "network_maintenance_start", "network_maintenance_end",
+    # System Recovery — attack-surface restore
+    "system_recovery_snapshot", "list_system_recovery",
+    "system_recovery_diff", "system_recovery_restore",
 })
 # Back-compat alias
 _CRITICAL_FAST_POLL = _IR_URGENT_COMMANDS
@@ -154,6 +164,8 @@ REQUIRES_CONFIRMATION: Set[str] = {
     "create_user", "remote_logon", "set_autologon", "reboot",
     # Network Guard — mutating restore only (see network_restore_requires_confirm)
     "network_restore",
+    # System Recovery — mutating restore (dry_run exempt via helper)
+    "system_recovery_restore",
     # GUI PIN — overwrite/reset local anti-tamper PIN needs operator confirm
     "set_gui_pin", "clear_gui_pin",
 }
@@ -161,6 +173,12 @@ REQUIRES_CONFIRMATION: Set[str] = {
 
 def network_restore_requires_confirm(params: Optional[dict] = None) -> bool:
     """True for mutating restore; False for dry-run plan-only (contract 1.4.5)."""
+    params = params or {}
+    return not bool(params.get("dry_run", False))
+
+
+def system_recovery_restore_requires_confirm(params: Optional[dict] = None) -> bool:
+    """True for mutating system recovery; False for dry-run (contract 1.4.13)."""
     params = params or {}
     return not bool(params.get("dry_run", False))
 
@@ -2576,14 +2594,48 @@ class RemoteCommandExecutor:
     def _cmd_network_snapshot(self, params: dict) -> dict:
         """Capture a fresh network baseline immediately."""
         try:
-            from client_network_guard import capture_baseline, save_baseline
-            saved = save_baseline(capture_baseline())
             ng = getattr(self, "network_guard", None)
             if ng is not None:
-                ng._last_baseline = saved
+                saved = ng.snapshot_now()
+            else:
+                from client_network_guard import capture_baseline, save_baseline
+                saved = save_baseline(capture_baseline())
             return {"success": True, "message": "Network baseline captured",
                     "data": {"version": saved.get("version"),
                              "captured_at": saved.get("captured_at")}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_maintenance_start(self, params: dict) -> dict:
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"success": False, "error": "NetworkGuard not available"}
+        try:
+            reason = str(params.get("reason") or "dashboard")[:120]
+            out = ng.enter_maintenance(reason=reason, paused_by="dashboard")
+            return {"success": True, "message": "Network Guard maintenance ON",
+                    "data": out}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_maintenance_end(self, params: dict) -> dict:
+        ng = getattr(self, "network_guard", None)
+        if ng is None:
+            return {"success": False, "error": "NetworkGuard not available"}
+        try:
+            # Default snapshot=true so intentional VPN/IP work becomes new golden
+            snapshot = bool(params.get("snapshot", True))
+            out = ng.exit_maintenance(snapshot=snapshot, paused_by="dashboard")
+            ok = bool(out.get("ok", True))
+            return {
+                "success": ok,
+                "message": (
+                    "Network Guard resumed (baseline refreshed)"
+                    if snapshot else "Network Guard resumed"
+                ),
+                "data": out,
+                "error": out.get("error"),
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -2592,13 +2644,79 @@ class RemoteCommandExecutor:
         try:
             if ng is not None:
                 return {"success": True, "data": ng.list_baseline()}
-            from client_network_guard import load_baseline, verify_baseline
+            from client_network_guard import load_baseline, verify_baseline, list_baseline_history
+            from client_network_guard import (
+                collect_adapters, collect_mapped_drives, collect_firewall,
+                check_connectivity, diff_network_surface,
+            )
             base = load_baseline() or {}
+            live_adapters = collect_adapters()
+            live_drives = collect_mapped_drives()
+            live_fw = collect_firewall()
+            changes = diff_network_surface(
+                base, live_adapters=live_adapters,
+                live_drives=live_drives, live_firewall=live_fw,
+            ) if base else []
             return {"success": True, "data": {
                 "version": base.get("version"),
                 "captured_at": base.get("captured_at"),
                 "verified": verify_baseline(base) if base else False,
+                "baseline": {
+                    "adapters": base.get("adapters") or [],
+                    "mapped_drives": base.get("mapped_drives") or [],
+                    "shares": base.get("shares") or [],
+                    "firewall": base.get("firewall") or {},
+                },
+                "live": {
+                    "adapters": live_adapters,
+                    "mapped_drives": live_drives,
+                    "firewall": live_fw,
+                    "connectivity": check_connectivity(),
+                },
+                "drift": bool(changes),
+                "changes": changes,
+                "history": list_baseline_history(),
             }}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_network_diff(self, params: dict) -> dict:
+        ng = getattr(self, "network_guard", None)
+        try:
+            ver = params.get("version")
+            if ng is not None:
+                out = ng.diff_now(version=ver)
+            else:
+                from client_network_guard import (
+                    load_baseline, load_baseline_version, verify_baseline,
+                    diff_network_surface, collect_adapters, collect_mapped_drives,
+                    check_connectivity,
+                )
+                if ver is not None:
+                    base = load_baseline_version(int(ver))
+                    if not base:
+                        return {"success": False,
+                                "error": "rollback_baseline_not_found_or_invalid"}
+                else:
+                    base = load_baseline()
+                if not base:
+                    return {"success": False, "error": "no_baseline"}
+                if not verify_baseline(base):
+                    return {"success": False, "error": "baseline_signature_invalid"}
+                changes = diff_network_surface(base)
+                out = {
+                    "baseline_version": base.get("version"),
+                    "changes": changes,
+                    "drift": bool(changes),
+                    "live": {
+                        "adapters": collect_adapters(),
+                        "mapped_drives": collect_mapped_drives(),
+                        "connectivity": check_connectivity(),
+                    },
+                }
+            if out.get("error"):
+                return {"success": False, "error": out["error"], "data": out}
+            return {"success": True, "data": out}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -2625,6 +2743,94 @@ class RemoteCommandExecutor:
                     "message": ("Network restore plan generated"
                                 if dry_run else "Network restore attempted"),
                     "data": out}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── System Recovery (contract ≥1.4.13 — agent/system-recovery.md) ─
+
+    def _cmd_system_recovery_snapshot(self, params: dict) -> dict:
+        try:
+            from client_system_recovery import save_snapshot
+            guard = getattr(self, "system_recovery", None)
+            if guard is not None:
+                saved = guard.snapshot_now()
+            else:
+                saved = save_snapshot()
+            return {
+                "success": True,
+                "message": "System recovery snapshot captured",
+                "data": {
+                    "version": saved.get("version"),
+                    "captured_at": saved.get("captured_at"),
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_list_system_recovery(self, params: dict) -> dict:
+        try:
+            from client_system_recovery import list_snapshots
+            guard = getattr(self, "system_recovery", None)
+            if guard is not None:
+                return {"success": True, "data": guard.status()}
+            return {"success": True, "data": list_snapshots()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_system_recovery_diff(self, params: dict) -> dict:
+        try:
+            from client_system_recovery import (
+                diff_against, load_snapshot, load_snapshot_version, verify_snapshot,
+            )
+            ver = params.get("version")
+            baseline = None
+            if ver is not None:
+                baseline = load_snapshot_version(int(ver))
+                if not baseline or not verify_snapshot(baseline):
+                    return {
+                        "success": False,
+                        "error": "rollback_baseline_not_found_or_invalid",
+                    }
+            else:
+                baseline = load_snapshot()
+            changes = diff_against(baseline=baseline)
+            return {
+                "success": True,
+                "data": {
+                    "baseline_version": (baseline or {}).get("version"),
+                    "changes": changes,
+                    "drift": bool(changes),
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _cmd_system_recovery_restore(self, params: dict) -> dict:
+        try:
+            from client_system_recovery import restore as sr_restore
+            targets = params.get("targets")
+            dry_run = bool(params.get("dry_run", False))
+            rollback_version = params.get("rollback_version")
+            out = sr_restore(
+                targets=targets,
+                dry_run=dry_run,
+                rollback_version=rollback_version,
+            )
+            ok = "error" not in out
+            self._recovery_audit(
+                "system_recovery_restore",
+                f"targets={targets or 'all'} dry_run={dry_run} "
+                f"actions={len(out.get('restore_actions') or [])}",
+            )
+            return {
+                "success": ok,
+                "message": (
+                    "System recovery plan generated"
+                    if dry_run else "System recovery attempted"
+                ),
+                "data": out,
+                "error": out.get("error"),
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 

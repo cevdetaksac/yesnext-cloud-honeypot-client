@@ -2045,7 +2045,7 @@ class ModernGUI:
             # (key, emoji, label_key, on_click)
             ("motor",      "⚙️", "prot_chip_motor",      self._detail_self_protect),
             ("ransomware", "🧬", "prot_chip_ransomware", self._detail_ransomware),
-            ("netguard",   "🌐", "prot_chip_netguard",   lambda: self._show_page("layers")),
+            ("netguard",   "🌐", "prot_chip_netguard",   self._detail_network_guard),
             ("guardian",   "🛟", "prot_chip_guardian",   self._detail_persistence),
             ("honeypots",  "🐝", "prot_chip_honeypots",  lambda: self._show_page("services")),
             ("quarantine", "🔐", "prot_chip_quarantine", self._detail_ransomware),
@@ -2129,16 +2129,21 @@ class ModernGUI:
         # 3) Network Guard
         ng = st.get("network_guard") or {}
         if ng.get("present"):
-            ng_on = bool(ng.get("running")) and bool(ng.get("enabled", True))
-            extra = ""
-            susp = int(ng.get("suspended_processes") or 0)
-            if susp:
-                extra = f" · {susp} susp"
-            self._set_prot_chip(
-                "netguard", (on if ng_on else off) + extra,
-                COLORS["orange"] if susp else (
-                    COLORS["green"] if ng_on else COLORS["red"]),
-            )
+            if ng.get("maintenance"):
+                self._set_prot_chip(
+                    "netguard", self.t("ng_chip_maintenance"), COLORS["orange"],
+                )
+            else:
+                ng_on = bool(ng.get("running")) and bool(ng.get("enabled", True))
+                extra = ""
+                susp = int(ng.get("suspended_processes") or 0)
+                if susp:
+                    extra = f" · {susp} susp"
+                self._set_prot_chip(
+                    "netguard", (on if ng_on else off) + extra,
+                    COLORS["orange"] if susp else (
+                        COLORS["green"] if ng_on else COLORS["red"]),
+                )
         else:
             local_ng = getattr(self.app, "network_guard", None)
             ng_on = bool(local_ng and getattr(local_ng, "_running", False))
@@ -2189,6 +2194,180 @@ class ModernGUI:
             self._set_prot_chip(
                 "quarantine", self.t("prot_quarantine_clear"), COLORS["green"]
             )
+
+    # ── Detail: Network Guard / bakım (VPN-IP) ── #
+    def _detail_network_guard(self):
+        popup = self._show_detail_window(
+            f"🌐 {self.t('prot_chip_netguard')}", height=520,
+        )
+        self._ng_detail_popup = popup
+        self._ng_detail_content = popup._content
+        self._refresh_network_guard_detail()
+
+    def _refresh_network_guard_detail(self):
+        content = getattr(self, "_ng_detail_content", None)
+        if content is None:
+            return
+        try:
+            for w in content.winfo_children():
+                w.destroy()
+        except Exception:
+            return
+
+        st = getattr(self, "_cached_daemon_status", None) or {}
+        ng = st.get("network_guard") or {}
+        if not ng.get("present"):
+            try:
+                from client_daemon_ipc import get_status
+                ng = (get_status(timeout=3.0) or {}).get("network_guard") or {}
+            except Exception:
+                ng = {}
+
+        maint = bool(ng.get("maintenance"))
+        running = bool(ng.get("running")) and bool(ng.get("enabled", True)) and not maint
+        status_txt = (
+            self.t("ng_status_maintenance") if maint
+            else (self.t("ng_status_on") if running else self.t("ng_status_off"))
+        )
+        status_color = (
+            COLORS["orange"] if maint
+            else (COLORS["green"] if running else COLORS["red"])
+        )
+        ctk.CTkLabel(
+            content, text=status_txt,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=status_color,
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+        ctk.CTkLabel(
+            content, text=self.t("ng_maint_help"),
+            font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+            wraplength=480, justify="left",
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        ver = ng.get("baseline_version")
+        age = ng.get("baseline_age_sec")
+        age_txt = f"{age}s" if age is not None else "—"
+        ctk.CTkLabel(
+            content,
+            text=self.t("ng_baseline_line").format(version=ver or "—", age=age_txt),
+            font=ctk.CTkFont(size=12), text_color=COLORS["text"],
+        ).pack(anchor="w", padx=8, pady=(0, 6))
+
+        live = (ng.get("live") or {}).get("adapters") or []
+        if live:
+            ctk.CTkLabel(
+                content, text=self.t("ng_live_adapters"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=COLORS["text_bright"],
+            ).pack(anchor="w", padx=8, pady=(4, 2))
+            for a in live[:6]:
+                line = (
+                    f"{a.get('name')}: {a.get('state')} · "
+                    f"{a.get('ipv4') or '—'} · DNS {', '.join(a.get('dns') or []) or '—'}"
+                )
+                ctk.CTkLabel(
+                    content, text=line, font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text_dim"],
+                ).pack(anchor="w", padx=12, pady=1)
+
+        btns = ctk.CTkFrame(content, fg_color="transparent")
+        btns.pack(fill="x", padx=8, pady=(14, 4))
+
+        def _run(action: str):
+            def _worker():
+                try:
+                    from client_daemon_ipc import (
+                        network_maintenance_start,
+                        network_maintenance_end,
+                        network_snapshot,
+                        get_status,
+                    )
+                    if action == "pause":
+                        out = network_maintenance_start()
+                    elif action == "snapshot":
+                        out = network_snapshot()
+                    elif action == "resume":
+                        out = network_maintenance_end(snapshot=True)
+                    else:
+                        out = {"ok": False, "error": "bad_action"}
+                    ok = bool(out.get("ok", out.get("success", False)))
+                    try:
+                        fresh = get_status(timeout=4.0) or {}
+                        if fresh.get("network_guard"):
+                            st2 = getattr(self, "_cached_daemon_status", None) or {}
+                            if isinstance(st2, dict):
+                                st2 = dict(st2)
+                                st2["network_guard"] = fresh["network_guard"]
+                                self._cached_daemon_status = st2
+                    except Exception:
+                        pass
+
+                    def _done():
+                        if ok:
+                            self.show_toast(
+                                self.t("prot_chip_netguard"),
+                                self.t(f"ng_toast_{action}_ok"),
+                                "info",
+                            )
+                        else:
+                            self.show_toast(
+                                self.t("prot_chip_netguard"),
+                                str(out.get("error") or self.t("ng_toast_fail")),
+                                "high",
+                            )
+                        self._refresh_network_guard_detail()
+                        try:
+                            self._refresh_protection_strip()
+                        except Exception:
+                            pass
+
+                    self._gui_safe(_done)
+                except Exception as e:
+                    err = str(e)
+                    self._gui_safe(lambda: self.show_toast(
+                        self.t("prot_chip_netguard"), err, "high",
+                    ))
+
+            threading.Thread(
+                target=_worker, name=f"GUI-NG-{action}", daemon=True,
+            ).start()
+
+        if not maint:
+            ctk.CTkButton(
+                btns, text=self.t("ng_btn_pause"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLORS["orange"], hover_color=COLORS["orange"],
+                height=32, command=lambda: _run("pause"),
+            ).pack(fill="x", pady=3)
+        else:
+            ctk.CTkButton(
+                btns, text=self.t("ng_btn_snapshot"),
+                font=ctk.CTkFont(size=12), height=32,
+                command=lambda: _run("snapshot"),
+            ).pack(fill="x", pady=3)
+            ctk.CTkButton(
+                btns, text=self.t("ng_btn_resume"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLORS["green"], hover_color=COLORS["green"],
+                height=32, command=lambda: _run("resume"),
+            ).pack(fill="x", pady=3)
+
+        def _open_layers():
+            pop = getattr(self, "_ng_detail_popup", None)
+            try:
+                if pop is not None:
+                    pop.destroy()
+            except Exception:
+                pass
+            self._show_page("layers")
+
+        ctk.CTkButton(
+            btns, text=self.t("ng_btn_layers"),
+            font=ctk.CTkFont(size=11), height=28,
+            fg_color="transparent", border_width=1,
+            border_color=COLORS["border"], text_color=COLORS["text"],
+            command=_open_layers,
+        ).pack(fill="x", pady=(8, 2))
 
     # ── Detail: Guardian / kalıcılık durumu ── #
     def _detail_persistence(self):

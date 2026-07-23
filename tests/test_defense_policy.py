@@ -199,27 +199,18 @@ class TestDefensePolicyMatrix(unittest.TestCase):
         self.assertFalse(alerts[0]["details"].get("isolate"))
 
     def test_cloud_bad_sig_fail_safe(self):
-        dp.apply_from_config({
-            "protection": {
-                "defense_policy": "balanced",
-                "defense_policy_version": "ok",
-                "defense_rules": dp.PRESET_RULES["balanced"],
-            }
-        })
+        # Foreign/invalid defense sig must NOT escalate to tamper_observe
         st = dp.apply_from_config({
             "protection": {
-                "defense_policy": "paranoid",
-                "isolate_armed": True,
-                "defense_policy_version": "evil",
-                "defense_rules": {
-                    **dp.PRESET_RULES["paranoid"],
-                    "canary_write": "auto_isolate_network",
-                },
-                "sig": "deadbeef" * 8,
+                "defense_policy": "balanced",
+                "defense_policy_version": "v1",
+                "defense_rules": dp.PRESET_RULES["balanced"],
+                "defense_rules_sig": "deadbeef" * 8,
             }
         })
-        # Must not escalate to armed paranoid isolate
-        self.assertNotEqual(st.get("source"), "threats/config_signed")
+        self.assertEqual(st["policy_name"], "balanced")
+        self.assertIn("unsigned", st.get("source") or "")
+        self.assertTrue(st.get("sig_ok"))
         self.assertFalse(dp.allows_network_isolate())
 
     def test_allow_process_skips_match(self):

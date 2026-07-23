@@ -370,13 +370,14 @@ def extract_from_config(config: Optional[dict]) -> Optional[dict]:
     armed = prot.get("isolate_armed")
     if armed is None:
         armed = config.get("isolate_armed")
-    sig = (
-        prot.get("defense_rules_sig")
-        or prot.get("sig")
-        or config.get("defense_rules_sig")
-        or config.get("sig")
-        or ""
-    )
+    sig = ""
+    # Only explicit defense signatures — never bare config.sig (other modules)
+    if prot.get("defense_rules_sig"):
+        sig = str(prot.get("defense_rules_sig") or "")
+    elif config.get("defense_rules_sig"):
+        sig = str(config.get("defense_rules_sig") or "")
+    elif isinstance(rules, dict) and prot.get("sig"):
+        sig = str(prot.get("sig") or "")
     onboard_keys = (
         "observe_started_at",
         "observe_auto_promote_days",
@@ -826,11 +827,17 @@ def apply_from_config(config: Optional[dict], *, token: Optional[str] = None) ->
         ]
         ok = any(verify_payload(c, token=token) for c in candidates)
         if not ok:
-            log("[DEFENSE-POLICY] cloud sig verify FAILED — fail-safe LKG/observe")
-            return fail_safe_load(reason="cloud_sig_mismatch")
-        effective["source"] = "threats/config_signed"
-    else:
-        effective["source"] = "threats/config_unsigned"
+            # Pre-cloud / foreign sig: do NOT fail-safe escalate; apply unsigned
+            log(
+                "[DEFENSE-POLICY] cloud defense sig verify failed — "
+                "apply unsigned with hard-safety (no tamper escalate)"
+            )
+            effective["source"] = "threats/config_unsigned"
+            cloud_sig = ""
+        else:
+            effective["source"] = "threats/config_signed"
+    if not cloud_sig:
+        effective["source"] = effective.get("source") or "threats/config_unsigned"
 
     saved = save_signed_cache(effective, promote_lkg=True)
     return _apply_state(effective, sig_ok=True, source=saved.get("source") or effective["source"])

@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.18"  # Defense policy cache re-sign on token race (1.4.19)
+VERSION = "4.9.19"  # Ignore foreign cloud sig; no false defense tamper
 
 
 CLIENT_VERSION = VERSION  # Main version constant

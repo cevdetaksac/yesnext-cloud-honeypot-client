@@ -1,10 +1,20 @@
 name: CI
 
+# Hosted runners fail instantly while the GitHub account has a billing lock:
+#   "The job was not started because your account is locked due to a billing issue."
+# Until billing is cleared (https://github.com/settings/billing), keep this
+# workflow_dispatch-only so pushes do not spam red CI notifications.
+# After unlock: restore the push/pull_request triggers below and
+#   gh api -X PUT repos/OWNER/REPO/actions/permissions --input - <<< '{"enabled":true}'
+#   gh workflow enable CI
+
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
+
+  # push:
+  #   branches: [main, master]
+  # pull_request:
+  #   branches: [main, master]
 
 jobs:
   test:

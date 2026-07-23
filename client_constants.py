@@ -36,7 +36,7 @@ def get_app_config():
     return _CONFIG
 
 # Application information
-VERSION = "4.9.22"  # Installer: rename locked _internal aside (no FileInUse stall)
+VERSION = "4.9.23"  # Installer: per-file relocate when _internal dir locked
 
 
 CLIENT_VERSION = VERSION  # Main version constant

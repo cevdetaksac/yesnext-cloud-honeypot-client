@@ -69,24 +69,74 @@ function Move-Aside([string]$path) {
     $stamp = Get-Date -Format "yyyyMMddHHmmss"
     $rnd = Get-Random -Maximum 9999
     $dest = "{0}.stale_{1}_{2}" -f $path, $stamp, $rnd
-    for ($i = 0; $i -lt 5; $i++) {
+
+    for ($i = 0; $i -lt 4; $i++) {
         try {
             Move-Item -LiteralPath $path -Destination $dest -Force -ErrorAction Stop
             Write-PrepLog ("Moved aside: {0} -> {1}" -f $path, (Split-Path $dest -Leaf))
             return $true
         } catch {
-            Start-Sleep -Milliseconds (120 * ($i + 1))
+            Start-Sleep -Milliseconds (150 * ($i + 1))
             Stop-ProcessesUnderInstallDir
             try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
         }
     }
-    # Last resort: clear attributes and try delete contents
-    try {
+
+    # Directory still locked (process cwd / open handle): move each FILE aside.
+    # Renaming an in-use file frees the original path for NSIS overwrite.
+    if (Test-Path $path -PathType Container) {
+        Write-PrepLog "Directory move failed - relocating files individually..."
+        try { New-Item -ItemType Directory -Path $dest -Force | Out-Null } catch {}
+        $failed = 0
         Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.PSIsContainer } |
             ForEach-Object {
-                try { $_.Attributes = 'Normal' } catch {}
+                try {
+                    $rel = $_.FullName.Substring($path.Length).TrimStart('\')
+                    $target = Join-Path $dest $rel
+                    $td = Split-Path $target -Parent
+                    if ($td -and -not (Test-Path $td)) {
+                        New-Item -ItemType Directory -Path $td -Force | Out-Null
+                    }
+                    try { $_.Attributes = 'Normal' } catch {}
+                    Move-Item -LiteralPath $_.FullName -Destination $target -Force -ErrorAction Stop
+                } catch {
+                    $failed++
+                    # Last chance: rename in place so NSIS can write the canonical name
+                    try {
+                        $alt = $_.FullName + ".stale"
+                        Move-Item -LiteralPath $_.FullName -Destination $alt -Force -ErrorAction Stop
+                    } catch {
+                        $failed++
+                    }
+                }
             }
-        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+        # Remove now-empty directories under $path
+        try {
+            Get-ChildItem -LiteralPath $path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+                Sort-Object { $_.FullName.Length } -Descending |
+                ForEach-Object {
+                    try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {}
+                }
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        } catch {}
+        if (-not (Test-Path $path)) {
+            Write-PrepLog ("File-level relocate ok -> {0}" -f (Split-Path $dest -Leaf))
+            return $true
+        }
+        # Path exists but may be empty enough for NSIS to recreate files
+        $leftFiles = @(Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue)
+        if ($leftFiles.Count -eq 0) {
+            Write-PrepLog "Tree emptied for overwrite"
+            return $true
+        }
+        Write-PrepLog ("WARN: {0} file(s) still present under {1}" -f $leftFiles.Count, $path)
+        return $false
+    }
+
+    try {
+        Get-Item -LiteralPath $path -Force | ForEach-Object { try { $_.Attributes = 'Normal' } catch {} }
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
         Write-PrepLog ("Removed: {0}" -f $path)
         return $true
     } catch {

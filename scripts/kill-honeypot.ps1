@@ -140,18 +140,27 @@ public class HpKill {
 function Stop-HoneypotProcessesFast {
     # 1) Fastest bulk kill
     try { & taskkill.exe /F /T /IM honeypot-client.exe 2>$null | Out-Null } catch {}
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='honeypot-client.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try { $_.Terminate() | Out-Null } catch {}
+            }
+    } catch {}
 
-    # 2) Per-PID TerminateProcess (bypasses DACL with SeDebug)
+    # 2) Per-PID TerminateProcess — use TERMINATE|SYNCHRONIZE (0x1F0FFF can fail under DACL)
     $procs = @(Get-Process -Name "honeypot-client" -ErrorAction SilentlyContinue)
     foreach ($proc in $procs) {
         $procId = [int]$proc.Id
-        try {
-            $h = [HpKill]::OpenProcess(0x1F0FFF, $false, $procId)
-            if ($h -ne [IntPtr]::Zero) {
-                [void][HpKill]::TerminateProcess($h, 1)
-                [void][HpKill]::CloseHandle($h)
-            }
-        } catch {}
+        foreach ($access in @(0x0001, 0x00100001, 0x1F0FFF)) {
+            try {
+                $h = [HpKill]::OpenProcess([uint32]$access, $false, $procId)
+                if ($h -ne [IntPtr]::Zero) {
+                    [void][HpKill]::TerminateProcess($h, 1)
+                    [void][HpKill]::CloseHandle($h)
+                    break
+                }
+            } catch {}
+        }
         try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
         try { & taskkill.exe /F /T /PID $procId 2>$null | Out-Null } catch {}
     }
@@ -167,9 +176,9 @@ Send-QuitCommandFast
 Enable-SeDebugPrivilege
 Ensure-KillTypes
 
-# Brief grace only if process still up after QUIT (Force: 50ms, else 150ms)
-$graceMs = 50
-if (-not $Force) { $graceMs = 150 }
+# Brief grace after QUIT so DACL disarm can complete (Force installs too)
+$graceMs = 400
+if (-not $Force) { $graceMs = 600 }
 Start-Sleep -Milliseconds $graceMs
 
 $maxRounds = 5

@@ -1,3 +1,6 @@
+# v4.9.23
+- **Installer FileInUse (hardened):** If `_internal` directory rename fails (Session-0 cwd lock), relocate each file individually (frees paths like `servicemanager.pyd` for overwrite). Stronger terminate (`Terminate` access + WMI) and longer post-QUIT grace for DACL disarm.
+
 # v4.9.22
 - **Installer FileInUse fix:** Before extract, kill install-dir processes, add Defender exclusion, and **rename** locked `_internal` / `honeypot-client.exe` aside (`.stale_*`) so NSIS never stalls on Abort/Retry/Ignore for `servicemanager.pyd` etc. `prepare-install-dir.ps1` + stronger `kill-honeypot.ps1`.
 
